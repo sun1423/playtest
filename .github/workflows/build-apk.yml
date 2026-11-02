@@ -1,0 +1,455 @@
+name: Chatterbox Playtest - ARM64 APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: playtest-arm64-\${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build arm64-v8a debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      UPSTREAM_COMMIT: 7613d13ccfeb5d90babb1b14c0d8cf2da2d70f63
+      ANDROID_PROJECT_DIR: ${{ runner.temp }}/chatterbox-android
+
+    steps:
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Fetch pinned Chatterbox Android implementation
+        shell: bash
+        run: |
+          git clone https://github.com/acul3/chatterbox-tts-android.git "$ANDROID_PROJECT_DIR"
+          git -C "$ANDROID_PROJECT_DIR" checkout --detach "$UPSTREAM_COMMIT"
+          echo "Using upstream commit: $(git -C "$ANDROID_PROJECT_DIR" rev-parse HEAD)"
+
+      - name: Generate Playtest changes from this workflow
+        shell: bash
+        run: |
+          cd "$ANDROID_PROJECT_DIR"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected one match, found {count}")
+              return text.replace(old, new, 1)
+
+          # Give this app its own package id and restrict native code to ARM64.
+          gradle = Path("app/build.gradle.kts")
+          text = gradle.read_text()
+          text = replace_once(
+              text,
+              'applicationId = "com.acul3.chatterboxtts"',
+              'applicationId = "com.sun1423.playtest"',
+              "applicationId"
+          )
+          text = replace_once(
+              text,
+              'abiFilters += listOf("arm64-v8a", "x86_64")',
+              'abiFilters += listOf("arm64-v8a")',
+              "ABI filter"
+          )
+          gradle.write_text(text)
+
+          Path("app/src/main/res/values/strings.xml").write_text(
+              '<?xml version="1.0" encoding="utf-8"?>\n'
+              '<resources>\n'
+              '    <string name="app_name">Chatterbox Playtest</string>\n'
+              '</resources>\n'
+          )
+
+          # Match the actual 23-language Chatterbox Multilingual model.
+          screen = Path("app/src/main/java/com/acul3/chatterboxtts/ui/MainScreen.kt")
+          text = screen.read_text()
+          languages = '''    val languages = listOf(
+                  "ar" to "Arabic",
+                  "da" to "Danish",
+                  "de" to "German",
+                  "el" to "Greek",
+                  "en" to "English",
+                  "es" to "Spanish",
+                  "fi" to "Finnish",
+                  "fr" to "French",
+                  "he" to "Hebrew",
+                  "hi" to "Hindi",
+                  "it" to "Italian",
+                  "ja" to "Japanese",
+                  "ko" to "Korean",
+                  "ms" to "Malay",
+                  "nl" to "Dutch",
+                  "no" to "Norwegian",
+                  "pl" to "Polish",
+                  "pt" to "Portuguese",
+                  "ru" to "Russian",
+                  "sv" to "Swedish",
+                  "sw" to "Swahili",
+                  "tr" to "Turkish",
+                  "zh" to "Chinese"
+              )'''
+          text, count = re.subn(
+              r'    val languages = listOf\([\s\S]*?\n    \)',
+              languages,
+              text,
+              count=1
+          )
+          if count != 1:
+              raise SystemExit("Could not replace Android language selector")
+
+          text = replace_once(
+              text,
+              'import android.widget.Toast',
+              'import android.widget.Toast\n'
+              'import androidx.activity.compose.rememberLauncherForActivityResult\n'
+              'import androidx.activity.result.contract.ActivityResultContracts',
+              "MainScreen imports"
+          )
+          text = replace_once(
+              text,
+              '    val scope = rememberCoroutineScope()',
+              '''    val scope = rememberCoroutineScope()
+              val profilePicker = rememberLauncherForActivityResult(
+                  ActivityResultContracts.OpenDocument()
+              ) { uri ->
+                  if (uri != null) {
+                      scope.launch { viewModel.importVoiceProfile(context, uri) }
+                  }
+              }''',
+              "profile picker"
+          )
+          profile_ui = '''            // Import a precomputed Chatterbox voice profile.
+                      OutlinedButton(
+                          onClick = {
+                              profilePicker.launch(arrayOf("application/zip", "application/octet-stream"))
+                          },
+                          modifier = Modifier.fillMaxWidth(),
+                          enabled = !state.isGenerating
+                      ) {
+                          Text("Import voice profile ZIP")
+                      }
+                      OutlinedButton(
+                          onClick = { viewModel.useDefaultVoice(context) },
+                          modifier = Modifier.fillMaxWidth(),
+                          enabled = !state.isGenerating
+                      ) {
+                          Text("Use bundled default voice")
+                      }
+                      Text(
+                          text = state.voiceProfileStatus,
+                          style = MaterialTheme.typography.bodyMedium,
+                          fontWeight = FontWeight.SemiBold
+                      )
+                      Text(
+                          text = "ZIP needs speaker_emb.bin (1,024 bytes) and cond_speech_tokens.bin (600 bytes). emotion_adv.bin (4 bytes) is optional. These are precomputed Chatterbox tensors, not a raw WAV recording.",
+                          style = MaterialTheme.typography.bodySmall,
+                          color = MaterialTheme.colorScheme.onSurfaceVariant
+                      )
+
+                      // Language selector'''
+          text = replace_once(text, '            // Language selector', profile_ui, "profile UI")
+          screen.write_text(text)
+
+          # Prefer the imported tensors over the bundled default-voice assets.
+          engine = Path("app/src/main/java/com/acul3/chatterboxtts/tts/ChatterboxTTS.kt")
+          text = engine.read_text()
+          text = replace_once(
+              text,
+              'import java.nio.ByteOrder',
+              'import java.nio.ByteOrder\nimport java.io.File',
+              "ChatterboxTTS imports"
+          )
+          helper = '''    private fun readConditioningBytes(name: String): ByteArray {
+                  val custom = File(context.filesDir, "voice-profile/$name")
+                  return if (custom.isFile) {
+                      custom.readBytes()
+                  } else {
+                      context.assets.open(name).use { it.readBytes() }
+                  }
+              }
+
+              // ── Asset loading helpers ─────────────────────────────────────────────────'''
+          text = replace_once(
+              text,
+              '    // ── Asset loading helpers ─────────────────────────────────────────────────',
+              helper,
+              "conditioning file helper"
+          )
+          text = text.replace(
+              'val bytes = context.assets.open(name).readBytes()',
+              'val bytes = readConditioningBytes(name)'
+          )
+          if text.count('val bytes = readConditioningBytes(name)') != 2:
+              raise SystemExit("Conditioning loader patch did not update both tensor readers")
+          engine.write_text(text)
+
+          # Tokenizer returns content tokens. ChatterboxTTS adds SOT/EOT once.
+          tokenizer = Path("app/src/main/java/com/acul3/chatterboxtts/tts/TextTokenizer.kt")
+          text = tokenizer.read_text()
+          text = replace_once(
+              text,
+              '        // Add SOT\n        tokens.add(Constants.SOT_TEXT)\n\n',
+              '        // SOT and EOT are added by ChatterboxTTS around the fixed input sequence.\n',
+              "tokenizer start marker"
+          )
+          text = replace_once(
+              text,
+              '        // Add EOT\n        tokens.add(Constants.EOT_TEXT)\n\n',
+              '',
+              "tokenizer end marker"
+          )
+          old_truncation = '''        // Truncate to max length
+                  val result = if (tokens.size > Constants.MAX_TEXT_LEN) {
+                      tokens.subList(0, Constants.MAX_TEXT_LEN - 1).toMutableList().also {
+                          it.add(Constants.EOT_TEXT)
+                      }
+                  } else {
+                      tokens
+                  }
+
+                  return result.toIntArray()'''
+          new_truncation = '''        // Keep content tokens only; ChatterboxTTS adds the fixed SOT/EOT markers.
+                  return tokens.take(Constants.MAX_TEXT_LEN).toIntArray()'''
+          # Match the actual indentation in the Kotlin source independently of this script's indentation.
+          pattern = (
+              r'        // Truncate to max length\n'
+              r'        val result = if \(tokens\.size > Constants\.MAX_TEXT_LEN\) \{\n'
+              r'            tokens\.subList\(0, Constants\.MAX_TEXT_LEN - 1\)\.toMutableList\(\)\.also \{\n'
+              r'                it\.add\(Constants\.EOT_TEXT\)\n'
+              r'            \}\n'
+              r'        \} else \{\n'
+              r'            tokens\n'
+              r'        \}\n\n'
+              r'        return result\.toIntArray\(\)'
+          )
+          text, count = re.subn(pattern, new_truncation, text, count=1)
+          if count != 1:
+              raise SystemExit("Could not fix tokenizer sequence-marker handling")
+          tokenizer.write_text(text)
+
+          # Add a safe ZIP importer for precomputed Chatterbox conditioning tensors.
+          vm = Path("app/src/main/java/com/acul3/chatterboxtts/tts/TTSViewModel.kt")
+          text = vm.read_text()
+          text = replace_once(
+              text,
+              'import android.content.Context',
+              'import android.content.Context\nimport android.net.Uri',
+              "ViewModel Android imports"
+          )
+          text = replace_once(
+              text,
+              'import java.io.File',
+              'import java.io.File\nimport java.io.FileOutputStream\nimport java.util.zip.ZipInputStream',
+              "ViewModel IO imports"
+          )
+          text = replace_once(
+              text,
+              '    val modelStatus: String = "Models not loaded. Will download on first generation (~2.6GB)."',
+              '    val modelStatus: String = "Models not loaded. First generation downloads several GB of model files."',
+              "download size notice"
+          )
+          text = replace_once(
+              text,
+              '    val modelStatus: String = "Models not loaded. First generation downloads several GB of model files."',
+              '    val modelStatus: String = "Models not loaded. First generation downloads several GB of model files.",\n'
+              '    val voiceProfileStatus: String = "Bundled default voice"',
+              "voice profile state"
+          )
+          methods = '''    suspend fun importVoiceProfile(context: Context, uri: Uri) {
+                  if (_state.value.isGenerating) return
+                  _state.update { it.copy(progressMessage = "Validating voice profile ZIP...", error = null) }
+                  val importDir = File(context.filesDir, ".voice-profile-import")
+                  try {
+                      withContext(Dispatchers.IO) {
+                          importDir.deleteRecursively()
+                          check(importDir.mkdirs() || importDir.isDirectory) { "Could not create import folder" }
+                          val expectedSizes = mapOf(
+                              "speaker_emb.bin" to 1024L,
+                              "cond_speech_tokens.bin" to 600L,
+                              "emotion_adv.bin" to 4L
+                          )
+                          val imported = mutableSetOf<String>()
+                          val raw = context.contentResolver.openInputStream(uri)
+                              ?: throw IllegalArgumentException("Cannot open selected ZIP")
+                          raw.use { input ->
+                              ZipInputStream(input).use { zip ->
+                                  var entry = zip.nextEntry
+                                  while (entry != null) {
+                                      val leaf = entry.name.substringAfterLast('/')
+                                      val name = if (leaf == "cond_prompt_speech_tokens.bin") {
+                                          "cond_speech_tokens.bin"
+                                      } else {
+                                          leaf
+                                      }
+                                      val expected = expectedSizes[name]
+                                      if (!entry.isDirectory && expected != null) {
+                                          require(imported.add(name)) { "Duplicate file in ZIP: " + name }
+                                          val outputFile = File(importDir, name)
+                                          var copied = 0L
+                                          FileOutputStream(outputFile).use { output ->
+                                              val buffer = ByteArray(4096)
+                                              while (true) {
+                                                  val count = zip.read(buffer)
+                                                  if (count < 0) break
+                                                  copied += count
+                                                  require(copied <= expected) { name + " is larger than expected" }
+                                                  output.write(buffer, 0, count)
+                                              }
+                                          }
+                                          require(copied == expected) {
+                                              name + " must be " + expected + " bytes; found " + copied
+                                          }
+                                      }
+                                      zip.closeEntry()
+                                      entry = zip.nextEntry
+                                  }
+                              }
+                          }
+                          require(imported.contains("speaker_emb.bin") &&
+                              imported.contains("cond_speech_tokens.bin")) {
+                              "ZIP needs speaker_emb.bin and cond_speech_tokens.bin"
+                          }
+                          if (!imported.contains("emotion_adv.bin")) {
+                              context.assets.open("emotion_adv.bin").use { source ->
+                                  FileOutputStream(File(importDir, "emotion_adv.bin")).use { target ->
+                                      source.copyTo(target)
+                                  }
+                              }
+                          }
+                          val destination = File(context.filesDir, "voice-profile")
+                          val backup = File(context.filesDir, ".voice-profile-backup")
+                          backup.deleteRecursively()
+                          if (destination.exists()) {
+                              check(destination.renameTo(backup)) { "Could not back up the current profile" }
+                          }
+                          if (!importDir.renameTo(destination)) {
+                              if (backup.exists()) backup.renameTo(destination)
+                              error("Could not save imported profile")
+                          }
+                          backup.deleteRecursively()
+                      }
+                      ttsEngine?.close()
+                      ttsEngine = null
+                      audioPlayer?.stop()
+                      audioPlayer?.release()
+                      audioPlayer = null
+                      lastAudioData = null
+                      _state.update {
+                          it.copy(
+                              progress = 0f,
+                              progressMessage = "Custom voice profile imported. Generate speech to use it.",
+                              error = null,
+                              audioReady = false,
+                              isPlaying = false,
+                              voiceProfileStatus = "Custom voice profile imported"
+                          )
+                      }
+                  } catch (e: Exception) {
+                      importDir.deleteRecursively()
+                      _state.update {
+                          it.copy(progressMessage = "", error = "Profile import failed: " + e.message)
+                      }
+                  }
+              }
+
+              fun useDefaultVoice(context: Context) {
+                  if (_state.value.isGenerating) return
+                  File(context.filesDir, "voice-profile").deleteRecursively()
+                  ttsEngine?.close()
+                  ttsEngine = null
+                  audioPlayer?.stop()
+                  audioPlayer?.release()
+                  audioPlayer = null
+                  lastAudioData = null
+                  _state.update {
+                      it.copy(
+                          audioReady = false,
+                          isPlaying = false,
+                          error = null,
+                          progressMessage = "Bundled default voice selected. Generate speech to use it.",
+                          voiceProfileStatus = "Bundled default voice"
+                      )
+                  }
+              }
+
+              suspend fun generate(context: Context) {'''
+          text = replace_once(
+              text,
+              '    suspend fun generate(context: Context) {',
+              methods,
+              "voice profile ViewModel methods"
+          )
+          vm.write_text(text)
+
+          print("Generated ARM64-only Chatterbox Playtest sources and voice-profile support.")
+          PY
+
+          # Replace the upstream placeholder with the actual multilingual tokenizer vocabulary.
+          mkdir -p app/src/main/assets
+          curl --fail --location --retry 3 \
+            "https://huggingface.co/acul3/chatterbox-executorch/resolve/main/grapheme_mtl_merged_expanded_v1.json" \
+            --output app/src/main/assets/grapheme_mtl_merged_expanded_v1.json
+
+          # Guard against silent patch drift.
+          grep -q 'abiFilters += listOf("arm64-v8a")' app/build.gradle.kts
+          ! grep -q 'x86_64' app/build.gradle.kts
+          grep -q '"hi" to "Hindi"' app/src/main/java/com/acul3/chatterboxtts/ui/MainScreen.kt
+          grep -q 'fun importVoiceProfile' app/src/main/java/com/acul3/chatterboxtts/tts/TTSViewModel.kt
+          test -s app/src/main/assets/grapheme_mtl_merged_expanded_v1.json
+
+      - name: Build debug APK
+        working-directory: ${{ runner.temp }}/chatterbox-android
+        shell: bash
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --stacktrace assembleDebug
+
+      - name: Verify APK is ARM64-only
+        working-directory: ${{ runner.temp }}/chatterbox-android
+        shell: bash
+        run: |
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          ABIS="$(unzip -Z1 "$APK" | awk -F/ '$1 == "lib" {print $2}' | sort -u)"
+          echo "Native APK ABIs:"
+          printf '%s\n' "$ABIS"
+          test "$ABIS" = "arm64-v8a"
+          mkdir -p "$GITHUB_WORKSPACE/output"
+          cp "$APK" "$GITHUB_WORKSPACE/output/Chatterbox-Playtest-arm64-v8a-debug.apk"
+          {
+            echo "## Chatterbox Playtest APK"
+            echo "- **ABI:** arm64-v8a only"
+            echo "- **Package:** com.sun1423.playtest"
+            echo "- **Upstream source commit:** $UPSTREAM_COMMIT"
+            echo "- **Hindi:** enabled with the model's supported language list"
+            echo "- **Voice profile:** import a ZIP of precomputed conditioning tensors"
+            echo "- **Model files:** downloaded by the app on first generation; several GB required"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload arm64-v8a APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Chatterbox-Playtest-arm64-v8a-debug
+          path: output/Chatterbox-Playtest-arm64-v8a-debug.apk
+          if-no-files-found: error
+          retention-days: 14
