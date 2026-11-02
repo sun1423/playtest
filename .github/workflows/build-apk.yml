@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 90
     env:
       UPSTREAM_COMMIT: 7613d13ccfeb5d90babb1b14c0d8cf2da2d70f63
-      ANDROID_PROJECT_DIR: ${{ runner.temp }}/chatterbox-android
+      ANDROID_PROJECT_DIR: /tmp/chatterbox-android
 
     steps:
       - name: Checkout workflow repository
@@ -209,7 +209,7 @@ jobs:
           text = replace_once(
               text,
               'import java.nio.ByteOrder',
-              'import java.nio.ByteOrder\\nimport java.io.File',
+              'import java.nio.ByteOrder' + chr(10) + 'import java.io.File',
               "VocoderPipeline imports"
           )
           text = replace_once(
@@ -224,18 +224,10 @@ jobs:
               }''',
               "vocoder profile reader"
           )
-          text = replace_once(
-              text,
-              '        val bytes = context.assets.open(name).readBytes()',
-              '        val bytes = conditioningBytes(name)',
-              "vocoder float asset reader"
-          )
-          text = replace_once(
-              text,
-              '        val bytes = context.assets.open(name).readBytes()',
-              '        val bytes = conditioningBytes(name)',
-              "vocoder integer asset reader"
-          )
+          old_asset_read = '        val bytes = context.assets.open(name).readBytes()'
+          if text.count(old_asset_read) != 2:
+              raise SystemExit("Expected two vocoder conditioning asset readers")
+          text = text.replace(old_asset_read, '        val bytes = conditioningBytes(name)')
           # Existing bundled prompt token assets are INT32, but the model input is INT64.
           text = replace_once(
               text,
