@@ -463,7 +463,7 @@ jobs:
           # Replace the upstream placeholder with the actual multilingual tokenizer vocabulary.
           mkdir -p app/src/main/assets
           curl --fail --location --retry 3 \
-            "https://huggingface.co/acul3/chatterbox-executorch/resolve/main/grapheme_mtl_merged_expanded_v1.json" \
+            "https://huggingface.co/ResembleAI/chatterbox/resolve/main/grapheme_mtl_merged_expanded_v1.json" \
             --output app/src/main/assets/grapheme_mtl_merged_expanded_v1.json
 
           # Guard against silent patch drift.
