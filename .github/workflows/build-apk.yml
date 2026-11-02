@@ -73,6 +73,18 @@ jobs:
           )
           gradle.write_text(text)
 
+          # Match the Android runtime to the ExecuTorch version used to export
+          # the Chatterbox PTE model files (see model repository Android guide).
+          version_catalog = Path("gradle/libs.versions.toml")
+          text = version_catalog.read_text()
+          text = replace_once(
+              text,
+              'executorch = "0.6.0"',
+              'executorch = "1.1.0"',
+              "ExecuTorch runtime/model version"
+          )
+          version_catalog.write_text(text)
+
           Path("app/src/main/res/values/strings.xml").write_text(
               '<?xml version="1.0" encoding="utf-8"?>\n'
               '<resources>\n'
@@ -472,6 +484,7 @@ jobs:
           grep -q '"hi" to "Hindi"' app/src/main/java/com/acul3/chatterboxtts/ui/MainScreen.kt
           grep -q 'fun importVoiceProfile' app/src/main/java/com/acul3/chatterboxtts/tts/TTSViewModel.kt
           grep -q 'private fun conditioningBytes' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
+          grep -q 'executorch = "1.1.0"' gradle/libs.versions.toml
           test -s app/src/main/assets/grapheme_mtl_merged_expanded_v1.json
 
       - name: Build debug APK
