@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: playtest-arm64-\${{ github.ref }}
+  group: playtest-arm64
   cancel-in-progress: true
 
 jobs:
@@ -161,7 +161,7 @@ jobs:
                           fontWeight = FontWeight.SemiBold
                       )
                       Text(
-                          text = "ZIP needs speaker_emb.bin (1,024 bytes) and cond_speech_tokens.bin (600 bytes). emotion_adv.bin (4 bytes) is optional. These are precomputed Chatterbox tensors, not a raw WAV recording.",
+                          text = "ZIP needs speaker_emb.bin (1,024), cond_speech_tokens.bin (600), prompt_tokens.bin (300), prompt_token_len.bin (4), xvector.bin (768), and prompt_mel.bin (100,480 bytes). emotion_adv.bin (4) is optional. Use precomputed profile tensors; raw WAV import is not supported.",
                           style = MaterialTheme.typography.bodySmall,
                           color = MaterialTheme.colorScheme.onSurfaceVariant
                       )
@@ -202,6 +202,59 @@ jobs:
           if text.count('val bytes = readConditioningBytes(name)') != 2:
               raise SystemExit("Conditioning loader patch did not update both tensor readers")
           engine.write_text(text)
+
+          # Apply the same selected profile to the S3Gen/vocoder conditioning inputs.
+          vocoder = Path("app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt")
+          text = vocoder.read_text()
+          text = replace_once(
+              text,
+              'import java.nio.ByteOrder',
+              'import java.nio.ByteOrder\\nimport java.io.File',
+              "VocoderPipeline imports"
+          )
+          text = replace_once(
+              text,
+              '    private val promptMel: Tensor by lazy { loadFloatAsset("prompt_mel.bin", longArrayOf(1, 314, 80)) }',
+              '''    private val promptMel: Tensor by lazy { loadFloatAsset("prompt_mel.bin", longArrayOf(1, 314, 80)) }
+
+              private fun conditioningBytes(name: String): ByteArray {
+                  val custom = File(context.filesDir, "voice-profile/$name")
+                  return if (custom.isFile) custom.readBytes()
+                  else context.assets.open(name).use { it.readBytes() }
+              }''',
+              "vocoder profile reader"
+          )
+          text = replace_once(
+              text,
+              '        val bytes = context.assets.open(name).readBytes()',
+              '        val bytes = conditioningBytes(name)',
+              "vocoder float asset reader"
+          )
+          text = replace_once(
+              text,
+              '        val bytes = context.assets.open(name).readBytes()',
+              '        val bytes = conditioningBytes(name)',
+              "vocoder integer asset reader"
+          )
+          # Existing bundled prompt token assets are INT32, but the model input is INT64.
+          text = replace_once(
+              text,
+              '''        val longs = LongArray(bytes.size / 8)
+                  buffer.asLongBuffer().get(longs)
+                  return Tensor.fromBlob(longs, shape)''',
+              '''        val elementCount = shape.fold(1L) { total, dimension -> total * dimension }.toInt()
+                  val longs = when (bytes.size) {
+                      elementCount * 8 -> LongArray(elementCount).also { buffer.asLongBuffer().get(it) }
+                      elementCount * 4 -> IntArray(elementCount).also { buffer.asIntBuffer().get(it) }
+                          .map { it.toLong() }.toLongArray()
+                      else -> throw IllegalArgumentException(
+                          "$name has an invalid byte length: ${bytes.size}"
+                      )
+                  }
+                  return Tensor.fromBlob(longs, shape)''',
+              "vocoder int32/int64 loader"
+          )
+          vocoder.write_text(text)
 
           # Tokenizer returns content tokens. ChatterboxTTS adds SOT/EOT once.
           tokenizer = Path("app/src/main/java/com/acul3/chatterboxtts/tts/TextTokenizer.kt")
@@ -286,7 +339,11 @@ jobs:
                           val expectedSizes = mapOf(
                               "speaker_emb.bin" to 1024L,
                               "cond_speech_tokens.bin" to 600L,
-                              "emotion_adv.bin" to 4L
+                              "emotion_adv.bin" to 4L,
+                              "prompt_tokens.bin" to 300L,
+                              "prompt_token_len.bin" to 4L,
+                              "xvector.bin" to 768L,
+                              "prompt_mel.bin" to 100480L
                           )
                           val imported = mutableSetOf<String>()
                           val raw = context.contentResolver.openInputStream(uri)
@@ -325,9 +382,16 @@ jobs:
                                   }
                               }
                           }
-                          require(imported.contains("speaker_emb.bin") &&
-                              imported.contains("cond_speech_tokens.bin")) {
-                              "ZIP needs speaker_emb.bin and cond_speech_tokens.bin"
+                          val required = setOf(
+                              "speaker_emb.bin",
+                              "cond_speech_tokens.bin",
+                              "prompt_tokens.bin",
+                              "prompt_token_len.bin",
+                              "xvector.bin",
+                              "prompt_mel.bin"
+                          )
+                          require(imported.containsAll(required)) {
+                              "ZIP is missing required voice tensors: " + (required - imported)
                           }
                           if (!imported.contains("emotion_adv.bin")) {
                               context.assets.open("emotion_adv.bin").use { source ->
@@ -415,6 +479,7 @@ jobs:
           ! grep -q 'x86_64' app/build.gradle.kts
           grep -q '"hi" to "Hindi"' app/src/main/java/com/acul3/chatterboxtts/ui/MainScreen.kt
           grep -q 'fun importVoiceProfile' app/src/main/java/com/acul3/chatterboxtts/tts/TTSViewModel.kt
+          grep -q 'private fun conditioningBytes' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
           test -s app/src/main/assets/grapheme_mtl_merged_expanded_v1.json
 
       - name: Build debug APK
