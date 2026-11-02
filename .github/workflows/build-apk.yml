@@ -475,14 +475,14 @@ jobs:
           test -s app/src/main/assets/grapheme_mtl_merged_expanded_v1.json
 
       - name: Build debug APK
-        working-directory: ${{ runner.temp }}/chatterbox-android
+        working-directory: /tmp/chatterbox-android
         shell: bash
         run: |
           chmod +x ./gradlew
           ./gradlew --no-daemon --stacktrace assembleDebug
 
       - name: Verify APK is ARM64-only
-        working-directory: ${{ runner.temp }}/chatterbox-android
+        working-directory: /tmp/chatterbox-android
         shell: bash
         run: |
           APK="app/build/outputs/apk/debug/app-debug.apk"
