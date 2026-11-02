@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: playtest-arm64
@@ -20,6 +20,7 @@ jobs:
     env:
       UPSTREAM_COMMIT: 7613d13ccfeb5d90babb1b14c0d8cf2da2d70f63
       ANDROID_PROJECT_DIR: /tmp/chatterbox-android
+      PLAYTEST_KEYSTORE_PASSWORD: ${{ secrets.PLAYTEST_KEYSTORE_PASSWORD }}
 
     steps:
       - name: Checkout workflow repository
@@ -62,7 +63,7 @@ jobs:
           text = replace_once(
               text,
               'applicationId = "com.acul3.chatterboxtts"',
-              'applicationId = "com.sun1423.playtest"',
+              'applicationId = "com.sun1423.playtest.v2"',
               "applicationId"
           )
           text = replace_once(
@@ -70,6 +71,30 @@ jobs:
               'abiFilters += listOf("arm64-v8a", "x86_64")',
               'abiFilters += listOf("arm64-v8a")',
               "ABI filter"
+          )
+          gradle.write_text(text)
+
+          # Use the same private PKCS12 key for every Playtest v2 build.
+          text = gradle.read_text()
+          text = replace_once(
+              text,
+              "    buildTypes {\n        release {",
+              """    signingConfigs {
+                  create("playtest") {
+                      storeFile = file(System.getenv("PLAYTEST_KEYSTORE_PATH"))
+                      storePassword = System.getenv("PLAYTEST_KEYSTORE_PASSWORD")
+                      keyAlias = "playtest"
+                      keyPassword = System.getenv("PLAYTEST_KEYSTORE_PASSWORD")
+                      storeType = "PKCS12"
+                  }
+              }
+
+              buildTypes {
+                  debug {
+                      signingConfig = signingConfigs.getByName("playtest")
+                  }
+                  release {""",
+              "persistent debug signing config"
           )
           gradle.write_text(text)
 
@@ -88,7 +113,7 @@ jobs:
           Path("app/src/main/res/values/strings.xml").write_text(
               '<?xml version="1.0" encoding="utf-8"?>\n'
               '<resources>\n'
-              '    <string name="app_name">Chatterbox Playtest</string>\n'
+              '    <string name="app_name">Chatterbox Playtest 2</string>\n'
               '</resources>\n'
           )
 
@@ -485,7 +510,26 @@ jobs:
           grep -q 'fun importVoiceProfile' app/src/main/java/com/acul3/chatterboxtts/tts/TTSViewModel.kt
           grep -q 'private fun conditioningBytes' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
           grep -q 'executorch = "1.1.0"' gradle/libs.versions.toml
+          grep -q 'applicationId = "com.sun1423.playtest.v2"' app/build.gradle.kts
+          grep -q 'storeType = "PKCS12"' app/build.gradle.kts
           test -s app/src/main/assets/grapheme_mtl_merged_expanded_v1.json
+
+      - name: Prepare permanent signing key
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.PLAYTEST_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.PLAYTEST_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${KEYSTORE_BASE64:-}" || -z "${KEYSTORE_PASSWORD:-}" ]]; then
+            echo "::error::Add PLAYTEST_KEYSTORE_BASE64 and PLAYTEST_KEYSTORE_PASSWORD in Settings > Secrets and variables > Actions, then rerun this workflow."
+            exit 1
+          fi
+          KEYSTORE_PATH="$RUNNER_TEMP/playtest-signing.p12"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          keytool -list -storetype PKCS12 -keystore "$KEYSTORE_PATH" \
+            -storepass "$KEYSTORE_PASSWORD" -alias playtest >/dev/null
+          echo "PLAYTEST_KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
 
       - name: Build debug APK
         working-directory: /tmp/chatterbox-android
@@ -505,21 +549,27 @@ jobs:
           printf '%s\n' "$ABIS"
           test "$ABIS" = "arm64-v8a"
           mkdir -p "$GITHUB_WORKSPACE/output"
-          cp "$APK" "$GITHUB_WORKSPACE/output/Chatterbox-Playtest-arm64-v8a-debug.apk"
+          cp "$APK" "$GITHUB_WORKSPACE/output/Chatterbox-Playtest-v2-arm64-v8a.apk"
           {
             echo "## Chatterbox Playtest APK"
             echo "- **ABI:** arm64-v8a only"
-            echo "- **Package:** com.sun1423.playtest"
+            echo "- **Package:** com.sun1423.playtest.v2"
             echo "- **Upstream source commit:** $UPSTREAM_COMMIT"
             echo "- **Hindi:** enabled with the model's supported language list"
             echo "- **Voice profile:** import a ZIP of precomputed conditioning tensors"
             echo "- **Model files:** downloaded by the app on first generation; several GB required"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload arm64-v8a APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: Chatterbox-Playtest-arm64-v8a-debug
-          path: output/Chatterbox-Playtest-arm64-v8a-debug.apk
-          if-no-files-found: error
-          retention-days: 14
+      - name: Publish direct APK download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="playtest-v2-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}"
+          gh release create "$TAG" \
+            output/Chatterbox-Playtest-v2-arm64-v8a.apk \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Chatterbox Playtest 2 - ARM64 APK" \
+            --notes "Direct APK download. Package: com.sun1423.playtest.v2. ABI: arm64-v8a only. Signed with the persistent Playtest v2 key." \
+            --prerelease
