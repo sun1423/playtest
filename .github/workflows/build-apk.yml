@@ -1752,6 +1752,30 @@ jobs:
               "speech_toks_padded = torch.zeros(1, MAX_SPEECH_TOKENS, dtype=torch.int32)",
           )
 
+          old_speech_len = "speech_tok_len = torch.tensor([n_tokens], dtype=torch.long)"
+          if source.count(old_speech_len) != 1:
+              raise SystemExit("Expected exactly one S3Gen speech-token length tensor")
+          source = source.replace(
+              old_speech_len,
+              "speech_tok_len = torch.tensor([n_tokens], dtype=torch.int32)",
+          )
+
+          old_prompt_tokens = 'prompt_tokens_raw = conds.gen["prompt_token"].cpu().long()'
+          if source.count(old_prompt_tokens) != 1:
+              raise SystemExit("Expected exactly one S3Gen prompt-token tensor")
+          source = source.replace(
+              old_prompt_tokens,
+              'prompt_tokens_raw = conds.gen["prompt_token"].cpu().to(torch.int32)',
+          )
+
+          old_prompt_len = "prompt_tok_len = torch.tensor([min(conds.gen[\"prompt_token_len\"].item(), PROMPT_LEN)], dtype=torch.long)"
+          if source.count(old_prompt_len) != 1:
+              raise SystemExit("Expected exactly one S3Gen prompt-token length tensor")
+          source = source.replace(
+              old_prompt_len,
+              "prompt_tok_len = torch.tensor([min(conds.gen[\"prompt_token_len\"].item(), PROMPT_LEN)], dtype=torch.int32)",
+          )
+
 
           source = source.replace("MAX_GEN = 200", "MAX_GEN = 16")
           old_fallback = """if n_tokens == 0:
