@@ -111,6 +111,22 @@ jobs:
           )
           gradle.write_text(text)
 
+          # Increment versionCode on every Actions run so signed builds can update an installed v2 app.
+          text = gradle.read_text()
+          text = replace_once(
+              text,
+              "        versionCode = 1",
+              '        versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()',
+              "automatic Android versionCode"
+          )
+          text = replace_once(
+              text,
+              '        versionName = "1.0"',
+              '        versionName = "2.0." + (System.getenv("GITHUB_RUN_NUMBER") ?: "1")',
+              "automatic Android versionName"
+          )
+          gradle.write_text(text)
+
           # Use the same private PKCS12 key for every Playtest v2 build.
           text = gradle.read_text()
           text = replace_once(
@@ -966,6 +982,7 @@ jobs:
                   File(context.filesDir, MODELS_DIR).also { it.mkdirs() }
               }
               private val revisionFile: File by lazy { File(modelsDir, REVISION_FILE) }
+              private val verifiedFiles = mutableMapOf<String, Pair<Long, Long>>()
 
               fun getModelPath(filename: String): String {
                   require(filename in Constants.MODEL_FILES) { "Unknown model filename: " + filename }
@@ -989,9 +1006,16 @@ jobs:
                   val file = File(modelsDir, name)
                   val expectedSize = Constants.MODEL_SIZES[name] ?: return false
                   val expectedSha = Constants.MODEL_SHA256[name] ?: return false
-                  if (!file.isFile || file.length() != expectedSize) return false
+                  if (!file.isFile || file.length() != expectedSize) {
+                      verifiedFiles.remove(name)
+                      return false
+                  }
+                  val currentStat = Pair(file.length(), file.lastModified())
+                  if (verifiedFiles[name] == currentStat) return true
                   return try {
-                      sha256(file) == expectedSha
+                      val valid = sha256(file) == expectedSha
+                      if (valid) verifiedFiles[name] = currentStat else verifiedFiles.remove(name)
+                      valid
                   } catch (e: Exception) {
                       Log.w(TAG, "Could not verify cached model " + name, e)
                       false
@@ -1026,6 +1050,7 @@ jobs:
                           }
 
                           val target = File(modelsDir, name)
+                          verifiedFiles.remove(name)
                           target.delete()
                           File(modelsDir, name + ".tmp").delete()
                           val expectedSize = Constants.MODEL_SIZES[name]
@@ -1106,6 +1131,7 @@ jobs:
                       require(target.isFile && target.length() == expectedSize) {
                           "Final file size mismatch for " + target.name
                       }
+                      verifiedFiles[target.name] = Pair(target.length(), target.lastModified())
                   } finally {
                       if (temp.exists()) temp.delete()
                   }
