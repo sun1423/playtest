@@ -1234,6 +1234,7 @@ jobs:
 
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           def replace_once(text, old, new, label):
               count = text.count(old)
@@ -1286,15 +1287,9 @@ jobs:
                   }''',
               "T3 text token validation"
           )
-          text = replace_once(
-              text,
-              chr(10).join([
-                  "    fun close() {",
-                  "        condSpeechEmbModel?.close()",
-                  "        condEncModel?.close()",
-                  "    }"
-              ]),
-              '''    fun close() {
+          text, cleanup_count = re.subn(
+              r"(?m)^    fun close\\(\\) \\{[\\s\\S]*?^    \\}",
+              """    fun close() {
                   for (model in openedModels.asReversed()) {
                       try {
                           model.close()
@@ -1309,9 +1304,12 @@ jobs:
                   vocoderPipeline = null
                   cachedCondEmb = null
                   tokenizer = null
-              }''',
-              "complete native model cleanup"
+              }""",
+              text,
+              count=1
           )
+          if cleanup_count != 1:
+              raise SystemExit("Could not replace ChatterboxTTS native cleanup method")
           engine.write_text(text)
 
           vm = Path("app/src/main/java/com/acul3/chatterboxtts/tts/TTSViewModel.kt")
@@ -1387,6 +1385,7 @@ jobs:
           text = replace_once(
               text,
               chr(10).join([
+                  "            // Trim to actual audio for this chunk",
                   "            val actualSamples = chunkLen * UPSAMPLE",
                   "            val wavChunk = wavChunkAll.copyOfRange(0, minOf(actualSamples, wavChunkAll.size))"
               ]),
