@@ -1288,7 +1288,12 @@ jobs:
           )
           text = replace_once(
               text,
-              '    fun close() {\\n        condSpeechEmbModel?.close()\\n        condEncModel?.close()\\n    }',
+              chr(10).join([
+                  "    fun close() {",
+                  "        condSpeechEmbModel?.close()",
+                  "        condEncModel?.close()",
+                  "    }"
+              ]),
               '''    fun close() {
                   for (model in openedModels.asReversed()) {
                       try {
@@ -1313,7 +1318,10 @@ jobs:
           text = vm.read_text()
           text = replace_once(
               text,
-              '        } catch (e: Exception) {\\n            Log.e("TTSViewModel", "Generation failed", e)',
+              chr(10).join([
+                  '        } catch (e: Exception) {',
+                  '            Log.e("TTSViewModel", "Generation failed", e)'
+              ]),
               '''        } catch (e: Exception) {
                       Log.e("TTSViewModel", "Generation failed", e)
                       try {
@@ -1378,13 +1386,21 @@ jobs:
           )
           text = replace_once(
               text,
-              '            val actualSamples = chunkLen * UPSAMPLE\\n            val wavChunk = wavChunkAll.copyOfRange(0, minOf(actualSamples, wavChunkAll.size))',
+              chr(10).join([
+                  "            val actualSamples = chunkLen * UPSAMPLE",
+                  "            val wavChunk = wavChunkAll.copyOfRange(0, minOf(actualSamples, wavChunkAll.size))"
+              ]),
               '            val wavChunk = wavChunkAll.copyOfRange(0, actualSamples)',
               "exact HiFiGAN trim"
           )
           text = replace_once(
               text,
-              '        return audioOut\\n    }\\n\\n    // ── Helpers',
+              chr(10).join([
+                  "        return audioOut",
+                  "    }",
+                  "",
+                  "    // ── Helpers"
+              ]),
               '''        require(audioOut.isNotEmpty() && audioOut.all { it.isFinite() }) {
                       "Vocoder produced an empty or non-finite waveform"
                   }
