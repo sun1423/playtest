@@ -1012,15 +1012,6 @@ jobs:
           grep -q 'MODEL_SIZES' app/src/main/java/com/acul3/chatterboxtts/tts/Constants.kt
           test -s app/src/main/assets/grapheme_mtl_merged_expanded_v1.json
           grep -q 'readLogBufferStatic' app/src/main/java/com/acul3/chatterboxtts/models/PteModel.kt
-          grep -q 'T3 prefill requires FP32 cond_emb' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
-          grep -q 'T3 prefill requires INT32 text_tokens' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
-          grep -q 'Tensor.fromBlob(intArrayOf(token)' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
-          grep -q 'Tensor.fromBlob(intArrayOf(step)' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
-          grep -q 'loadIntAsset("prompt_tokens.bin"' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
-          grep -q 'loadIntAsset("prompt_token_len.bin"' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
-          grep -q 'speechToksPadded = IntArray' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
-          ! grep -q 'LongArray(Constants.TEXT_SEQ_LEN)' app/src/main/java/com/acul3/chatterboxtts/tts/ChatterboxTTS.kt
-          ! grep -q 'LongArray(Constants.MAX_SPEECH_TOKENS_VOCODER)' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
 
       - name: Harden model cache, sampler, lifecycle and vocoder
         working-directory: /tmp/chatterbox-android
@@ -1844,6 +1835,16 @@ jobs:
           grep -q 'intArrayOf(nTokens)' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
           grep -q 'tensorScalarToInt(hLenTensor' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
           grep -q 'tensorScalarToInt(melLen1Tensor' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
+          grep -q 'T3 prefill requires FP32 cond_emb' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
+          grep -q 'T3 prefill requires INT32 text_tokens' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
+          grep -q 'Tensor.fromBlob(intArrayOf(token)' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
+          grep -q 'Tensor.fromBlob(intArrayOf(step)' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
+          grep -q 'loadIntAsset("prompt_tokens.bin"' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
+          grep -q 'loadIntAsset("prompt_token_len.bin"' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
+          grep -q 'speechToksPadded = IntArray' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
+          ! grep -q 'T3 text tokens must be INT64' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
+          ! grep -q 'LongArray(Constants.TEXT_SEQ_LEN)' app/src/main/java/com/acul3/chatterboxtts/tts/ChatterboxTTS.kt
+          ! grep -q 'LongArray(Constants.MAX_SPEECH_TOKENS_VOCODER)' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
           ! grep -q 'T3 text tokens must be INT64' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
           ! grep -q 'PTE T3 exports use FP16' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
           ! grep -q 'loadLongAsset("prompt_tokens.bin"' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
