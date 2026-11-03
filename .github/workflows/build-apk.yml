@@ -1555,6 +1555,12 @@ jobs:
           text = t3.read_text()
           text = replace_once(
               text,
+              "PTE T3 exports use FP16 for prefill/decode. This path preserves the output",
+              "The validated PTE revision uses FP32 for prefill/decode. This path preserves the output",
+              "T3 precision documentation"
+          )
+          text = replace_once(
+              text,
               "require(condEmbedding.dtype() == DType.FLOAT || condEmbedding.dtype() == DType.HALF)",
               "require(condEmbedding.dtype() == DType.FLOAT)",
               "T3 conditioning dtype"
@@ -1651,6 +1657,12 @@ jobs:
           text = engine.read_text()
           text = replace_once(
               text,
+              "// (1, 150) int64",
+              "// (1, 150) int32",
+              "conditioning token dtype documentation"
+          )
+          text = replace_once(
+              text,
               "import org.pytorch.executorch.EValue",
               "import org.pytorch.executorch.DType\nimport org.pytorch.executorch.EValue",
               "ChatterboxTTS DType import"
@@ -1719,6 +1731,15 @@ jobs:
           # S3Gen PTE expects INT32 speech tokens, speech length, prompt tokens and prompt length.
           vocoder = Path("app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt")
           text = vocoder.read_text()
+          old_interface = chr(10).join([
+              " *     inputs:  speech_tokens (1,1000) int64, speech_tok_len (1,) int64,",
+              " *              prompt_tokens (1,75) int64, prompt_tok_len (1,) int64,"
+          ])
+          new_interface = chr(10).join([
+              " *     inputs:  speech_tokens (1,1000) int32, speech_tok_len (1,) int32,",
+              " *              prompt_tokens (1,75) int32, prompt_tok_len (1,) int32,"
+          ])
+          text = replace_once(text, old_interface, new_interface, "S3Gen interface dtype documentation")
           text = replace_once(
               text,
               "import org.pytorch.executorch.EValue",
@@ -1821,6 +1842,12 @@ jobs:
           grep -q 'loadIntAsset("prompt_token_len.bin"' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
           grep -q 'speechToksPadded = IntArray' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
           grep -q 'intArrayOf(nTokens)' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
+          grep -q 'tensorScalarToInt(hLenTensor' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
+          grep -q 'tensorScalarToInt(melLen1Tensor' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
+          ! grep -q 'T3 text tokens must be INT64' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
+          ! grep -q 'PTE T3 exports use FP16' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
+          ! grep -q 'loadLongAsset("prompt_tokens.bin"' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
+          ! grep -q 'loadLongAsset("prompt_token_len.bin"' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
           ! grep -q 'val textSeq = LongArray(Constants.TEXT_SEQ_LEN)' app/src/main/java/com/acul3/chatterboxtts/tts/ChatterboxTTS.kt
           ! grep -q 'speechToksPadded = LongArray' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
 
