@@ -1696,6 +1696,16 @@ jobs:
           old_step = "step_idx = torch.tensor(step + 1, dtype=torch.long)"
           if source.count(old_step) != 1:
               raise SystemExit("Expected exactly one V4 decode-step expression")
+          # Match Android loadIntAsset(): t3_cond_speech_emb expects INT32 token IDs.
+          old_cond = "cond_speech_emb = cond_speech_emb_pte(cond_tokens)[0]"
+          if source.count(old_cond) != 1:
+              raise SystemExit("Expected exactly one conditioning PTE call")
+          source = source.replace(
+              old_cond,
+              "cond_tokens = cond_tokens.to(torch.int32)  # Android Tensor.fromBlob(IntArray) -> INT32" + chr(10) +
+              old_cond,
+          )
+
           source = source.replace(
               old_step,
               "step_idx = torch.tensor(step, dtype=torch.long)",
