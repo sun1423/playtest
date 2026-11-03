@@ -155,6 +155,12 @@ jobs:
           text = constants.read_text()
           text = replace_once(
               text,
+              "object Constants {",
+              "object Constants {" + chr(10) + "    const val TEXT_VOCAB = 2454",
+              "T3 multilingual text vocabulary size"
+          )
+          text = replace_once(
+              text,
               '    const val HF_REPO_BASE = "https://huggingface.co/acul3/chatterbox-executorch/resolve/main"',
               '    const val MODEL_REVISION = "' + model_revision + '"' + chr(10) +
               '    const val HF_REPO_BASE = "https://huggingface.co/acul3/chatterbox-executorch/resolve/' + model_revision + '"',
