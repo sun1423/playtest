@@ -1287,9 +1287,7 @@ jobs:
                   }''',
               "T3 text token validation"
           )
-          text, cleanup_count = re.subn(
-              r"(?m)^    fun close\\(\\) \\{[\\s\\S]*?^    \\}",
-              """    fun close() {
+          new_close_method = """    fun close() {
                   for (model in openedModels.asReversed()) {
                       try {
                           model.close()
@@ -1304,12 +1302,13 @@ jobs:
                   vocoderPipeline = null
                   cachedCondEmb = null
                   tokenizer = null
-              }""",
-              text,
-              count=1
-          )
-          if cleanup_count != 1:
-              raise SystemExit("Could not replace ChatterboxTTS native cleanup method")
+              }
+          """
+          close_start = text.rfind("    fun close() {")
+          class_close = text.rfind(chr(10) + "}")
+          if close_start < 0 or class_close <= close_start:
+              raise SystemExit("Could not locate ChatterboxTTS close() method and class boundary")
+          text = text[:close_start] + new_close_method + text[class_close:]
           engine.write_text(text)
 
           vm = Path("app/src/main/java/com/acul3/chatterboxtts/tts/TTSViewModel.kt")
