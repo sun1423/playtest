@@ -1699,6 +1699,15 @@ jobs:
           path = Path("test_true_full_pte.py")
           source = path.read_text()
 
+          # Current pinned PTE files are 2.1 GB T3 modules and report FP32 input contracts.
+          for model_line in [
+              'prefill_pte = PTE("t3_prefill", fp16=True)',
+              'decode_pte = PTE("t3_decode", fp16=True)',
+          ]:
+              if source.count(model_line) != 1:
+                  raise SystemExit("Expected exactly one T3 model precision declaration: " + model_line)
+              source = source.replace(model_line, model_line.replace("fp16=True", "fp16=False"))
+
           old_step = "step_idx = torch.tensor(step + 1, dtype=torch.long)"
           if source.count(old_step) != 1:
               raise SystemExit("Expected exactly one V4 decode-step expression")
