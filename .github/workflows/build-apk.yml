@@ -1708,6 +1708,15 @@ jobs:
                   raise SystemExit("Expected exactly one T3 model precision declaration: " + model_line)
               source = source.replace(model_line, model_line.replace("fp16=True", "fp16=False"))
 
+          # T3 prefill's exported signature is FP32 cond_emb + INT32 text_tokens.
+          old_text = "text_tokens = torch.tensor([[SOT_TEXT] + padded + [EOT_TEXT]], dtype=torch.long)"
+          if source.count(old_text) != 1:
+              raise SystemExit("Expected exactly one T3 prefill text tensor construction")
+          source = source.replace(
+              old_text,
+              "text_tokens = torch.tensor([[SOT_TEXT] + padded + [EOT_TEXT]], dtype=torch.int32)",
+          )
+
           old_step = "step_idx = torch.tensor(step + 1, dtype=torch.long)"
           if source.count(old_step) != 1:
               raise SystemExit("Expected exactly one V4 decode-step expression")
