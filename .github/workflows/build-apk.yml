@@ -1743,6 +1743,15 @@ jobs:
               "prev_token = torch.tensor([[tok]], dtype=torch.int32)",
           )
 
+          # S3Gen's token embedding input is INT32 in the actual PTE runtime contract.
+          old_speech_tokens = "speech_toks_padded = torch.zeros(1, MAX_SPEECH_TOKENS, dtype=torch.long)"
+          if source.count(old_speech_tokens) != 1:
+              raise SystemExit("Expected exactly one S3Gen speech-token buffer")
+          source = source.replace(
+              old_speech_tokens,
+              "speech_toks_padded = torch.zeros(1, MAX_SPEECH_TOKENS, dtype=torch.int32)",
+          )
+
 
           source = source.replace("MAX_GEN = 200", "MAX_GEN = 16")
           old_fallback = """if n_tokens == 0:
