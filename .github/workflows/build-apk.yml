@@ -918,7 +918,493 @@ jobs:
           grep -q 'executorch = "1.1.0"' gradle/libs.versions.toml
           grep -q 'applicationId = "com.sun1423.playtest.v2"' app/build.gradle.kts
           grep -q 'storeType = "PKCS12"' app/build.gradle.kts
+          grep -q 'MODEL_SHA256' app/src/main/java/com/acul3/chatterboxtts/tts/Constants.kt
+          grep -q 'MODEL_SIZES' app/src/main/java/com/acul3/chatterboxtts/tts/Constants.kt
+          grep -q 'T3KvCacheLayoutTest' app/src/test/java/com/acul3/chatterboxtts/models/T3KvCacheLayoutTest.kt
+          grep -q 'SpeechSamplerTest' app/src/test/java/com/acul3/chatterboxtts/tts/SpeechSamplerTest.kt
           test -s app/src/main/assets/grapheme_mtl_merged_expanded_v1.json
+
+      - name: Harden model cache, sampler, lifecycle and vocoder
+        working-directory: /tmp/chatterbox-android
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > app/src/main/java/com/acul3/chatterboxtts/tts/ModelManager.kt <<'KOTLIN'
+          package com.acul3.chatterboxtts.tts
+
+          import android.content.Context
+          import android.util.Log
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.withContext
+          import okhttp3.OkHttpClient
+          import okhttp3.Request
+          import java.io.File
+          import java.io.FileOutputStream
+          import java.security.MessageDigest
+          import java.util.concurrent.TimeUnit
+
+          /** Accepts a cached model only when size and SHA-256 match the pinned Hub revision. */
+          class ModelManager(private val context: Context) {
+              companion object {
+                  private const val TAG = "ModelManager"
+                  private const val MODELS_DIR = "models"
+                  private const val REVISION_FILE = ".model_revision"
+              }
+
+              private val client = OkHttpClient.Builder()
+                  .connectTimeout(30, TimeUnit.SECONDS)
+                  .readTimeout(120, TimeUnit.SECONDS)
+                  .followRedirects(true)
+                  .build()
+
+              private val modelsDir: File by lazy {
+                  File(context.filesDir, MODELS_DIR).also { it.mkdirs() }
+              }
+              private val revisionFile: File by lazy { File(modelsDir, REVISION_FILE) }
+
+              fun getModelPath(filename: String): String {
+                  require(filename in Constants.MODEL_FILES) { "Unknown model filename: " + filename }
+                  return File(modelsDir, filename).absolutePath
+              }
+
+              private fun sha256(file: File): String {
+                  val digest = MessageDigest.getInstance("SHA-256")
+                  file.inputStream().buffered().use { input ->
+                      val buffer = ByteArray(1024 * 1024)
+                      while (true) {
+                          val count = input.read(buffer)
+                          if (count < 0) break
+                          digest.update(buffer, 0, count)
+                      }
+                  }
+                  return digest.digest().joinToString("") { "%02x".format(it) }
+              }
+
+              private fun modelFileValid(name: String): Boolean {
+                  val file = File(modelsDir, name)
+                  val expectedSize = Constants.MODEL_SIZES[name] ?: return false
+                  val expectedSha = Constants.MODEL_SHA256[name] ?: return false
+                  if (!file.isFile || file.length() != expectedSize) return false
+                  return try {
+                      sha256(file) == expectedSha
+                  } catch (e: Exception) {
+                      Log.w(TAG, "Could not verify cached model " + name, e)
+                      false
+                  }
+              }
+
+              fun allModelsReady(): Boolean {
+                  val valid = Constants.MODEL_FILES.all { modelFileValid(it) }
+                  if (!valid) return false
+                  val recordedRevision = if (revisionFile.isFile) revisionFile.readText().trim() else ""
+                  if (recordedRevision != Constants.MODEL_REVISION) {
+                      // Reuse a previous several-GB cache only if every file matches this exact
+                      // model snapshot's immutable size and SHA-256.
+                      revisionFile.writeText(Constants.MODEL_REVISION)
+                      Log.i(TAG, "Verified complete cached models for revision " + Constants.MODEL_REVISION)
+                  }
+                  return true
+              }
+
+              suspend fun ensureModelsDownloaded(onProgress: (Float, String) -> Unit) =
+                  withContext(Dispatchers.IO) {
+                      val total = Constants.MODEL_FILES.size
+                      var completed = 0
+                      for (name in Constants.MODEL_FILES) {
+                          if (modelFileValid(name)) {
+                              completed++
+                              onProgress(
+                                  completed.toFloat() / total,
+                                  "Verified cached model " + name + " (" + completed + "/" + total + ")"
+                              )
+                              continue
+                          }
+
+                          val target = File(modelsDir, name)
+                          target.delete()
+                          File(modelsDir, name + ".tmp").delete()
+                          val expectedSize = Constants.MODEL_SIZES[name]
+                              ?: throw IllegalStateException("Missing expected size for " + name)
+                          val expectedSha = Constants.MODEL_SHA256[name]
+                              ?: throw IllegalStateException("Missing expected SHA-256 for " + name)
+                          val url = Constants.HF_REPO_BASE + "/" + name
+                          onProgress(completed.toFloat() / total, "Downloading " + name + " (" + (completed + 1) + "/" + total + ")")
+                          downloadFile(url, target, expectedSize, expectedSha) { received, size ->
+                              val perFile = (received.toDouble() / size.toDouble()).toFloat().coerceIn(0f, 1f)
+                              onProgress(
+                                  (completed + perFile) / total,
+                                  "Downloading " + name + ": " + (received / (1024 * 1024)) +
+                                      " / " + (size / (1024 * 1024)) + " MB"
+                              )
+                          }
+                          completed++
+                          Log.i(TAG, "Downloaded and verified " + name + " (" + target.length() + " bytes)")
+                      }
+
+                      check(Constants.MODEL_FILES.all { modelFileValid(it) }) {
+                          "One or more PTE models failed final SHA-256 validation"
+                      }
+                      revisionFile.writeText(Constants.MODEL_REVISION)
+                      onProgress(1f, "All seven models verified for revision " + Constants.MODEL_REVISION.take(10))
+                  }
+
+              private fun downloadFile(
+                  url: String,
+                  target: File,
+                  expectedSize: Long,
+                  expectedSha: String,
+                  onProgress: (Long, Long) -> Unit
+              ) {
+                  val temp = File(modelsDir, target.name + ".tmp")
+                  temp.delete()
+                  try {
+                      val request = Request.Builder().url(url).build()
+                      client.newCall(request).execute().use { response ->
+                          if (!response.isSuccessful) {
+                              throw IllegalStateException("HTTP " + response.code + ": " + response.message)
+                          }
+                          val body = response.body ?: throw IllegalStateException("Empty model response")
+                          val contentLength = body.contentLength()
+                          if (contentLength >= 0L && contentLength != expectedSize) {
+                              throw IllegalStateException(
+                                  "Server length mismatch for " + target.name + ": expected " +
+                                      expectedSize + ", got " + contentLength
+                              )
+                          }
+                          var received = 0L
+                          body.byteStream().use { input ->
+                              FileOutputStream(temp).use { output ->
+                                  val buffer = ByteArray(1024 * 1024)
+                                  while (true) {
+                                      val count = input.read(buffer)
+                                      if (count < 0) break
+                                      output.write(buffer, 0, count)
+                                      received += count
+                                      onProgress(received, expectedSize)
+                                  }
+                                  output.flush()
+                                  output.fd.sync()
+                              }
+                          }
+                          require(received == expectedSize) {
+                              "Truncated model " + target.name + ": expected " + expectedSize +
+                                  ", received " + received
+                          }
+                      }
+                      val actualSha = sha256(temp)
+                      require(actualSha == expectedSha) {
+                          "SHA-256 mismatch for " + target.name + ": expected " + expectedSha +
+                              ", got " + actualSha
+                      }
+                      if (target.exists()) require(target.delete()) { "Cannot replace old model " + target.name }
+                      require(temp.renameTo(target)) { "Cannot finalize downloaded model " + target.name }
+                      require(target.isFile && target.length() == expectedSize) {
+                          "Final file size mismatch for " + target.name
+                      }
+                  } finally {
+                      if (temp.exists()) temp.delete()
+                  }
+              }
+          }
+          KOTLIN
+
+          cat > app/src/main/java/com/acul3/chatterboxtts/tts/SpeechSampler.kt <<'KOTLIN'
+          package com.acul3.chatterboxtts.tts
+
+          import kotlin.math.exp
+          import kotlin.random.Random
+
+          /** Numerically stable min-p/top-p sampler; rejects invalid logits instead of returning token zero. */
+          object SpeechSampler {
+              fun sampleToken(
+                  logits: FloatArray,
+                  temperature: Float = Constants.DEFAULT_TEMPERATURE,
+                  topP: Float = Constants.DEFAULT_TOP_P,
+                  minP: Float = Constants.DEFAULT_MIN_P,
+                  repPenalty: Float = Constants.DEFAULT_REP_PENALTY,
+                  previousTokens: List<Int> = emptyList()
+              ): Int {
+                  require(logits.isNotEmpty()) { "Cannot sample from empty logits" }
+                  require(temperature.isFinite() && temperature > 0f) { "Temperature must be finite and positive" }
+                  require(topP.isFinite() && topP > 0f && topP <= 1f) { "topP must be in (0, 1]" }
+                  require(minP.isFinite() && minP >= 0f && minP <= 1f) { "minP must be in [0, 1]" }
+                  require(repPenalty.isFinite() && repPenalty > 0f) { "Repetition penalty must be finite and positive" }
+                  require(logits.all { it.isFinite() }) { "T3 logits contain NaN or infinite values" }
+
+                  val adjusted = logits.copyOf()
+                  if (repPenalty != 1f) {
+                      for (id in previousTokens.toSet()) {
+                          if (id in adjusted.indices) {
+                              adjusted[id] = if (adjusted[id] > 0f) adjusted[id] / repPenalty else adjusted[id] * repPenalty
+                          }
+                      }
+                  }
+                  for (index in adjusted.indices) adjusted[index] /= temperature
+                  val maxLogit = adjusted.maxOrNull() ?: throw IllegalArgumentException("No logits")
+                  val expValues = DoubleArray(adjusted.size) { index ->
+                      exp((adjusted[index] - maxLogit).toDouble())
+                  }
+                  val sum = expValues.sum()
+                  require(sum.isFinite() && sum > 0.0) { "T3 softmax probability sum is invalid" }
+                  val maxProb = (expValues.maxOrNull() ?: 0.0) / sum
+                  val threshold = maxProb * minP.toDouble()
+                  val ordered = expValues.indices
+                      .map { it to (expValues[it] / sum) }
+                      .filter { it.second >= threshold && it.second > 0.0 }
+                      .sortedByDescending { it.second }
+                  require(ordered.isNotEmpty()) { "T3 filters removed all candidate tokens" }
+
+                  val kept = ArrayList<Pair<Int, Double>>()
+                  var cumulative = 0.0
+                  for (candidate in ordered) {
+                      kept.add(candidate)
+                      cumulative += candidate.second
+                      if (cumulative >= topP.toDouble()) break
+                  }
+                  val total = kept.sumOf { it.second }
+                  require(total.isFinite() && total > 0.0) { "T3 candidate distribution is empty" }
+                  val target = Random.nextDouble() * total
+                  var cursor = 0.0
+                  for ((id, probability) in kept) {
+                      cursor += probability
+                      if (cursor >= target) return id
+                  }
+                  return kept.last().first
+              }
+          }
+          KOTLIN
+
+          mkdir -p app/src/test/java/com/acul3/chatterboxtts/models app/src/test/java/com/acul3/chatterboxtts/tts
+          cat > app/src/test/java/com/acul3/chatterboxtts/models/T3KvCacheLayoutTest.kt <<'KOTLIN'
+          package com.acul3.chatterboxtts.models
+
+          import org.junit.Assert.assertArrayEquals
+          import org.junit.Assert.assertThrows
+          import org.junit.Test
+
+          class T3KvCacheLayoutTest {
+              @Test fun splitInterleavedFloatPreservesOrder() {
+                  val flat = floatArrayOf(1f, 2f, 10f, 20f, 3f, 4f, 30f, 40f)
+                  val (keys, values) = T3KvCacheLayout.splitInterleavedFloat(flat, 2, 2)
+                  assertArrayEquals(floatArrayOf(1f, 2f, 3f, 4f), keys, 0f)
+                  assertArrayEquals(floatArrayOf(10f, 20f, 30f, 40f), values, 0f)
+              }
+
+              @Test fun splitInterleavedHalfPreservesBits() {
+                  val flat = shortArrayOf(1, 2, 10, 20, 3, 4, 30, 40)
+                  val (keys, values) = T3KvCacheLayout.splitInterleavedHalf(flat, 2, 2)
+                  assertArrayEquals(shortArrayOf(1, 2, 3, 4), keys)
+                  assertArrayEquals(shortArrayOf(10, 20, 30, 40), values)
+              }
+
+              @Test fun rejectsWrongKvLength() {
+                  assertThrows(IllegalArgumentException::class.java) {
+                      T3KvCacheLayout.splitInterleavedHalf(shortArrayOf(1, 2), 2, 2)
+                  }
+              }
+          }
+          KOTLIN
+
+          cat > app/src/test/java/com/acul3/chatterboxtts/tts/SpeechSamplerTest.kt <<'KOTLIN'
+          package com.acul3.chatterboxtts.tts
+
+          import org.junit.Assert.assertTrue
+          import org.junit.Assert.assertThrows
+          import org.junit.Test
+
+          class SpeechSamplerTest {
+              @Test fun returnsOnlyValidIndices() {
+                  repeat(100) {
+                      assertTrue(SpeechSampler.sampleToken(floatArrayOf(-1f, 0f, 3f, 1f)) in 0..3)
+                  }
+              }
+
+              @Test fun rejectsNonFiniteLogits() {
+                  assertThrows(IllegalArgumentException::class.java) {
+                      SpeechSampler.sampleToken(floatArrayOf(0f, Float.NaN))
+                  }
+              }
+
+              @Test fun rejectsInvalidTopP() {
+                  assertThrows(IllegalArgumentException::class.java) {
+                      SpeechSampler.sampleToken(floatArrayOf(0f, 1f), topP = 1.5f)
+                  }
+              }
+          }
+          KOTLIN
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected one match, found {count}")
+              return text.replace(old, new, 1)
+
+          engine = Path("app/src/main/java/com/acul3/chatterboxtts/tts/ChatterboxTTS.kt")
+          text = engine.read_text()
+          text = replace_once(
+              text,
+              '    private val modelManager = ModelManager(context)',
+              '''    private val modelManager = ModelManager(context)
+              private val openedModels = mutableListOf<PteModel>()
+
+              private fun openModel(filename: String): PteModel {
+                  val model = PteModel(modelManager.getModelPath(filename))
+                  try {
+                      model.load()
+                      openedModels.add(model)
+                      return model
+                  } catch (e: Exception) {
+                      model.close()
+                      throw e
+                  }
+              }''',
+              "tracked native model loader"
+          )
+          pairs = {
+              'PteModel(modelManager.getModelPath("t3_cond_speech_emb.pte")).also { it.load() }':'openModel("t3_cond_speech_emb.pte")',
+              'PteModel(modelManager.getModelPath("t3_cond_enc.pte")).also { it.load() }':'openModel("t3_cond_enc.pte")',
+              'PteModel(modelManager.getModelPath("t3_prefill.pte")).also { it.load() }':'openModel("t3_prefill.pte")',
+              'PteModel(modelManager.getModelPath("t3_decode.pte")).also { it.load() }':'openModel("t3_decode.pte")',
+              'PteModel(modelManager.getModelPath("s3gen_encoder.pte")).also { it.load() }':'openModel("s3gen_encoder.pte")',
+              'PteModel(modelManager.getModelPath("cfm_step.pte")).also { it.load() }':'openModel("cfm_step.pte")',
+              'PteModel(modelManager.getModelPath("hifigan.pte")).also { it.load() }':'openModel("hifigan.pte")'
+          }
+          for old, new in pairs.items():
+              text = replace_once(text, old, new, "tracked load " + old)
+
+          text = replace_once(
+              text,
+              '        val rawTokenIds = tok.encode(text, language)',
+              '''        val rawTokenIds = tok.encode(text, language)
+                  require(rawTokenIds.isNotEmpty() && rawTokenIds.size <= Constants.MAX_TEXT_LEN) {
+                      "Tokenizer returned an invalid content-token count: " + rawTokenIds.size
+                  }
+                  require(rawTokenIds.all { it in 0 until Constants.TEXT_VOCAB }) {
+                      "Tokenizer returned an ID outside the model text vocabulary"
+                  }''',
+              "T3 text token validation"
+          )
+          text = replace_once(
+              text,
+              '    fun close() {\\n        condSpeechEmbModel?.close()\\n        condEncModel?.close()\\n    }',
+              '''    fun close() {
+                  for (model in openedModels.asReversed()) {
+                      try {
+                          model.close()
+                      } catch (e: Exception) {
+                          Log.w(TAG, "Native model cleanup failed", e)
+                      }
+                  }
+                  openedModels.clear()
+                  condSpeechEmbModel = null
+                  condEncModel = null
+                  t3Decoder = null
+                  vocoderPipeline = null
+                  cachedCondEmb = null
+                  tokenizer = null
+              }''',
+              "complete native model cleanup"
+          )
+          engine.write_text(text)
+
+          vm = Path("app/src/main/java/com/acul3/chatterboxtts/tts/TTSViewModel.kt")
+          text = vm.read_text()
+          text = replace_once(
+              text,
+              '        } catch (e: Exception) {\\n            Log.e("TTSViewModel", "Generation failed", e)',
+              '''        } catch (e: Exception) {
+                      Log.e("TTSViewModel", "Generation failed", e)
+                      try {
+                          ttsEngine?.close()
+                      } catch (closeError: Exception) {
+                          Log.w("TTSViewModel", "Model cleanup after failure also failed", closeError)
+                      }
+                      ttsEngine = null
+                      audioPlayer?.stop()
+                      audioPlayer?.release()
+                      audioPlayer = null
+                      lastAudioData = null''',
+              "inference failure cleanup"
+          )
+          vm.write_text(text)
+
+          vocoder = Path("app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt")
+          text = vocoder.read_text()
+          text = replace_once(
+              text,
+              '        val nTokens = speechTokens.size',
+              '''        val nTokens = speechTokens.size
+                  require(nTokens in 1..Constants.MAX_SPEECH_TOKENS_VOCODER) {
+                      "Vocoder needs 1.." + Constants.MAX_SPEECH_TOKENS_VOCODER + " speech tokens, got " + nTokens
+                  }
+                  require(speechTokens.all { it in 0L until Constants.SPEECH_VOCAB.toLong() }) {
+                      "Speech token ID is outside the Chatterbox vocabulary"
+                  }''',
+              "vocoder input token validation"
+          )
+          text = replace_once(
+              text,
+              '        val hShape = h.shape()',
+              '''        val hShape = h.shape()
+                  require(hShape.size == 3 && hShape[0] == 1L && hShape[2] == 80L) {
+                      "S3Gen encoder returned invalid h shape: " + hShape.contentToString()
+                  }''',
+              "S3Gen shape validation"
+          )
+          text = replace_once(
+              text,
+              '        val melOutLen = hLenVal - melLen1Val',
+              '''        val melOutLen = hLenVal - melLen1Val
+                  require(melOutLen in 1..T_MEL_FIXED) {
+                      "Invalid speech mel output length: " + melOutLen
+                  }''',
+              "speech mel validation"
+          )
+          text = replace_once(
+              text,
+              '            val wavChunkAll = hifiOutputs[0].toTensor().dataAsFloatArray',
+              '''            require(hifiOutputs.isNotEmpty()) { "HiFiGAN returned no output tensor" }
+                      val wavChunkAll = hifiOutputs[0].toTensor().dataAsFloatArray
+                      val actualSamples = chunkLen * UPSAMPLE
+                      require(wavChunkAll.size >= actualSamples) {
+                          "HiFiGAN output too short: expected " + actualSamples + ", got " + wavChunkAll.size
+                      }
+                      require(wavChunkAll.take(actualSamples).all { it.isFinite() }) {
+                          "HiFiGAN output contains NaN or infinite samples"
+                      }''',
+              "HiFiGAN output validation"
+          )
+          text = replace_once(
+              text,
+              '            val actualSamples = chunkLen * UPSAMPLE\\n            val wavChunk = wavChunkAll.copyOfRange(0, minOf(actualSamples, wavChunkAll.size))',
+              '            val wavChunk = wavChunkAll.copyOfRange(0, actualSamples)',
+              "exact HiFiGAN trim"
+          )
+          text = replace_once(
+              text,
+              '        return audioOut\\n    }\\n\\n    // ── Helpers',
+              '''        require(audioOut.isNotEmpty() && audioOut.all { it.isFinite() }) {
+                      "Vocoder produced an empty or non-finite waveform"
+                  }
+                  return audioOut
+              }
+
+              fun close() {
+                  s3genEncoder.close()
+                  cfmStep.close()
+                  hifigan.close()
+              }
+
+              // ── Helpers''',
+              "vocoder cleanup"
+          )
+          vocoder.write_text(text)
+          print("Applied native model lifecycle, tokenizer boundary and vocoder validation.")
+          PY
 
       - name: Prepare permanent signing key
         shell: bash
@@ -942,7 +1428,7 @@ jobs:
         shell: bash
         run: |
           chmod +x ./gradlew
-          ./gradlew --no-daemon --stacktrace assembleDebug
+          ./gradlew --no-daemon --stacktrace testDebugUnitTest assembleDebug
 
       - name: Verify APK is ARM64-only
         working-directory: /tmp/chatterbox-android
@@ -961,6 +1447,8 @@ jobs:
             echo "- **ABI:** arm64-v8a only"
             echo "- **Package:** com.sun1423.playtest.v2"
             echo "- **Upstream source commit:** $UPSTREAM_COMMIT"
+            echo "- **Pinned model revision:** $MODEL_REVISION"
+            echo "- **PTE cache:** exact byte count and SHA-256 checked"
             echo "- **Hindi:** enabled with the model's supported language list"
             echo "- **Voice profile:** import a ZIP of precomputed conditioning tensors"
             echo "- **Model files:** downloaded by the app on first generation; several GB required"
@@ -977,5 +1465,5 @@ jobs:
             output/Chatterbox-Playtest-v2-arm64-v8a.apk \
             --repo "$GITHUB_REPOSITORY" \
             --title "Chatterbox Playtest 2 - ARM64 APK" \
-            --notes "Direct APK download. Package: com.sun1423.playtest.v2. ABI: arm64-v8a only. Signed with the persistent Playtest v2 key." \
+            --notes "Direct APK download. Package: com.sun1423.playtest.v2. ABI: arm64-v8a only. Model revision: $MODEL_REVISION. Signed with the persistent Playtest v2 key." \
             --prerelease
