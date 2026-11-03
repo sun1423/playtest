@@ -47,9 +47,21 @@ jobs:
         run: |
           cd "$ANDROID_PROJECT_DIR"
 
+          MODEL_REVISION="$(curl --fail --location --retry 3 --silent --show-error \
+            "https://huggingface.co/api/models/acul3/chatterbox-executorch" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin).get("sha", ""))')"
+          if ! [[ "$MODEL_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Hugging Face did not return a valid immutable model revision."
+            exit 1
+          fi
+          export MODEL_REVISION
+          echo "MODEL_REVISION=$MODEL_REVISION" >> "$GITHUB_ENV"
+          echo "Pinning Chatterbox PTE models to Hugging Face revision $MODEL_REVISION"
+
           python3 - <<'PY'
           from pathlib import Path
           import re
+          import os
 
           def replace_once(text, old, new, label):
               count = text.count(old)
@@ -109,6 +121,21 @@ jobs:
               "ExecuTorch runtime/model version"
           )
           version_catalog.write_text(text)
+
+          # Pin model downloads to the immutable Hugging Face snapshot used by this build.
+          model_revision = os.environ.get("MODEL_REVISION", "")
+          if not re.fullmatch(r"[0-9a-f]{40}", model_revision):
+              raise SystemExit("MODEL_REVISION is missing or invalid")
+          constants = Path("app/src/main/java/com/acul3/chatterboxtts/tts/Constants.kt")
+          text = constants.read_text()
+          text = replace_once(
+              text,
+              '    const val HF_REPO_BASE = "https://huggingface.co/acul3/chatterbox-executorch/resolve/main"',
+              '    const val MODEL_REVISION = "' + model_revision + '"\\n'
+              '    const val HF_REPO_BASE = "https://huggingface.co/acul3/chatterbox-executorch/resolve/' + model_revision + '"',
+              "immutable model revision"
+          )
+          constants.write_text(text)
 
           Path("app/src/main/res/values/strings.xml").write_text(
               '<?xml version="1.0" encoding="utf-8"?>\n'
