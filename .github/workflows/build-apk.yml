@@ -920,8 +920,6 @@ jobs:
           grep -q 'storeType = "PKCS12"' app/build.gradle.kts
           grep -q 'MODEL_SHA256' app/src/main/java/com/acul3/chatterboxtts/tts/Constants.kt
           grep -q 'MODEL_SIZES' app/src/main/java/com/acul3/chatterboxtts/tts/Constants.kt
-          grep -q 'T3KvCacheLayoutTest' app/src/test/java/com/acul3/chatterboxtts/models/T3KvCacheLayoutTest.kt
-          grep -q 'SpeechSamplerTest' app/src/test/java/com/acul3/chatterboxtts/tts/SpeechSamplerTest.kt
           test -s app/src/main/assets/grapheme_mtl_merged_expanded_v1.json
 
       - name: Harden model cache, sampler, lifecycle and vocoder
@@ -1405,6 +1403,11 @@ jobs:
           vocoder.write_text(text)
           print("Applied native model lifecycle, tokenizer boundary and vocoder validation.")
           PY
+
+          test -s app/src/test/java/com/acul3/chatterboxtts/models/T3KvCacheLayoutTest.kt
+          test -s app/src/test/java/com/acul3/chatterboxtts/tts/SpeechSamplerTest.kt
+          grep -q 'MODEL_SHA256' app/src/main/java/com/acul3/chatterboxtts/tts/Constants.kt
+          grep -q 'MODEL_SIZES' app/src/main/java/com/acul3/chatterboxtts/tts/Constants.kt
 
       - name: Prepare permanent signing key
         shell: bash
