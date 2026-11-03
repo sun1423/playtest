@@ -524,6 +524,328 @@ jobs:
           print("Generated ARM64-only Chatterbox Playtest sources and voice-profile support.")
           PY
 
+          # Runtime hardening: mmap large models and preserve ExecuTorch native diagnostics.
+          cat > app/src/main/java/com/acul3/chatterboxtts/models/PteModel.kt <<'KOTLIN'
+          package com.acul3.chatterboxtts.models
+
+          import android.util.Log
+          import org.pytorch.executorch.EValue
+          import org.pytorch.executorch.Module
+          import org.pytorch.executorch.Tensor
+          import java.io.File
+
+          /** Memory-mapped ExecuTorch model wrapper with actionable runtime errors. */
+          class PteModel(private val modelPath: String) {
+              companion object {
+                  private const val TAG = "PteModel"
+              }
+
+              private var module: Module? = null
+
+              fun load() {
+                  val file = File(modelPath)
+                  require(file.isFile && file.length() > 0L) {
+                      "Model file is missing or empty: $modelPath"
+                  }
+                  Log.i(TAG, "Memory-mapping model: $modelPath (" + file.length() + " bytes)")
+                  module = Module.load(modelPath, Module.LOAD_MODE_MMAP)
+                  Log.i(TAG, "Model loaded: $modelPath")
+              }
+
+              fun isLoaded(): Boolean = module != null
+
+              fun forward(vararg inputs: EValue): Array<EValue> {
+                  val mod = module ?: throw IllegalStateException("Model not loaded: $modelPath")
+                  try {
+                      return mod.forward(*inputs)
+                  } catch (e: Exception) {
+                      val nativeLog = try {
+                          mod.readLogBuffer().takeLast(12).joinToString("\n")
+                      } catch (_: Exception) {
+                          ""
+                      }
+                      val detail = if (nativeLog.isBlank()) "" else "\nExecuTorch native log:\n$nativeLog"
+                      throw RuntimeException(
+                          "ExecuTorch forward failed for " + File(modelPath).name + ": " + e.message + detail,
+                          e
+                      )
+                  }
+              }
+
+              fun forwardSingleTensor(vararg inputs: EValue): Tensor {
+                  val outputs = forward(*inputs)
+                  require(outputs.isNotEmpty()) { "Model returned no outputs: $modelPath" }
+                  return outputs[0].toTensor()
+              }
+
+              fun close() {
+                  module?.destroy()
+                  module = null
+              }
+          }
+          KOTLIN
+
+          # The prefill exporter flattens K/V per layer as K0,V0,K1,V1,... .
+          cat > app/src/main/java/com/acul3/chatterboxtts/models/T3KvCacheLayout.kt <<'KOTLIN'
+          package com.acul3.chatterboxtts.models
+
+          /** Pure helpers for the exact interleaved layout emitted by export_t3_prefill_v2.py. */
+          object T3KvCacheLayout {
+              fun splitInterleavedFloat(
+                  data: FloatArray,
+                  layers: Int,
+                  elementsPerLayer: Int
+              ): Pair<FloatArray, FloatArray> {
+                  require(layers > 0 && elementsPerLayer > 0) { "KV dimensions must be positive" }
+                  val layerPairSize = Math.multiplyExact(elementsPerLayer, 2)
+                  val expected = Math.multiplyExact(layers, layerPairSize)
+                  require(data.size == expected) {
+                      "Interleaved FP32 KV size mismatch: expected " + expected + ", got " + data.size
+                  }
+                  val keys = FloatArray(layers * elementsPerLayer)
+                  val values = FloatArray(layers * elementsPerLayer)
+                  for (layer in 0 until layers) {
+                      val source = layer * layerPairSize
+                      val target = layer * elementsPerLayer
+                      data.copyInto(keys, target, source, source + elementsPerLayer)
+                      data.copyInto(values, target, source + elementsPerLayer, source + layerPairSize)
+                  }
+                  return keys to values
+              }
+
+              fun splitInterleavedHalf(
+                  data: ShortArray,
+                  layers: Int,
+                  elementsPerLayer: Int
+              ): Pair<ShortArray, ShortArray> {
+                  require(layers > 0 && elementsPerLayer > 0) { "KV dimensions must be positive" }
+                  val layerPairSize = Math.multiplyExact(elementsPerLayer, 2)
+                  val expected = Math.multiplyExact(layers, layerPairSize)
+                  require(data.size == expected) {
+                      "Interleaved FP16 KV size mismatch: expected " + expected + ", got " + data.size
+                  }
+                  val keys = ShortArray(layers * elementsPerLayer)
+                  val values = ShortArray(layers * elementsPerLayer)
+                  for (layer in 0 until layers) {
+                      val source = layer * layerPairSize
+                      val target = layer * elementsPerLayer
+                      data.copyInto(keys, target, source, source + elementsPerLayer)
+                      data.copyInto(values, target, source + elementsPerLayer, source + layerPairSize)
+                  }
+                  return keys to values
+              }
+          }
+          KOTLIN
+
+          cat > app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt <<'KOTLIN'
+          package com.acul3.chatterboxtts.models
+
+          import android.util.Half
+          import android.util.Log
+          import com.acul3.chatterboxtts.tts.Constants
+          import com.acul3.chatterboxtts.tts.SpeechSampler
+          import org.pytorch.executorch.DType
+          import org.pytorch.executorch.EValue
+          import org.pytorch.executorch.Tensor
+
+          /**
+           * T3 V4 prefill + autoregressive decode.
+           * PTE T3 exports use FP16 for prefill/decode. This path preserves the output
+           * precision and deinterleaves the per-layer K/V cache exactly as exported.
+           */
+          class T3Decoder(
+              private val prefillModel: PteModel,
+              private val decodeModel: PteModel
+          ) {
+              companion object {
+                  private const val TAG = "T3Decoder"
+                  private const val KV_LAYER_ELEMENTS =
+                      Constants.N_HEADS * Constants.MAX_KV_LEN * Constants.HEAD_DIM
+                  private const val KV_FLAT_ELEMENTS =
+                      Constants.N_LAYERS * 2 * KV_LAYER_ELEMENTS
+                  private val KV_SHAPE = longArrayOf(
+                      Constants.N_LAYERS.toLong(), 1L, Constants.N_HEADS.toLong(),
+                      Constants.MAX_KV_LEN.toLong(), Constants.HEAD_DIM.toLong()
+                  )
+                  private val KV_FLAT_SHAPE = longArrayOf(KV_FLAT_ELEMENTS.toLong())
+                  private val COND_SHAPE = longArrayOf(1L, Constants.COND_LEN.toLong(), 1024L)
+                  private val TEXT_SHAPE = longArrayOf(1L, Constants.TEXT_SEQ_LEN.toLong())
+              }
+
+              fun decode(
+                  condEmbedding: Tensor,
+                  textTokens: Tensor,
+                  onProgress: (Float, String) -> Unit = { _, _ -> }
+              ): LongArray {
+                  require(condEmbedding.shape().contentEquals(COND_SHAPE)) {
+                      "T3 conditioning shape mismatch: expected " + COND_SHAPE.contentToString() +
+                          ", got " + condEmbedding.shape().contentToString()
+                  }
+                  require(condEmbedding.dtype() == DType.FLOAT || condEmbedding.dtype() == DType.HALF) {
+                      "T3 conditioning must be FP32 or FP16, got " + condEmbedding.dtype()
+                  }
+                  require(textTokens.shape().contentEquals(TEXT_SHAPE)) {
+                      "T3 text shape mismatch: expected " + TEXT_SHAPE.contentToString() +
+                          ", got " + textTokens.shape().contentToString()
+                  }
+                  require(textTokens.dtype() == DType.INT64) {
+                      "T3 text tokens must be INT64, got " + textTokens.dtype()
+                  }
+
+                  Log.i(TAG, "T3 prefill input: cond=" + describe(condEmbedding) + ", text=" + describe(textTokens))
+                  onProgress(0f, "Running T3 prefill...")
+                  val prefillOutputs = runPrefill(condEmbedding, textTokens)
+                  require(prefillOutputs.size >= 2) {
+                      "T3 prefill returned " + prefillOutputs.size + " outputs; expected logits and KV cache"
+                  }
+
+                  var currentLogits = prefillOutputs[0].toTensor()
+                  val kvFlat = prefillOutputs[1].toTensor()
+                  require(currentLogits.numel() == Constants.SPEECH_VOCAB.toLong()) {
+                      "T3 prefill logits have unexpected shape " + currentLogits.shape().contentToString()
+                  }
+                  require(kvFlat.shape().contentEquals(KV_FLAT_SHAPE)) {
+                      "T3 prefill KV shape mismatch: expected " + KV_FLAT_SHAPE.contentToString() +
+                          ", got " + kvFlat.shape().contentToString()
+                  }
+                  require(currentLogits.dtype() == kvFlat.dtype()) {
+                      "T3 prefill logits/KV dtype mismatch: " + currentLogits.dtype() + " vs " + kvFlat.dtype()
+                  }
+
+                  val kvPair = when (kvFlat.dtype()) {
+                      DType.HALF -> {
+                          val split = T3KvCacheLayout.splitInterleavedHalf(
+                              kvFlat.dataAsShortArray, Constants.N_LAYERS, KV_LAYER_ELEMENTS
+                          )
+                          Tensor.fromBlob(split.first, KV_SHAPE) to Tensor.fromBlob(split.second, KV_SHAPE)
+                      }
+                      DType.FLOAT -> {
+                          val split = T3KvCacheLayout.splitInterleavedFloat(
+                              kvFlat.dataAsFloatArray, Constants.N_LAYERS, KV_LAYER_ELEMENTS
+                          )
+                          Tensor.fromBlob(split.first, KV_SHAPE) to Tensor.fromBlob(split.second, KV_SHAPE)
+                      }
+                      else -> throw IllegalStateException("Unsupported T3 KV dtype: " + kvFlat.dtype())
+                  }
+                  var kvK = kvPair.first
+                  var kvV = kvPair.second
+
+                  Log.i(TAG, "T3 prefill outputs: logits=" + describe(currentLogits) + ", KV=" + describe(kvFlat))
+                  onProgress(0.05f, "Prefill complete. Decoding speech tokens...")
+
+                  val speechTokens = ArrayList<Long>()
+                  for (step in 0 until Constants.MAX_DECODE_STEPS) {
+                      require(currentLogits.numel() == Constants.SPEECH_VOCAB.toLong()) {
+                          "T3 decode logits shape changed at step " + step + ": " +
+                              currentLogits.shape().contentToString()
+                      }
+                      val logitsData = currentLogits.dataAsFloatArray
+                      require(logitsData.size == Constants.SPEECH_VOCAB) {
+                          "T3 decode logits length mismatch at step " + step + ": " + logitsData.size
+                      }
+                      val token = SpeechSampler.sampleToken(
+                          logits = logitsData,
+                          previousTokens = speechTokens.map { it.toInt() }
+                      )
+                      require(token in 0 until Constants.SPEECH_VOCAB) {
+                          "T3 sampler returned out-of-range token " + token
+                      }
+                      if (token == Constants.EOT_SPEECH) {
+                          Log.i(TAG, "T3 EOS token at step " + step + "; generated " + speechTokens.size + " tokens")
+                          break
+                      }
+                      speechTokens.add(token.toLong())
+
+                      if (step % 50 == 0) {
+                          onProgress(
+                              0.05f + (step.toFloat() / Constants.MAX_DECODE_STEPS) * 0.95f,
+                              "Decode step " + step + ": " + speechTokens.size + " tokens generated"
+                          )
+                      }
+
+                      val tokenTensor = Tensor.fromBlob(longArrayOf(token.toLong()), longArrayOf(1L, 1L))
+                      val stepTensor = Tensor.fromBlob(longArrayOf(step.toLong()), longArrayOf())
+                      val decodeOutputs = try {
+                          decodeModel.forward(
+                              EValue.from(tokenTensor),
+                              EValue.from(stepTensor),
+                              EValue.from(kvK),
+                              EValue.from(kvV)
+                          )
+                      } catch (e: Exception) {
+                          throw RuntimeException(
+                              "T3 decode failed at step " + step + "; token=" + token +
+                                  ", KV dtype=" + kvK.dtype() + ", K=" + kvK.shape().contentToString() +
+                                  ", V=" + kvV.shape().contentToString() + ": " + e.message,
+                              e
+                          )
+                      }
+                      require(decodeOutputs.size >= 3) {
+                          "T3 decode returned " + decodeOutputs.size + " outputs at step " + step +
+                              "; expected logits, K and V"
+                      }
+                      currentLogits = decodeOutputs[0].toTensor()
+                      val nextK = decodeOutputs[1].toTensor()
+                      val nextV = decodeOutputs[2].toTensor()
+                      require(nextK.shape().contentEquals(KV_SHAPE) && nextV.shape().contentEquals(KV_SHAPE)) {
+                          "T3 decode KV shape mismatch at step " + step +
+                              ": K=" + nextK.shape().contentToString() +
+                              ", V=" + nextV.shape().contentToString()
+                      }
+                      require(nextK.dtype() == kvFlat.dtype() && nextV.dtype() == kvFlat.dtype()) {
+                          "T3 decode KV dtype changed at step " + step + ": expected " + kvFlat.dtype() +
+                              ", got " + nextK.dtype() + "/" + nextV.dtype()
+                      }
+                      kvK = nextK
+                      kvV = nextV
+                  }
+
+                  require(speechTokens.isNotEmpty()) {
+                      "T3 generated no speech tokens. Check model revision, text tokens and PTE export compatibility."
+                  }
+                  Log.i(TAG, "T3 decode complete: " + speechTokens.size + " speech tokens")
+                  onProgress(1f, "Generated " + speechTokens.size + " speech tokens")
+                  return speechTokens.toLongArray()
+              }
+
+              private fun runPrefill(condEmbedding: Tensor, textTokens: Tensor): Array<EValue> {
+                  val halfConditioning = if (condEmbedding.dtype() == DType.HALF) {
+                      condEmbedding
+                  } else {
+                      val values = condEmbedding.dataAsFloatArray
+                      val halfValues = ShortArray(values.size) { index -> Half.toHalf(values[index]) }
+                      Tensor.fromBlob(halfValues, condEmbedding.shape())
+                  }
+                  return try {
+                      prefillModel.forward(EValue.from(halfConditioning), EValue.from(textTokens))
+                  } catch (halfError: Exception) {
+                      if (condEmbedding.dtype() == DType.HALF) throw halfError
+                      Log.w(TAG, "FP16 T3 prefill rejected; retrying once with FP32 conditioning", halfError)
+                      try {
+                          prefillModel.forward(EValue.from(condEmbedding), EValue.from(textTokens))
+                      } catch (floatError: Exception) {
+                          floatError.addSuppressed(halfError)
+                          throw RuntimeException(
+                              "T3 prefill rejected both FP16 and FP32 conditioning. FP16=" +
+                                  describe(halfConditioning) + ", FP32=" + describe(condEmbedding) +
+                                  ", text=" + describe(textTokens) + ". Verify the pinned PTE revision.",
+                              floatError
+                          )
+                      }
+                  }
+              }
+
+              private fun describe(tensor: Tensor): String =
+                  "shape=" + tensor.shape().contentToString() + ", dtype=" + tensor.dtype() +
+                      ", elements=" + tensor.numel()
+
+              fun close() {
+                  prefillModel.close()
+                  decodeModel.close()
+              }
+          }
+          KOTLIN
+
           # Replace the upstream placeholder with the actual multilingual tokenizer vocabulary.
           mkdir -p app/src/main/assets
           curl --fail --location --retry 3 \
