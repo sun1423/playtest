@@ -1735,6 +1735,15 @@ jobs:
               "step_idx = torch.tensor(step, dtype=torch.long)",
           )
 
+          old_prev = "prev_token = torch.tensor([[tok]], dtype=torch.long)"
+          if source.count(old_prev) != 1:
+              raise SystemExit("Expected exactly one V4 previous-token tensor")
+          source = source.replace(
+              old_prev,
+              "prev_token = torch.tensor([[tok]], dtype=torch.int32)",
+          )
+
+
           source = source.replace("MAX_GEN = 200", "MAX_GEN = 64")
           old_fallback = """if n_tokens == 0:
               print("   ❌ No tokens generated! Using dummy tokens for vocoder test.")
