@@ -47,21 +47,46 @@ jobs:
         run: |
           cd "$ANDROID_PROJECT_DIR"
 
-          MODEL_REVISION="$(curl --fail --location --retry 3 --silent --show-error \
-            "https://huggingface.co/api/models/acul3/chatterbox-executorch" \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin).get("sha", ""))')"
+          MODEL_INFO="$(curl --fail --location --retry 3 --silent --show-error \
+            "https://huggingface.co/api/models/acul3/chatterbox-executorch?blobs=true")"
+          MODEL_REVISION="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("sha", ""))' <<< "$MODEL_INFO")"
           if ! [[ "$MODEL_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::Hugging Face did not return a valid immutable model revision."
             exit 1
           fi
-          export MODEL_REVISION
+          MODEL_MANIFEST_B64="$(python3 -c '
+          import base64, json, re, sys
+          data=json.load(sys.stdin)
+          required=["t3_cond_speech_emb.pte","t3_cond_enc.pte","t3_prefill.pte","t3_decode.pte","s3gen_encoder.pte","cfm_step.pte","hifigan.pte"]
+          siblings={item.get("rfilename"): item for item in data.get("siblings",[])}
+          manifest={}
+          for name in required:
+              item=siblings.get(name)
+              if item is None:
+                  raise SystemExit("Missing PTE in model repository: "+name)
+              lfs=item.get("lfs") or {}
+              sha=lfs.get("sha256") or item.get("sha256") or ""
+              if not sha and lfs.get("oid"):
+                  sha=lfs["oid"].split(":")[-1]
+              size=lfs.get("size") or item.get("size")
+              if not re.fullmatch(r"[0-9a-f]{64}", str(sha)):
+                  raise SystemExit("No valid SHA-256 metadata for "+name)
+              if not isinstance(size,int) or size <= 1024:
+                  raise SystemExit("No valid file size metadata for "+name)
+              manifest[name]={"sha256":sha,"size":size}
+          print(base64.b64encode(json.dumps(manifest,sort_keys=True).encode()).decode())
+          ' <<< "$MODEL_INFO")"
+          export MODEL_REVISION MODEL_MANIFEST_B64
           echo "MODEL_REVISION=$MODEL_REVISION" >> "$GITHUB_ENV"
-          echo "Pinning Chatterbox PTE models to Hugging Face revision $MODEL_REVISION"
+          echo "MODEL_MANIFEST_B64=$MODEL_MANIFEST_B64" >> "$GITHUB_ENV"
+          echo "Pinning seven PTE models to immutable revision $MODEL_REVISION with SHA-256 metadata"
 
           python3 - <<'PY'
           from pathlib import Path
           import re
           import os
+          import json
+          import base64
 
           def replace_once(text, old, new, label):
               count = text.count(old)
@@ -134,6 +159,38 @@ jobs:
               '    const val MODEL_REVISION = "' + model_revision + '"' + chr(10) +
               '    const val HF_REPO_BASE = "https://huggingface.co/acul3/chatterbox-executorch/resolve/' + model_revision + '"',
               "immutable model revision"
+          )
+          constants.write_text(text)
+
+          # Embed the immutable revision's exact file sizes and SHA-256 digests.
+          manifest = json.loads(base64.b64decode(os.environ["MODEL_MANIFEST_B64"]).decode("utf-8"))
+          expected_models = {
+              "t3_cond_speech_emb.pte", "t3_cond_enc.pte", "t3_prefill.pte",
+              "t3_decode.pte", "s3gen_encoder.pte", "cfm_step.pte", "hifigan.pte"
+          }
+          if set(manifest) != expected_models:
+              raise SystemExit("Pinned model manifest is incomplete or contains unexpected files")
+          constants = Path("app/src/main/java/com/acul3/chatterboxtts/tts/Constants.kt")
+          text = constants.read_text()
+          names = sorted(expected_models)
+          lines = ["    val MODEL_SHA256: Map<String, String> = mapOf("]
+          lines += [
+              '        "' + name + '" to "' + manifest[name]["sha256"] + '"' +
+              ("," if index < len(names) - 1 else "")
+              for index, name in enumerate(names)
+          ]
+          lines += ["    )", "    val MODEL_SIZES: Map<String, Long> = mapOf("]
+          lines += [
+              '        "' + name + '" to ' + str(manifest[name]["size"]) + "L" +
+              ("," if index < len(names) - 1 else "")
+              for index, name in enumerate(names)
+          ]
+          lines += ["    )"]
+          text = replace_once(
+              text,
+              "    val MODEL_FILES = listOf(",
+              chr(10).join(lines) + chr(10) + chr(10) + "    val MODEL_FILES = listOf(",
+              "model SHA-256/size manifest"
           )
           constants.write_text(text)
 
