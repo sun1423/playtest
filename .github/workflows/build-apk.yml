@@ -1012,6 +1012,10 @@ jobs:
           grep -q 'MODEL_SIZES' app/src/main/java/com/acul3/chatterboxtts/tts/Constants.kt
           test -s app/src/main/assets/grapheme_mtl_merged_expanded_v1.json
           grep -q 'readLogBufferStatic' app/src/main/java/com/acul3/chatterboxtts/models/PteModel.kt
+          grep -q 'T3 prefill requires FP32 cond_emb' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
+          grep -q 'T3 prefill requires INT32 text_tokens' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
+          grep -q 'Tensor.fromBlob(intArrayOf(token)' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
+          grep -q 'Tensor.fromBlob(intArrayOf(step)' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
 
       - name: Harden model cache, sampler, lifecycle and vocoder
         working-directory: /tmp/chatterbox-android
@@ -1538,110 +1542,6 @@ jobs:
               if count != 1:
                   raise SystemExit(f"{label}: expected one match, found {count}")
               return text.replace(old, new, 1)
-
-          # T3 V4 PTE signature, measured by the full seven-model ExecuTorch run:
-          # cond_emb FLOAT32 [1,34,1024], text_tokens INT32 [1,258].
-          # decode prev_token INT32 [1,1], step_idx INT32 scalar, K/V FLOAT32.
-          t3 = Path("app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt")
-          text = t3.read_text()
-          text = replace_once(
-              text,
-              "PTE T3 exports use FP16 for prefill/decode. This path preserves the output",
-              "The validated PTE revision uses FP32 for prefill/decode. This path preserves the output",
-              "T3 precision documentation"
-          )
-          text = replace_once(
-              text,
-              "require(condEmbedding.dtype() == DType.FLOAT || condEmbedding.dtype() == DType.HALF)",
-              "require(condEmbedding.dtype() == DType.FLOAT)",
-              "T3 conditioning dtype"
-          )
-          text = replace_once(
-              text,
-              '"T3 conditioning must be FP32 or FP16, got " + condEmbedding.dtype()',
-              '"T3 conditioning must be FP32, got " + condEmbedding.dtype()',
-              "T3 conditioning error text"
-          )
-          text = replace_once(
-              text,
-              "require(textTokens.dtype() == DType.INT64)",
-              "require(textTokens.dtype() == DType.INT32)",
-              "T3 text dtype"
-          )
-          text = replace_once(
-              text,
-              '"T3 text tokens must be INT64, got " + textTokens.dtype()',
-              '"T3 text tokens must be INT32, got " + textTokens.dtype()',
-              "T3 text error text"
-          )
-          text = replace_once(
-              text,
-              "Tensor.fromBlob(longArrayOf(token.toLong()), longArrayOf(1L, 1L))",
-              "Tensor.fromBlob(intArrayOf(token), longArrayOf(1L, 1L))",
-              "T3 decoder previous token INT32"
-          )
-          text = replace_once(
-              text,
-              "Tensor.fromBlob(longArrayOf(step.toLong()), longArrayOf())",
-              "Tensor.fromBlob(intArrayOf(step), longArrayOf())",
-              "T3 decoder step index INT32"
-          )
-
-          prefill_start = text.index("              private fun runPrefill(")
-          prefill_end = text.index("              private fun logitsAsFloat(", prefill_start)
-          if prefill_start < 0 or prefill_end <= prefill_start:
-              raise SystemExit("Could not locate T3Decoder.runPrefill()")
-          new_prefill = """              private fun runPrefill(condEmbedding: Tensor, textTokens: Tensor): Array<EValue> {
-                  require(condEmbedding.shape().contentEquals(COND_SHAPE) &&
-                      condEmbedding.dtype() == DType.FLOAT) {
-                      "T3 prefill requires FP32 cond_emb [1,34,1024]: " + describe(condEmbedding)
-                  }
-                  require(textTokens.shape().contentEquals(TEXT_SHAPE) &&
-                      textTokens.dtype() == DType.INT32) {
-                      "T3 prefill requires INT32 text_tokens [1,258]: " + describe(textTokens)
-                  }
-
-                  Log.i(
-                      TAG,
-                      "Calling validated T3 prefill signature: cond=" +
-                          describe(condEmbedding) + ", text=" + describe(textTokens) +
-                          ", modelRevision=" + Constants.MODEL_REVISION
-                  )
-                  try {
-                      val outputs = prefillModel.forward(
-                          EValue.from(condEmbedding),
-                          EValue.from(textTokens)
-                      )
-                      require(outputs.size == 2) {
-                          "T3 prefill should return exactly 2 outputs (logits, flat KV); got " +
-                              outputs.size
-                      }
-                      val logits = outputs[0].toTensor()
-                      val kv = outputs[1].toTensor()
-                      require(logits.dtype() == DType.FLOAT && kv.dtype() == DType.FLOAT) {
-                          "Validated T3 prefill export must return FP32 logits and FP32 KV; got logits=" +
-                              logits.dtype() + ", KV=" + kv.dtype()
-                      }
-                      Log.i(
-                          TAG,
-                          "T3 prefill completed: logits=" + describe(logits) +
-                              ", KV=" + describe(kv)
-                      )
-                      return outputs
-                  } catch (e: Exception) {
-                      val message = "T3 prefill failed for the validated FP32/INT32 PTE contract. " +
-                          "Model revision=" + Constants.MODEL_REVISION +
-                          "; conditioning=" + describe(condEmbedding) +
-                          "; text=" + describe(textTokens) +
-                          "; underlying ExecuTorch failure=" + errorChain(e)
-                      Log.e(TAG, message, e)
-                      throw RuntimeException(message, e)
-                  }
-              }
-
-          """
-          text = text[:prefill_start] + new_prefill + text[prefill_end:]
-          t3.write_text(text)
 
           # Android creates INT32 text IDs (not a LongArray/INT64 tensor).
           engine = Path("app/src/main/java/com/acul3/chatterboxtts/tts/ChatterboxTTS.kt")
