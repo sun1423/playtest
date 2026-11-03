@@ -2152,10 +2152,7 @@ jobs:
   publish:
     name: Publish direct APK only after PTE validation
     needs: [build, validate-pte-e2e]
-    if: always() && needs.build.result == 'success' && (
-      needs.validate-pte-e2e.result == 'success' ||
-      (needs.validate-pte-e2e.result == 'skipped' && needs.build.outputs.model_revision == 'e444904352a22332a8083d6fb7b9354ee5e96daf')
-    )
+    if: always() && needs.build.result == 'success' && (needs['validate-pte-e2e'].result == 'success' || (needs['validate-pte-e2e'].result == 'skipped' && needs.build.outputs.model_revision == 'e444904352a22332a8083d6fb7b9354ee5e96daf'))
     runs-on: ubuntu-latest
     steps:
       - name: Download verified APK artifact
