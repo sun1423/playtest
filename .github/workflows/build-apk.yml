@@ -634,20 +634,37 @@ jobs:
               fun isLoaded(): Boolean = module != null
 
               fun forward(vararg inputs: EValue): Array<EValue> {
-                  val mod = module ?: throw IllegalStateException("Model not loaded: $modelPath")
+                  val mod = module ?: throw IllegalStateException("Model not loaded: " + modelPath)
+                  val inputSummary = inputs.mapIndexed { index, input ->
+                      if (input.isTensor()) {
+                          val tensor = input.toTensor()
+                          "input[" + index + "] shape=" + tensor.shape().contentToString() +
+                              " dtype=" + tensor.dtype() + " elements=" + tensor.numel()
+                      } else {
+                          "input[" + index + "] non-tensor"
+                      }
+                  }.joinToString("; ")
                   try {
                       return mod.forward(*inputs)
                   } catch (e: Exception) {
-                      val nativeLog = try {
-                          mod.readLogBuffer().takeLast(12).joinToString("\n")
-                      } catch (_: Exception) {
-                          ""
+                      val nativeLogs = mutableListOf<String>()
+                      try {
+                          mod.readLogBuffer().forEach { nativeLogs.add(it) }
+                      } catch (logError: Exception) {
+                          Log.w(TAG, "Could not read ExecuTorch module log buffer", logError)
                       }
-                      val detail = if (nativeLog.isBlank()) "" else "\nExecuTorch native log:\n$nativeLog"
-                      throw RuntimeException(
-                          "ExecuTorch forward failed for " + File(modelPath).name + ": " + e.message + detail,
-                          e
-                      )
+                      try {
+                          Module.readLogBufferStatic().forEach { nativeLogs.add(it) }
+                      } catch (logError: Exception) {
+                          Log.w(TAG, "Could not read ExecuTorch global log buffer", logError)
+                      }
+                      val nativeLog = nativeLogs.distinct().takeLast(24).joinToString("\n")
+                      val detail = if (nativeLog.isBlank()) "" else "\nExecuTorch native log:\n" + nativeLog
+                      val message = "ExecuTorch forward failed for " + File(modelPath).name +
+                          "; " + inputSummary + "; cause=" + e.javaClass.simpleName +
+                          ": " + (e.message ?: "<no message>") + detail
+                      Log.e(TAG, message, e)
+                      throw RuntimeException(message, e)
                   }
               }
 
@@ -818,7 +835,7 @@ jobs:
                           "T3 decode logits shape changed at step " + step + ": " +
                               currentLogits.shape().contentToString()
                       }
-                      val logitsData = currentLogits.dataAsFloatArray
+                      val logitsData = logitsAsFloat(currentLogits, step)
                       require(logitsData.size == Constants.SPEECH_VOCAB) {
                           "T3 decode logits length mismatch at step " + step + ": " + logitsData.size
                       }
@@ -895,23 +912,79 @@ jobs:
                       val halfValues = ShortArray(values.size) { index -> Half.toHalf(values[index]) }
                       Tensor.fromBlob(halfValues, condEmbedding.shape())
                   }
-                  return try {
-                      prefillModel.forward(EValue.from(halfConditioning), EValue.from(textTokens))
-                  } catch (halfError: Exception) {
-                      if (condEmbedding.dtype() == DType.HALF) throw halfError
-                      Log.w(TAG, "FP16 T3 prefill rejected; retrying once with FP32 conditioning", halfError)
-                      try {
-                          prefillModel.forward(EValue.from(condEmbedding), EValue.from(textTokens))
-                      } catch (floatError: Exception) {
-                          floatError.addSuppressed(halfError)
-                          throw RuntimeException(
-                              "T3 prefill rejected both FP16 and FP32 conditioning. FP16=" +
-                                  describe(halfConditioning) + ", FP32=" + describe(condEmbedding) +
-                                  ", text=" + describe(textTokens) + ". Verify the pinned PTE revision.",
-                              floatError
-                          )
-                      }
+                  require(halfConditioning.shape().contentEquals(COND_SHAPE) &&
+                      halfConditioning.dtype() == DType.HALF) {
+                      "Prepared T3 prefill conditioning is not FP16 [1,34,1024]: " +
+                          describe(halfConditioning)
                   }
+                  require(textTokens.shape().contentEquals(TEXT_SHAPE) &&
+                      textTokens.dtype() == DType.INT64) {
+                      "T3 prefill text input must be INT64 [1,258]: " + describe(textTokens)
+                  }
+
+                  Log.i(
+                      TAG,
+                      "Calling exported T3 prefill signature: cond=" +
+                          describe(halfConditioning) + ", text=" + describe(textTokens) +
+                          ", modelRevision=" + Constants.MODEL_REVISION
+                  )
+                  try {
+                      val outputs = prefillModel.forward(
+                          EValue.from(halfConditioning),
+                          EValue.from(textTokens)
+                      )
+                      require(outputs.size == 2) {
+                          "T3 prefill should return exactly 2 outputs (logits, flat KV); got " +
+                              outputs.size
+                      }
+                      val logits = outputs[0].toTensor()
+                      val kv = outputs[1].toTensor()
+                      require(logits.dtype() == DType.HALF && kv.dtype() == DType.HALF) {
+                          "Pinned T3 prefill export must return FP16 logits and FP16 KV; got logits=" +
+                              logits.dtype() + ", KV=" + kv.dtype()
+                      }
+                      Log.i(
+                          TAG,
+                          "T3 prefill completed: logits=" + describe(logits) +
+                              ", KV=" + describe(kv)
+                      )
+                      return outputs
+                  } catch (e: Exception) {
+                      val message = "T3 prefill execution failed for the pinned FP16 export. " +
+                          "Expected cond_emb FP16 [1,34,1024] and text_tokens INT64 [1,258]. " +
+                          "Model revision=" + Constants.MODEL_REVISION +
+                          "; conditioning=" + describe(halfConditioning) +
+                          "; text=" + describe(textTokens) +
+                          "; underlying ExecuTorch failure=" + errorChain(e)
+                      Log.e(TAG, message, e)
+                      throw RuntimeException(message, e)
+                  }
+              }
+
+              private fun logitsAsFloat(tensor: Tensor, step: Int): FloatArray {
+                  return when (tensor.dtype()) {
+                      DType.FLOAT -> tensor.dataAsFloatArray
+                      DType.HALF -> {
+                          val halfValues = tensor.dataAsShortArray
+                          FloatArray(halfValues.size) { index -> Half.toFloat(halfValues[index]) }
+                      }
+                      else -> throw IllegalStateException(
+                          "T3 logits have unsupported dtype at step " + step + ": " + tensor.dtype()
+                      )
+                  }
+              }
+
+              private fun errorChain(error: Throwable): String {
+                  val messages = mutableListOf<String>()
+                  var current: Throwable? = error
+                  while (current != null && messages.size < 8) {
+                      messages.add(
+                          current.javaClass.simpleName + ": " +
+                              (current.message ?: "<no message>")
+                      )
+                      current = current.cause
+                  }
+                  return messages.joinToString(" -> ")
               }
 
               private fun describe(tensor: Tensor): String =
@@ -943,6 +1016,11 @@ jobs:
           grep -q 'MODEL_SHA256' app/src/main/java/com/acul3/chatterboxtts/tts/Constants.kt
           grep -q 'MODEL_SIZES' app/src/main/java/com/acul3/chatterboxtts/tts/Constants.kt
           test -s app/src/main/assets/grapheme_mtl_merged_expanded_v1.json
+          grep -q 'readLogBufferStatic' app/src/main/java/com/acul3/chatterboxtts/models/PteModel.kt
+          grep -q 'T3 prefill execution failed for the pinned FP16 export' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
+          grep -q 'Half.toFloat' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
+          ! grep -q 'retrying once with FP32 conditioning' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
+          ! grep -q 'currentLogits.dataAsFloatArray' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
 
       - name: Harden model cache, sampler, lifecycle and vocoder
         working-directory: /tmp/chatterbox-android
