@@ -1012,10 +1012,15 @@ jobs:
           grep -q 'MODEL_SIZES' app/src/main/java/com/acul3/chatterboxtts/tts/Constants.kt
           test -s app/src/main/assets/grapheme_mtl_merged_expanded_v1.json
           grep -q 'readLogBufferStatic' app/src/main/java/com/acul3/chatterboxtts/models/PteModel.kt
-          grep -q 'T3 prefill execution failed for the pinned FP16 export' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
-          grep -q 'Half.toFloat' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
-          ! grep -q 'retrying once with FP32 conditioning' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
-          ! grep -q 'currentLogits.dataAsFloatArray' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
+          grep -q 'T3 prefill requires FP32 cond_emb' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
+          grep -q 'T3 prefill requires INT32 text_tokens' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
+          grep -q 'Tensor.fromBlob(intArrayOf(token)' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
+          grep -q 'Tensor.fromBlob(intArrayOf(step)' app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt
+          grep -q 'loadIntAsset("prompt_tokens.bin"' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
+          grep -q 'loadIntAsset("prompt_token_len.bin"' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
+          grep -q 'speechToksPadded = IntArray' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
+          ! grep -q 'LongArray(Constants.TEXT_SEQ_LEN)' app/src/main/java/com/acul3/chatterboxtts/tts/ChatterboxTTS.kt
+          ! grep -q 'LongArray(Constants.MAX_SPEECH_TOKENS_VOCODER)' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
 
       - name: Harden model cache, sampler, lifecycle and vocoder
         working-directory: /tmp/chatterbox-android
@@ -1368,41 +1373,7 @@ jobs:
               }''',
               "tracked native model loader"
           )
-          # T3 prefill PTE expects INT32 text IDs; do not build an INT64 LongArray.
-          text = engine.read_text()
-          text = replace_once(
-              text,
-              "val textSeq = LongArray(Constants.TEXT_SEQ_LEN) { 0L }",
-              "val textSeq = IntArray(Constants.TEXT_SEQ_LEN) { 0 }",
-              "T3 text sequence INT32 storage"
-          )
-          text = replace_once(
-              text,
-              "textSeq[0] = Constants.SOT_TEXT.toLong()",
-              "textSeq[0] = Constants.SOT_TEXT",
-              "T3 SOT INT32"
-          )
-          text = replace_once(
-              text,
-              "textSeq[1 + i] = rawTokenIds[i].toLong()",
-              "textSeq[1 + i] = rawTokenIds[i]",
-              "T3 token IDs INT32"
-          )
-          text = replace_once(
-              text,
-              "textSeq[Constants.TEXT_SEQ_LEN - 1] = Constants.EOT_TEXT.toLong()",
-              "textSeq[Constants.TEXT_SEQ_LEN - 1] = Constants.EOT_TEXT",
-              "T3 EOT INT32"
-          )
-          text = replace_once(
-              text,
-              "val textTensor = Tensor.fromBlob(textSeq, longArrayOf(1, Constants.TEXT_SEQ_LEN.toLong()))",
-              "val textTensor = Tensor.fromBlob(textSeq, longArrayOf(1, Constants.TEXT_SEQ_LEN.toLong()))",
-              "T3 INT32 tensor construction"
-          )
-          engine.write_text(text)
-
-          pairs = {
+                    pairs = {
               'PteModel(modelManager.getModelPath("t3_cond_speech_emb.pte")).also { it.load() }':'openModel("t3_cond_speech_emb.pte")',
               'PteModel(modelManager.getModelPath("t3_cond_enc.pte")).also { it.load() }':'openModel("t3_cond_enc.pte")',
               'PteModel(modelManager.getModelPath("t3_prefill.pte")).also { it.load() }':'openModel("t3_prefill.pte")',
@@ -1555,14 +1526,140 @@ jobs:
           )
           vocoder.write_text(text)
 
-          # Apply the experimentally verified PTE tensor contracts to the Android code.
+                    print("Applied native model lifecycle, tokenizer boundary and vocoder validation.")
+          PY
+
+          test -s app/src/test/java/com/acul3/chatterboxtts/models/T3KvCacheLayoutTest.kt
+          test -s app/src/test/java/com/acul3/chatterboxtts/tts/SpeechSamplerTest.kt
+          grep -q 'MODEL_SHA256' app/src/main/java/com/acul3/chatterboxtts/tts/Constants.kt
+          grep -q 'MODEL_SIZES' app/src/main/java/com/acul3/chatterboxtts/tts/Constants.kt
+
+      - name: Apply experimentally validated Android PTE input contracts
+        working-directory: /tmp/chatterbox-android
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected one match, found {count}")
+              return text.replace(old, new, 1)
+
+          # T3 V4 PTE signature, measured by the full seven-model ExecuTorch run:
+          # cond_emb FLOAT32 [1,34,1024], text_tokens INT32 [1,258].
+          # decode prev_token INT32 [1,1], step_idx INT32 scalar, K/V FLOAT32.
+          t3 = Path("app/src/main/java/com/acul3/chatterboxtts/models/T3Decoder.kt")
+          text = t3.read_text()
+          text = replace_once(
+              text,
+              "require(condEmbedding.dtype() == DType.FLOAT || condEmbedding.dtype() == DType.HALF)",
+              "require(condEmbedding.dtype() == DType.FLOAT)",
+              "T3 conditioning dtype"
+          )
+          text = replace_once(
+              text,
+              '"T3 conditioning must be FP32 or FP16, got " + condEmbedding.dtype()',
+              '"T3 conditioning must be FP32, got " + condEmbedding.dtype()',
+              "T3 conditioning error text"
+          )
+          text = replace_once(
+              text,
+              "require(textTokens.dtype() == DType.INT64)",
+              "require(textTokens.dtype() == DType.INT32)",
+              "T3 text dtype"
+          )
+          text = replace_once(
+              text,
+              '"T3 text tokens must be INT64, got " + textTokens.dtype()',
+              '"T3 text tokens must be INT32, got " + textTokens.dtype()',
+              "T3 text error text"
+          )
+          text = replace_once(
+              text,
+              "Tensor.fromBlob(longArrayOf(token.toLong()), longArrayOf(1L, 1L))",
+              "Tensor.fromBlob(intArrayOf(token), longArrayOf(1L, 1L))",
+              "T3 decoder previous token INT32"
+          )
+          text = replace_once(
+              text,
+              "Tensor.fromBlob(longArrayOf(step.toLong()), longArrayOf())",
+              "Tensor.fromBlob(intArrayOf(step), longArrayOf())",
+              "T3 decoder step index INT32"
+          )
+
+          prefill_start = text.index("              private fun runPrefill(")
+          prefill_end = text.index("              private fun logitsAsFloat(", prefill_start)
+          if prefill_start < 0 or prefill_end <= prefill_start:
+              raise SystemExit("Could not locate T3Decoder.runPrefill()")
+          new_prefill = """              private fun runPrefill(condEmbedding: Tensor, textTokens: Tensor): Array<EValue> {
+                  require(condEmbedding.shape().contentEquals(COND_SHAPE) &&
+                      condEmbedding.dtype() == DType.FLOAT) {
+                      "T3 prefill requires FP32 cond_emb [1,34,1024]: " + describe(condEmbedding)
+                  }
+                  require(textTokens.shape().contentEquals(TEXT_SHAPE) &&
+                      textTokens.dtype() == DType.INT32) {
+                      "T3 prefill requires INT32 text_tokens [1,258]: " + describe(textTokens)
+                  }
+
+                  Log.i(
+                      TAG,
+                      "Calling validated T3 prefill signature: cond=" +
+                          describe(condEmbedding) + ", text=" + describe(textTokens) +
+                          ", modelRevision=" + Constants.MODEL_REVISION
+                  )
+                  try {
+                      val outputs = prefillModel.forward(
+                          EValue.from(condEmbedding),
+                          EValue.from(textTokens)
+                      )
+                      require(outputs.size == 2) {
+                          "T3 prefill should return exactly 2 outputs (logits, flat KV); got " +
+                              outputs.size
+                      }
+                      val logits = outputs[0].toTensor()
+                      val kv = outputs[1].toTensor()
+                      require(logits.dtype() == DType.FLOAT && kv.dtype() == DType.FLOAT) {
+                          "Validated T3 prefill export must return FP32 logits and FP32 KV; got logits=" +
+                              logits.dtype() + ", KV=" + kv.dtype()
+                      }
+                      Log.i(
+                          TAG,
+                          "T3 prefill completed: logits=" + describe(logits) +
+                              ", KV=" + describe(kv)
+                      )
+                      return outputs
+                  } catch (e: Exception) {
+                      val message = "T3 prefill failed for the validated FP32/INT32 PTE contract. " +
+                          "Model revision=" + Constants.MODEL_REVISION +
+                          "; conditioning=" + describe(condEmbedding) +
+                          "; text=" + describe(textTokens) +
+                          "; underlying ExecuTorch failure=" + errorChain(e)
+                      Log.e(TAG, message, e)
+                      throw RuntimeException(message, e)
+                  }
+              }
+
+"""
+          text = text[:prefill_start] + new_prefill + text[prefill_end:]
+          t3.write_text(text)
+
+          # Android creates INT32 text IDs (not a LongArray/INT64 tensor).
           engine = Path("app/src/main/java/com/acul3/chatterboxtts/tts/ChatterboxTTS.kt")
           text = engine.read_text()
           text = replace_once(
               text,
+              "import org.pytorch.executorch.EValue",
+              "import org.pytorch.executorch.DType\nimport org.pytorch.executorch.EValue",
+              "ChatterboxTTS DType import"
+          )
+          text = replace_once(
+              text,
               "val textSeq = LongArray(Constants.TEXT_SEQ_LEN) { 0L }",
               "val textSeq = IntArray(Constants.TEXT_SEQ_LEN) { 0 }",
-              "T3 text sequence INT32 storage"
+              "T3 text sequence INT32"
           )
           text = replace_once(
               text,
@@ -1574,7 +1671,7 @@ jobs:
               text,
               "textSeq[1 + i] = rawTokenIds[i].toLong()",
               "textSeq[1 + i] = rawTokenIds[i]",
-              "T3 content token INT32"
+              "T3 content IDs INT32"
           )
           text = replace_once(
               text,
@@ -1584,49 +1681,48 @@ jobs:
           )
           text = replace_once(
               text,
-              '        val condSpeechEmb = speechEmbOutputs[0].toTensor()',
-              '''        require(speechEmbOutputs.size == 1) { "Conditioning speech embedder should return one tensor" }
+              "        val condSpeechEmb = speechEmbOutputs[0].toTensor()",
+              """        require(speechEmbOutputs.size == 1) { "Conditioning speech embedder should return one tensor" }
                   val condSpeechEmb = speechEmbOutputs[0].toTensor()
                   require(condSpeechEmb.shape().contentEquals(longArrayOf(1L, 150L, 1024L)) &&
                       condSpeechEmb.dtype() == DType.FLOAT) {
                       "Conditioning speech embedding contract mismatch: shape=" +
                           condSpeechEmb.shape().contentToString() + ", dtype=" + condSpeechEmb.dtype()
-                  }''',
+                  }""",
               "conditioning speech output contract"
           )
           text = replace_once(
               text,
-              '        cachedCondEmb = condEncOutputs[0].toTensor()',
-              '''        require(condEncOutputs.size == 1) { "Conditioning encoder should return one tensor" }
+              "        cachedCondEmb = condEncOutputs[0].toTensor()",
+              """        require(condEncOutputs.size == 1) { "Conditioning encoder should return one tensor" }
                   cachedCondEmb = condEncOutputs[0].toTensor()
                   require(cachedCondEmb!!.shape().contentEquals(
                       longArrayOf(1L, Constants.COND_LEN.toLong(), 1024L)
                   ) && cachedCondEmb!!.dtype() == DType.FLOAT) {
                       "T3 prefill conditioning contract mismatch: shape=" +
                           cachedCondEmb!!.shape().contentToString() + ", dtype=" + cachedCondEmb!!.dtype()
-                  }''',
+                  }""",
               "conditioning encoder output contract"
           )
           text = replace_once(
               text,
-              '        val ints = IntArray(bytes.size / 4)\\n        buffer.asIntBuffer().get(ints)\\n        // ExecuTorch Android: int[] creates INT32 tensor (matches re-exported models)\\n        return Tensor.fromBlob(ints, shape)',
-              '''        val expected = shape.fold(1L) { total, dimension -> total * dimension }
+              "        val ints = IntArray(bytes.size / 4)",
+              """        val expected = shape.fold(1L) { total, dimension -> total * dimension }
                   require(bytes.size % 4 == 0 && bytes.size / 4L == expected) {
-                      "$name byte length mismatch: expected " + (expected * 4) + ", got " + bytes.size
+                      name + " byte length mismatch: expected " + (expected * 4) + ", got " + bytes.size
                   }
-                  val ints = IntArray(bytes.size / 4)
-                  buffer.asIntBuffer().get(ints)
-                  return Tensor.fromBlob(ints, shape)''',
+                  val ints = IntArray(bytes.size / 4)""",
               "conditioning INT32 asset length"
           )
           engine.write_text(text)
 
+          # S3Gen PTE expects INT32 speech tokens, speech length, prompt tokens and prompt length.
           vocoder = Path("app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt")
           text = vocoder.read_text()
           text = replace_once(
               text,
-              'import org.pytorch.executorch.EValue',
-              'import org.pytorch.executorch.DType\\nimport org.pytorch.executorch.EValue',
+              "import org.pytorch.executorch.EValue",
+              "import org.pytorch.executorch.DType\nimport org.pytorch.executorch.EValue",
               "VocoderPipeline DType import"
           )
           text = replace_once(
@@ -1639,46 +1735,50 @@ jobs:
               text,
               'private val promptTokenLen: Tensor by lazy { loadLongAsset("prompt_token_len.bin", longArrayOf(1)) }',
               'private val promptTokenLen: Tensor by lazy { loadIntAsset("prompt_token_len.bin", longArrayOf(1)) }',
-              "S3Gen prompt length INT32"
+              "S3Gen prompt token length INT32"
           )
           text = replace_once(
               text,
-              '        val speechToksPadded = LongArray(Constants.MAX_SPEECH_TOKENS_VOCODER) { 0L }\\n        val copyLen = min(nTokens, Constants.MAX_SPEECH_TOKENS_VOCODER)\\n        speechTokens.copyInto(speechToksPadded, 0, 0, copyLen)',
-              '''        require(nTokens in 1..Constants.MAX_SPEECH_TOKENS_VOCODER) {
-                      "S3Gen expects 1.." + Constants.MAX_SPEECH_TOKENS_VOCODER + " speech tokens, got " + nTokens
-                  }
-                  val speechToksPadded = IntArray(Constants.MAX_SPEECH_TOKENS_VOCODER) { 0 }
-                  val copyLen = min(nTokens, Constants.MAX_SPEECH_TOKENS_VOCODER)
-                  for (index in 0 until copyLen) {
+              "val speechToksPadded = LongArray(Constants.MAX_SPEECH_TOKENS_VOCODER) { 0L }",
+              "val speechToksPadded = IntArray(Constants.MAX_SPEECH_TOKENS_VOCODER) { 0 }",
+              "S3Gen speech token buffer INT32"
+          )
+          text = replace_once(
+              text,
+              "speechTokens.copyInto(speechToksPadded, 0, 0, copyLen)",
+              """for (index in 0 until copyLen) {
                       val token = speechTokens[index]
                       require(token in 0L until Constants.SPEECH_VOCAB.toLong()) {
                           "Speech token is outside the Chatterbox vocabulary: " + token
                       }
                       speechToksPadded[index] = token.toInt()
-                  }''',
-              "S3Gen speech-token INT32 buffer"
+                  }""",
+              "S3Gen LongArray to INT32 copy"
           )
           text = replace_once(
               text,
-              '            longArrayOf(nTokens.toLong()),',
-              '            intArrayOf(nTokens),',
-              "S3Gen speech length INT32"
+              "            longArrayOf(nTokens.toLong()),",
+              "            intArrayOf(nTokens),",
+              "S3Gen speech token length INT32"
           )
           text = replace_once(
               text,
-              '        val hLenVal = hLenTensor.dataAsLongArray[0].toInt()\\n        val melLen1Val = melLen1Tensor.dataAsLongArray[0].toInt()',
-              '''        val hLenVal = tensorScalarToInt(hLenTensor, "h_len")
-                  val melLen1Val = tensorScalarToInt(melLen1Tensor, "mel_len1")''',
-              "S3Gen scalar length output handling"
+              'val hLenVal = hLenTensor.dataAsLongArray[0].toInt()',
+              'val hLenVal = tensorScalarToInt(hLenTensor, "h_len")',
+              "S3Gen h_len scalar"
           )
           text = replace_once(
               text,
-              '    private fun loadLongAsset(name: String, shape: LongArray): Tensor {',
-              '''    private fun loadIntAsset(name: String, shape: LongArray): Tensor {
+              'val melLen1Val = melLen1Tensor.dataAsLongArray[0].toInt()',
+              'val melLen1Val = tensorScalarToInt(melLen1Tensor, "mel_len1")',
+              "S3Gen mel_len1 scalar"
+          )
+          load_long_anchor = "    private fun loadLongAsset(name: String, shape: LongArray): Tensor {"
+          int_helpers = """    private fun loadIntAsset(name: String, shape: LongArray): Tensor {
                   val bytes = context.assets.open(name).use { it.readBytes() }
                   val expected = shape.fold(1L) { total, dimension -> total * dimension }
                   require(bytes.size % 4 == 0 && bytes.size / 4L == expected) {
-                      "$name byte length mismatch: expected " + (expected * 4) + ", got " + bytes.size
+                      name + " byte length mismatch: expected " + (expected * 4) + ", got " + bytes.size
                   }
                   val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
                   val values = IntArray(bytes.size / 4)
@@ -1688,36 +1788,24 @@ jobs:
 
               private fun tensorScalarToInt(tensor: Tensor, name: String): Int {
                   require(tensor.numel() == 1L) {
-                      "$name must contain exactly one scalar, got " + tensor.shape().contentToString()
+                      name + " must contain one scalar, got " + tensor.shape().contentToString()
                   }
                   return when (tensor.dtype()) {
                       DType.INT32 -> tensor.dataAsIntArray.single()
                       DType.INT64 -> tensor.dataAsLongArray.single().toInt()
                       else -> throw IllegalStateException(
-                          "$name has unexpected dtype " + tensor.dtype() + "; expected INT32 or INT64"
+                          name + " has unsupported dtype " + tensor.dtype()
                       )
                   }
               }
 
-              private fun loadLongAsset(name: String, shape: LongArray): Tensor {''',
-              "INT32 voice asset loader and scalar output helper"
-          )
-          text = replace_once(
-              text,
-              '    private val promptMel: Tensor by lazy { loadFloatAsset("prompt_mel.bin", longArrayOf(1, 314, 80)) }',
-              '    private val promptMel: Tensor by lazy { loadFloatAsset("prompt_mel.bin", longArrayOf(1, 314, 80)) }',
-              "prompt mel remains FP32"
-          )
+"""
+          if text.count(load_long_anchor) != 1:
+              raise SystemExit("S3Gen loadLongAsset insertion anchor missing or duplicated")
+          text = text.replace(load_long_anchor, int_helpers + load_long_anchor, 1)
           vocoder.write_text(text)
-
-          print("Applied validated FP32/INT32 T3 and S3Gen PTE signatures to Android Kotlin sources.")
-          print("Applied native model lifecycle, tokenizer boundary and vocoder validation.")
+          print("Applied validated FP32/INT32 T3 and S3Gen PTE signatures.")
           PY
-
-          test -s app/src/test/java/com/acul3/chatterboxtts/models/T3KvCacheLayoutTest.kt
-          test -s app/src/test/java/com/acul3/chatterboxtts/tts/SpeechSamplerTest.kt
-          grep -q 'MODEL_SHA256' app/src/main/java/com/acul3/chatterboxtts/tts/Constants.kt
-          grep -q 'MODEL_SIZES' app/src/main/java/com/acul3/chatterboxtts/tts/Constants.kt
 
       - name: Verify Android PTE tensor contracts
         working-directory: /tmp/chatterbox-android
