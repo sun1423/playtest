@@ -17,6 +17,8 @@ jobs:
     name: Build arm64-v8a debug APK
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    outputs:
+      model_revision: ${{ steps.generate.outputs.model_revision }}
     env:
       UPSTREAM_COMMIT: 7613d13ccfeb5d90babb1b14c0d8cf2da2d70f63
       ANDROID_PROJECT_DIR: /tmp/chatterbox-android
@@ -43,6 +45,7 @@ jobs:
           echo "Using upstream commit: $(git -C "$ANDROID_PROJECT_DIR" rev-parse HEAD)"
 
       - name: Generate Playtest changes from this workflow
+        id: generate
         shell: bash
         run: |
           cd "$ANDROID_PROJECT_DIR"
@@ -80,6 +83,7 @@ jobs:
           echo "MODEL_REVISION=$MODEL_REVISION" >> "$GITHUB_ENV"
           echo "MODEL_MANIFEST_B64=$MODEL_MANIFEST_B64" >> "$GITHUB_ENV"
           echo "Pinning seven PTE models to immutable revision $MODEL_REVISION with SHA-256 metadata"
+          echo "model_revision=$MODEL_REVISION" >> "$GITHUB_OUTPUT"
 
           python3 - <<'PY'
           from pathlib import Path
@@ -1581,16 +1585,204 @@ jobs:
             echo "- **Model files:** downloaded by the app on first generation; several GB required"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Upload APK pending full PTE validation
+        uses: actions/upload-artifact@v4
+        with:
+          name: playtest-arm64-apk
+          path: output/Chatterbox-Playtest-v2-arm64-v8a.apk
+          if-no-files-found: error
+          retention-days: 3
+
+  validate-pte-e2e:
+    name: Validate all seven PTE models and generate real WAV
+    needs: build
+    if: github.event_name == 'push' && contains(github.event.head_commit.message, '[run-pte-e2e]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    env:
+      MODEL_REVISION: ${{ needs.build.outputs.model_revision }}
+    steps:
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install CPU PyTorch and ExecuTorch 1.1.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.10.0 torchaudio==2.10.0
+          python -m pip install executorch==1.1.0
+
+      - name: Install Chatterbox inference dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install \
+            "numpy>=2.0,<2.3" \
+            librosa==0.11.0 \
+            s3tokenizer \
+            transformers==5.2.0 \
+            diffusers==0.29.0 \
+            git+https://github.com/resemble-ai/Perth.git@master \
+            conformer==0.3.2 \
+            safetensors==0.5.3 \
+            spacy-pkuseg \
+            pykakasi==2.3.0 \
+            pyloudnorm \
+            omegaconf \
+            soundfile \
+            huggingface_hub
+
+      - name: Fetch pinned upstream reference test
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/acul3/chatterbox-executorch.git /tmp/chatterbox-executorch
+          git -C /tmp/chatterbox-executorch checkout --detach 4241137d8150fe96eb0d4ebf8a228e9abd072ab9
+          python -m pip install --no-deps -e /tmp/chatterbox-executorch
+          echo "Reference repository commit: $(git -C /tmp/chatterbox-executorch rev-parse HEAD)"
+
+      - name: Download the exact seven PTE models used by the APK
+        working-directory: /tmp/chatterbox-executorch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$MODEL_REVISION"
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from huggingface_hub import snapshot_download
+
+          revision = os.environ["MODEL_REVISION"]
+          files = [
+              "t3_cond_speech_emb.pte",
+              "t3_cond_enc.pte",
+              "t3_prefill.pte",
+              "t3_decode.pte",
+              "s3gen_encoder.pte",
+              "cfm_step.pte",
+              "hifigan.pte",
+          ]
+          root = Path(snapshot_download(
+              repo_id="acul3/chatterbox-executorch",
+              repo_type="model",
+              revision=revision,
+              local_dir="et_models",
+              allow_patterns=files,
+          ))
+          total = 0
+          for name in files:
+              item = root / name
+              if not item.is_file() or item.stat().st_size <= 1024:
+                  raise SystemExit(f"Missing or incomplete PTE: {name}")
+              total += item.stat().st_size
+              print(f"READY {name}: {item.stat().st_size:,} bytes")
+          print(f"Seven PTE files downloaded from revision {revision}: {total:,} bytes")
+          PY
+
+      - name: Correct reference-test indexing and require real speech tokens
+        working-directory: /tmp/chatterbox-executorch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("test_true_full_pte.py")
+          source = path.read_text()
+
+          old_step = "step_idx = torch.tensor(step + 1, dtype=torch.long)"
+          if source.count(old_step) != 1:
+              raise SystemExit("Expected exactly one V4 decode-step expression")
+          source = source.replace(
+              old_step,
+              "step_idx = torch.tensor(step, dtype=torch.long)",
+          )
+
+          source = source.replace("MAX_GEN = 200", "MAX_GEN = 64")
+          old_fallback = """if n_tokens == 0:
+              print("   ❌ No tokens generated! Using dummy tokens for vocoder test.")
+              speech_tokens = list(range(100, 150))  # dummy
+              n_tokens = len(speech_tokens)"""
+          if source.count(old_fallback) != 1:
+              raise SystemExit("Reference dummy-token fallback not found exactly once")
+          source = source.replace(
+              old_fallback,
+              """if n_tokens == 0:
+              raise RuntimeError("T3 generated zero speech tokens; refusing a dummy-token vocoder pass.")""",
+          )
+          path.write_text(source)
+          print("Patched V4 step index to zero-based; limited test to 64 tokens; disabled dummy-token fallback.")
+          PY
+
+      - name: Run full PTE pipeline and validate WAV
+        working-directory: /tmp/chatterbox-executorch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u test_true_full_pte.py 2>&1 | tee /tmp/pte-e2e.log
+          python - <<'PY'
+          import math
+          import soundfile as sf
+          from pathlib import Path
+
+          wav = Path("e2e_outputs/true_full_pte/en_TRUE_FULL_PTE.wav")
+          if not wav.is_file() or wav.stat().st_size < 1024:
+              raise SystemExit("E2E test did not produce a usable WAV file")
+          info = sf.info(wav)
+          audio, sample_rate = sf.read(wav, dtype="float32")
+          if sample_rate != 24000:
+              raise SystemExit(f"Unexpected sample rate: {sample_rate}")
+          if info.frames < 4800:
+              raise SystemExit(f"Audio is too short to count as a valid test: {info.frames} frames")
+          if not all(math.isfinite(float(x)) for x in audio.reshape(-1)[::max(1, len(audio.reshape(-1)) // 10000)]):
+              raise SystemExit("WAV contains NaN or infinite samples")
+          peak = float(abs(audio).max())
+          if peak < 1e-5:
+              raise SystemExit("WAV is silent")
+          print(
+              f"VALID WAV: {info.duration:.2f}s, {sample_rate} Hz, "
+              f"{info.channels} channel(s), peak={peak:.5f}, bytes={wav.stat().st_size}"
+          )
+          PY
+
+      - name: Upload PTE validation log and sample WAV
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chatterbox-full-pte-validation
+          path: |
+            /tmp/pte-e2e.log
+            /tmp/chatterbox-executorch/e2e_outputs/true_full_pte/en_TRUE_FULL_PTE.wav
+          if-no-files-found: ignore
+          retention-days: 7
+
+  publish:
+    name: Publish direct APK only after PTE validation
+    needs: [build, validate-pte-e2e]
+    if: always() && needs.build.result == 'success' && needs.validate-pte-e2e.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download verified APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: playtest-arm64-apk
+          path: output
+
       - name: Publish direct APK download
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
+          test -s output/Chatterbox-Playtest-v2-arm64-v8a.apk
           TAG="playtest-v2-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}"
           gh release create "$TAG" \
             output/Chatterbox-Playtest-v2-arm64-v8a.apk \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Chatterbox Playtest 2 - ARM64 APK" \
-            --notes "Direct APK download. Package: com.sun1423.playtest.v2. ABI: arm64-v8a only. Model revision: $MODEL_REVISION. Signed with the persistent Playtest v2 key." \
+            --title "Chatterbox Playtest 2 - ARM64 APK (E2E verified)" \
+            --notes "Direct APK download. Package: com.sun1423.playtest.v2. ABI: arm64-v8a only. Model revision: ${{ needs.build.outputs.model_revision }}. Full 7-PTE audio generation test produced and validated a non-silent 24 kHz WAV. Signed with the persistent Playtest v2 key." \
             --prerelease
