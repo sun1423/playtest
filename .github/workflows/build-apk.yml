@@ -1373,7 +1373,7 @@ jobs:
               }''',
               "tracked native model loader"
           )
-                    pairs = {
+          pairs = {
               'PteModel(modelManager.getModelPath("t3_cond_speech_emb.pte")).also { it.load() }':'openModel("t3_cond_speech_emb.pte")',
               'PteModel(modelManager.getModelPath("t3_cond_enc.pte")).also { it.load() }':'openModel("t3_cond_enc.pte")',
               'PteModel(modelManager.getModelPath("t3_prefill.pte")).also { it.load() }':'openModel("t3_prefill.pte")',
@@ -1526,7 +1526,7 @@ jobs:
           )
           vocoder.write_text(text)
 
-                    print("Applied native model lifecycle, tokenizer boundary and vocoder validation.")
+          print("Applied native model lifecycle, tokenizer boundary and vocoder validation.")
           PY
 
           test -s app/src/test/java/com/acul3/chatterboxtts/models/T3KvCacheLayoutTest.kt
