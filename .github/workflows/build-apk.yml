@@ -1644,6 +1644,12 @@ jobs:
           python -m pip install --no-deps -e /tmp/chatterbox-executorch
           echo "Reference repository commit: $(git -C /tmp/chatterbox-executorch rev-parse HEAD)"
 
+      - name: Cache pinned PTE models
+        uses: actions/cache@v4
+        with:
+          path: /tmp/chatterbox-executorch/et_models
+          key: chatterbox-pte-${{ env.MODEL_REVISION }}
+
       - name: Download the exact seven PTE models used by the APK
         working-directory: /tmp/chatterbox-executorch
         shell: bash
