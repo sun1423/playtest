@@ -478,16 +478,16 @@ private fun validateNpyTensor(
         require(major in 1..3) { file.name + " uses an unsupported NumPy format version." }
 
         val headerLengthBytes = if (major == 1) 2 else 4
-        val headerLength = if (major == 1) {
-            input.readUnsignedByte() or (input.readUnsignedByte() shl 8)
+        val headerLength: Long = if (major == 1) {
+            (input.readUnsignedByte() or (input.readUnsignedByte() shl 8)).toLong()
         } else {
             input.readUnsignedByte().toLong() or
                 (input.readUnsignedByte().toLong() shl 8) or
                 (input.readUnsignedByte().toLong() shl 16) or
                 (input.readUnsignedByte().toLong() shl 24)
-        }.toLong()
+        }
 
-        require(headerLength in 1..65536) { file.name + " has an invalid NumPy header length." }
+        require(headerLength in 1L..65536L) { file.name + " has an invalid NumPy header length." }
         val headerBytes = ByteArray(headerLength.toInt())
         input.readFully(headerBytes)
         val header = headerBytes.toString(Charsets.US_ASCII)
