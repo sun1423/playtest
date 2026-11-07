@@ -5,25 +5,31 @@ import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 
 /**
- * Owns one native worker thread for the full QVAC Engine lifetime.
- *
- * The Engine is created, used, and destroyed on this same thread. This avoids
- * moving ggml thread-local graph/cache state between Dispatchers.IO workers.
+ * One process-wide native worker. QVAC's Engine is created, used, and destroyed
+ * on the same thread, including across Activity recreation.
  */
-class NativeBridge {
+private object QvacNativeWorker {
     @Volatile
-    private var libraryLoaded = false
+    var libraryLoaded = false
+        private set
 
-    private val nativeExecutor = Executors.newSingleThreadExecutor { runnable ->
+    private val executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "qvac-native-engine").apply {
             isDaemon = false
             priority = Thread.NORM_PRIORITY
         }
     }
 
-    private fun <T> runOnNativeThread(action: () -> T): T {
+    fun ensureLibraryLoaded() {
+        if (!libraryLoaded) {
+            System.loadLibrary("qvac_tts_jni")
+            libraryLoaded = true
+        }
+    }
+
+    fun <T> call(action: () -> T): T {
         try {
-            return nativeExecutor.submit<T> { action() }.get()
+            return executor.submit<T> { action() }.get()
         } catch (error: ExecutionException) {
             val cause = error.cause
             if (cause is RuntimeException) throw cause
@@ -32,50 +38,42 @@ class NativeBridge {
             Thread.currentThread().interrupt()
             throw IllegalStateException("Interrupted while waiting for the QVAC native worker.", error)
         } catch (error: RejectedExecutionException) {
-            throw IllegalStateException("QVAC native worker has already been closed.", error)
+            throw IllegalStateException("QVAC native worker is unavailable.", error)
         }
     }
 
-    private fun ensureLibraryLoaded() {
-        if (!libraryLoaded) {
-            System.loadLibrary("qvac_tts_jni")
-            libraryLoaded = true
+    fun enqueue(action: () -> Unit) {
+        try {
+            executor.execute(action)
+        } catch (_: RejectedExecutionException) {
+            // The process is already shutting down.
         }
     }
+}
 
+class NativeBridge {
     fun create(t3Path: String, s3genPath: String, voiceDirectory: String, language: String): String =
-        runOnNativeThread {
-            ensureLibraryLoaded()
+        QvacNativeWorker.call {
+            QvacNativeWorker.ensureLibraryLoaded()
             nativeCreate(t3Path, s3genPath, voiceDirectory, language)
         }
 
-    fun synthesize(text: String): FloatArray = runOnNativeThread {
-        ensureLibraryLoaded()
+    fun synthesize(text: String): FloatArray = QvacNativeWorker.call {
+        QvacNativeWorker.ensureLibraryLoaded()
         nativeSynthesize(text) ?: throw IllegalStateException(nativeLastError())
     }
 
-    fun unload() = runOnNativeThread {
-        if (libraryLoaded) nativeDestroy()
+    fun unload() = QvacNativeWorker.call {
+        if (QvacNativeWorker.libraryLoaded) nativeDestroy()
     }
 
     /**
-     * Queue destruction after any in-flight create/synthesis call, without
-     * blocking Android's UI thread during Activity teardown.
+     * Queue cleanup behind any active native call, without blocking Android's
+     * UI thread. The shared worker remains alive for a recreated Activity.
      */
     fun close() {
-        try {
-            nativeExecutor.execute {
-                try {
-                    if (libraryLoaded) nativeDestroy()
-                } catch (_: Exception) {
-                    // The Android Activity is already closing; native process
-                    // teardown remains the final fallback if a driver refuses release.
-                }
-            }
-        } catch (_: RejectedExecutionException) {
-            // Already closed.
-        } finally {
-            nativeExecutor.shutdown()
+        QvacNativeWorker.enqueue {
+            if (QvacNativeWorker.libraryLoaded) nativeDestroy()
         }
     }
 
