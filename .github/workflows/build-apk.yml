@@ -37,6 +37,10 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # Skip the deprecated SDK "tools" package. Required SDK components
+          # are installed explicitly in the next step.
+          packages: ''
 
       - name: Install Android NDK, CMake and Vulkan shader compiler
         shell: bash
