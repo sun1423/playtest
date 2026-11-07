@@ -11,6 +11,7 @@
 
 #include "tts-cpp/chatterbox/engine.h"
 #include "tts-cpp/chatterbox/fit.h"
+#include "gguf.h"
 
 namespace {
 std::mutex g_engine_mutex;
@@ -28,6 +29,30 @@ std::string from_java(JNIEnv * env, jstring value) {
 
 jstring to_java(JNIEnv * env, const std::string & value) {
     return env->NewStringUTF(value.c_str());
+}
+
+std::string read_gguf_string(const std::string & path, const char * key) {
+    gguf_init_params params{};
+    params.no_alloc = true;
+    params.ctx = nullptr;
+    params.kv_only = true;
+
+    std::unique_ptr<gguf_context, void (*)(gguf_context *)> context(
+        gguf_init_from_file(path.c_str(), params), gguf_free);
+    if (!context) {
+        throw std::runtime_error(std::string("Cannot read GGUF metadata: ") + path);
+    }
+
+    const int64_t key_id = gguf_find_key(context.get(), key);
+    if (key_id < 0 || gguf_get_kv_type(context.get(), key_id) != GGUF_TYPE_STRING) {
+        throw std::runtime_error(std::string("GGUF metadata key is missing or not a string: ") + key);
+    }
+
+    const char * value = gguf_get_val_str(context.get(), key_id);
+    if (value == nullptr || value[0] == '\0') {
+        throw std::runtime_error(std::string("GGUF metadata value is empty: ") + key);
+    }
+    return value;
 }
 
 void require_profile(const std::string & directory) {
@@ -69,6 +94,15 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         if (!std::filesystem::is_regular_file(s3gen)) {
             throw std::runtime_error("S3Gen GGUF file is missing.");
         }
+
+        const std::string t3_variant = read_gguf_string(t3, "chatterbox.variant");
+        const std::string s3_variant = read_gguf_string(s3gen, "s3gen.variant");
+        if (t3_variant != "t3_mtl" || s3_variant != "mtl") {
+            throw std::runtime_error(
+                "Model mismatch: this prototype requires T3 variant t3_mtl and S3Gen variant mtl; "
+                "found T3='" + t3_variant + "', S3Gen='" + s3_variant + "'.");
+        }
+
         require_profile(voice);
 
         // Release an old engine before constructing another one to avoid holding
