@@ -4,6 +4,7 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
 import android.os.SystemClock
+import java.util.ArrayDeque
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -20,11 +21,15 @@ class NativeBridge {
     private var libraryLoaded = false
 
     private var audioTrack: AudioTrack? = null
+    private val pendingChunks = ArrayDeque<FloatArray>()
+    private var pendingFrames = 0L
     private var requestStartedAtMs = 0L
     private var firstChunkLatencyMs = -1L
     private var framesWritten = 0L
     private var chunkCount = 0
     private var playbackStarted = false
+
+    private val prebufferFrames = 24000L * 2L
 
     @Synchronized
     private fun ensureLibraryLoaded() {
@@ -34,6 +39,7 @@ class NativeBridge {
         }
     }
 
+    @Synchronized
     fun create(t3Path: String, s3genPath: String, voiceDirectory: String, language: String): String {
         ensureLibraryLoaded()
         return nativeCreate(t3Path, s3genPath, voiceDirectory, language)
@@ -41,22 +47,63 @@ class NativeBridge {
 
     @Synchronized
     fun beginStreamingRequest() {
-        check(audioTrack == null) { "A previous audio stream has not been released." }
+        check(audioTrack == null && pendingChunks.isEmpty()) {
+            "A previous audio stream has not been released."
+        }
         requestStartedAtMs = SystemClock.elapsedRealtime()
         firstChunkLatencyMs = -1L
         framesWritten = 0L
+        pendingFrames = 0L
         chunkCount = 0
         playbackStarted = false
     }
 
     // Called synchronously by QVAC/GGML through JNI for each generated PCM chunk.
-    // Blocking writes provide backpressure instead of allowing an unbounded queue.
+    // The first two seconds are prebuffered; subsequent writes apply backpressure.
     @Synchronized
-    fun onPcmChunk(samples: FloatArray) {
+    fun onPcmChunk(samples: FloatArray, isLast: Boolean) {
         require(samples.isNotEmpty()) { "QVAC delivered an empty audio chunk." }
 
-        val track = audioTrack ?: createAudioTrack().also { audioTrack = it }
+        framesWritten += samples.size
+        chunkCount++
 
+        val currentTrack = audioTrack
+        if (currentTrack == null) {
+            pendingChunks.addLast(samples)
+            pendingFrames += samples.size
+            if (pendingFrames >= prebufferFrames || isLast) {
+                startPlaybackFromPending()
+            }
+        } else {
+            writeFully(currentTrack, samples)
+        }
+    }
+
+    @Synchronized
+    private fun startPlaybackFromPending() {
+        check(audioTrack == null) { "Audio playback has already started." }
+        check(pendingChunks.isNotEmpty()) { "No generated audio is available to start playback." }
+
+        val track = createAudioTrack()
+        audioTrack = track
+        try {
+            while (pendingChunks.isNotEmpty()) {
+                writeFully(track, pendingChunks.removeFirst())
+            }
+            pendingFrames = 0L
+            firstChunkLatencyMs = SystemClock.elapsedRealtime() - requestStartedAtMs
+            track.play()
+            playbackStarted = true
+        } catch (error: Exception) {
+            audioTrack = null
+            pendingChunks.clear()
+            pendingFrames = 0L
+            track.release()
+            throw error
+        }
+    }
+
+    private fun writeFully(track: AudioTrack, samples: FloatArray) {
         var offset = 0
         while (offset < samples.size) {
             val written = track.write(
@@ -68,23 +115,19 @@ class NativeBridge {
             check(written > 0) { "AudioTrack write failed: " + written }
             offset += written
         }
-
-        framesWritten += samples.size
-        chunkCount++
-
-        // Prefill the first generated chunk before starting the speaker.
-        if (!playbackStarted) {
-            firstChunkLatencyMs = SystemClock.elapsedRealtime() - requestStartedAtMs
-            track.play()
-            playbackStarted = true
-        }
     }
 
     suspend fun finishStreamingPlayback(): StreamPlaybackStats = withContext(Dispatchers.IO) {
-        val track = synchronized(this@NativeBridge) {
-            audioTrack ?: throw IllegalStateException("QVAC did not deliver an audio chunk.")
+        val snapshot = synchronized(this@NativeBridge) {
+            if (audioTrack == null && pendingChunks.isNotEmpty()) {
+                startPlaybackFromPending()
+            }
+            val track = audioTrack ?: throw IllegalStateException("QVAC did not deliver an audio chunk.")
+            Pair(track, framesWritten)
         }
-        val expectedFrames = synchronized(this@NativeBridge) { framesWritten }
+
+        val track = snapshot.first
+        val expectedFrames = snapshot.second
         val deadline = SystemClock.elapsedRealtime() +
             (expectedFrames * 1000L / 24000L) + 15000L
 
@@ -102,7 +145,9 @@ class NativeBridge {
             underruns = track.underrunCount
         )
 
-        releaseStreamingTrack()
+        synchronized(this@NativeBridge) {
+            releaseStreamingTrack()
+        }
         stats
     }
 
@@ -115,6 +160,8 @@ class NativeBridge {
     private fun releaseStreamingTrack() {
         val track = audioTrack
         audioTrack = null
+        pendingChunks.clear()
+        pendingFrames = 0L
         playbackStarted = false
         framesWritten = 0L
         chunkCount = 0
@@ -151,19 +198,19 @@ class NativeBridge {
                     .setEncoding(encoding)
                     .build()
             )
-            // Two seconds gives the first small chunk room to prefill and
-            // absorbs short scheduling jitter; underruns still expose slow RTF.
-            .setBufferSizeInBytes(maxOf(minimum, sampleRate * 4 * 2))
+            // Three seconds of native player buffer; start only after about two seconds are ready.
+            .setBufferSizeInBytes(maxOf(minimum, sampleRate * 4 * 3))
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
 
-        check(track.state == AudioTrack.STATE_INITIALIZED) {
+        if (track.state != AudioTrack.STATE_INITIALIZED) {
             track.release()
-            "Android could not initialize AudioTrack."
+            throw IllegalStateException("Android could not initialize AudioTrack.")
         }
         return track
     }
 
+    @Synchronized
     fun synthesizeStreaming(text: String) {
         ensureLibraryLoaded()
         if (!nativeSynthesize(text)) {
@@ -171,9 +218,11 @@ class NativeBridge {
         }
     }
 
+    @Synchronized
     fun unload() {
-        abortStreamingPlayback()
-        if (libraryLoaded) nativeDestroy()
+        ensureLibraryLoaded()
+        releaseStreamingTrack()
+        nativeDestroy()
     }
 
     private external fun nativeCreate(
