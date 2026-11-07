@@ -137,7 +137,7 @@ class MainActivity : ComponentActivity() {
             listOf("English", "Hindi (experimental)")
         )
         column.addView(languagePicker, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        addText("Hindi currently uses the model's experimental external-preprocessing path; validate pronunciation before judging support.", 12f)
+        addText("Hindi is experimental: this prototype does not add Hindi-specific external text normalization. Treat Hindi output as exploratory; English is the baseline test.", 12f)
         languagePicker.isEnabled = true
         languagePicker.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             private var firstSelection = true
@@ -195,13 +195,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        // A finished Activity must not leave process-global native model buffers resident.
-        // Serialize with any in-flight JNI call; the native bridge owns that lock.
-        try {
-            bridge.unload()
-        } catch (error: Exception) {
-            android.util.Log.w("QVAC_Playtest", "Native engine cleanup failed.", error)
-        }
+        // Queues native destruction after any active synthesis without blocking the UI thread.
+        bridge.close()
         engineLoaded = false
         super.onDestroy()
     }
