@@ -88,6 +88,9 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         options.n_gpu_layers = 99; // Try compiled Vulkan; QVAC may fall back to CPU.
         options.max_sentence_chars = 180;
         options.output_sample_rate = 24000;
+        options.stream_chunk_tokens = 25;
+        options.stream_first_chunk_tokens = 10;
+        options.stream_left_context_tokens = 25;
 
         auto candidate = std::make_unique<tts_cpp::chatterbox::Engine>(options);
         {
@@ -109,42 +112,74 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
     }
 }
 
-extern "C" JNIEXPORT jfloatArray JNICALL
+extern "C" JNIEXPORT jboolean JNICALL
 Java_com_sun1423_playtest_NativeBridge_nativeSynthesize(
-    JNIEnv * env, jobject, jstring text_value) {
+    JNIEnv * env, jobject bridge, jstring text_value) {
 
     std::lock_guard<std::mutex> lock(g_engine_mutex);
+    jclass bridge_class = nullptr;
+
     try {
         if (!g_engine) throw std::runtime_error("QVAC engine is not loaded.");
 
         const std::string text = from_java(env, text_value);
-        if (text.empty()) throw std::runtime_error("Enter text before generating speech.");
+        if (text.empty()) throw std::runtime_error("Enter a short sentence first.");
         if (text.size() > 1200) throw std::runtime_error("Prototype input limit is 300 characters.");
 
-        auto result = g_engine->synthesize(text);
-        if (result.pcm.empty()) throw std::runtime_error("QVAC returned empty audio.");
-        if (result.pcm.size() > static_cast<std::size_t>(std::numeric_limits<jsize>::max())) {
-            throw std::runtime_error("Generated audio is too large for this prototype player.");
+        bridge_class = env->GetObjectClass(bridge);
+        if (bridge_class == nullptr) throw std::runtime_error("Could not resolve Android audio callback class.");
+
+        const jmethodID on_chunk = env->GetMethodID(bridge_class, "onPcmChunk", "([F)V");
+        if (on_chunk == nullptr) {
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            throw std::runtime_error("Android PCM chunk callback is unavailable.");
         }
 
-        jfloatArray output = env->NewFloatArray(static_cast<jsize>(result.pcm.size()));
-        if (output == nullptr) throw std::runtime_error("Could not allocate the audio buffer.");
+        const auto result = g_engine->synthesize(
+            text,
+            [env, bridge, on_chunk](const float * pcm, std::size_t samples, int, bool) {
+                if (samples == 0) return;
+                if (samples > static_cast<std::size_t>(std::numeric_limits<jsize>::max())) {
+                    throw std::runtime_error("QVAC produced an audio chunk that is too large.");
+                }
 
-        env->SetFloatArrayRegion(
-            output, 0, static_cast<jsize>(result.pcm.size()), result.pcm.data());
-        if (env->ExceptionCheck()) {
-            env->ExceptionClear();
-            throw std::runtime_error("Could not copy generated PCM to Android.");
+                jfloatArray chunk = env->NewFloatArray(static_cast<jsize>(samples));
+                if (chunk == nullptr) {
+                    if (env->ExceptionCheck()) env->ExceptionClear();
+                    throw std::runtime_error("Could not allocate an Android audio chunk.");
+                }
+
+                env->SetFloatArrayRegion(
+                    chunk, 0, static_cast<jsize>(samples), pcm);
+
+                if (!env->ExceptionCheck()) {
+                    env->CallVoidMethod(bridge, on_chunk, chunk);
+                }
+
+                const bool callback_failed = env->ExceptionCheck();
+                env->DeleteLocalRef(chunk);
+
+                if (callback_failed) {
+                    env->ExceptionClear();
+                    throw std::runtime_error("Android AudioTrack rejected a QVAC audio chunk.");
+                }
+            });
+
+        if (result.pcm.empty()) {
+            throw std::runtime_error("QVAC completed without producing audio.");
         }
 
+        env->DeleteLocalRef(bridge_class);
         g_last_error.clear();
-        return output;
+        return JNI_TRUE;
     } catch (const std::exception & error) {
+        if (bridge_class != nullptr) env->DeleteLocalRef(bridge_class);
         g_last_error = error.what();
-        return nullptr;
+        return JNI_FALSE;
     } catch (...) {
-        g_last_error = "Unknown native QVAC synthesis failure.";
-        return nullptr;
+        if (bridge_class != nullptr) env->DeleteLocalRef(bridge_class);
+        g_last_error = "Unknown native QVAC streaming failure.";
+        return JNI_FALSE;
     }
 }
 
