@@ -26,8 +26,7 @@ class NativeBridge {
 
     @Synchronized
     fun unload() {
-        ensureLibraryLoaded()
-        nativeDestroy()
+        if (libraryLoaded) nativeDestroy()
     }
 
     private external fun nativeCreate(
