@@ -16,7 +16,7 @@ jobs:
   build:
     name: Build arm64-v8a debug APK
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     outputs:
       model_revision: ${{ steps.generate.outputs.model_revision }}
     env:
@@ -1752,6 +1752,49 @@ jobs:
           ! grep -q 'val textSeq = LongArray(Constants.TEXT_SEQ_LEN)' app/src/main/java/com/acul3/chatterboxtts/tts/ChatterboxTTS.kt
           ! grep -q 'speechToksPadded = LongArray' app/src/main/java/com/acul3/chatterboxtts/models/VocoderPipeline.kt
 
+      - name: Add cold-start Android launch test
+        working-directory: /tmp/chatterbox-android
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p app/src/androidTest/java/com/acul3/chatterboxtts
+          cat > app/src/androidTest/java/com/acul3/chatterboxtts/AppLaunchSmokeTest.kt <<'KOTLIN'
+          package com.acul3.chatterboxtts
+
+          import androidx.compose.ui.test.assertIsDisplayed
+          import androidx.compose.ui.test.junit4.createAndroidComposeRule
+          import androidx.compose.ui.test.onNodeWithText
+          import androidx.test.ext.junit.runners.AndroidJUnit4
+          import java.io.File
+          import org.junit.Assert.assertFalse
+          import org.junit.Rule
+          import org.junit.Test
+          import org.junit.runner.RunWith
+
+          @RunWith(AndroidJUnit4::class)
+          class AppLaunchSmokeTest {
+              @get:Rule
+              val composeRule = createAndroidComposeRule<MainActivity>()
+
+              @Test
+              fun coldLaunchShowsHomeScreenWithoutLoadingModels() {
+                  composeRule.onNodeWithText("Chatterbox TTS").assertIsDisplayed()
+                  composeRule.onNodeWithText("Generate Speech").assertIsDisplayed()
+                  composeRule.onNodeWithText(
+                      "Models not loaded. First generation downloads several GB of model files."
+                  ).assertIsDisplayed()
+
+                  val modelDirectory = File(composeRule.activity.filesDir, "models")
+                  assertFalse(
+                      "Model files must not be created or downloaded during app startup",
+                      modelDirectory.exists()
+                  )
+              }
+          }
+          KOTLIN
+
+          test -s app/src/androidTest/java/com/acul3/chatterboxtts/AppLaunchSmokeTest.kt
+
       - name: Prepare permanent signing key
         shell: bash
         env:
@@ -1768,6 +1811,35 @@ jobs:
           keytool -list -storetype PKCS12 -keystore "$KEYSTORE_PATH" \
             -storepass "$KEYSTORE_PASSWORD" -alias playtest >/dev/null
           echo "PLAYTEST_KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+
+      - name: Cold-start launch test on Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_2
+          disable-animations: true
+          emulator-options: -no-window -no-audio -no-boot-anim -camera-back none
+          script: |
+            set -euo pipefail
+            cd /tmp/chatterbox-android
+
+            # Temporarily include x86_64 for the hosted emulator test only.
+            # Always restore the distributable APK configuration to ARM64-only.
+            restore_arm64_only() {
+              python3 -c 'from pathlib import Path; p=Path("app/build.gradle.kts"); s=p.read_text(); old="abiFilters += listOf(\\"arm64-v8a\\", \\"x86_64\\")"; new="abiFilters += listOf(\\"arm64-v8a\\")"; assert s.count(old)==1 or s.count(new)==1, "Cannot restore ARM64-only ABI filter"; p.write_text(s.replace(old,new,1) if s.count(old)==1 else s)'
+            }
+            trap restore_arm64_only EXIT
+
+            python3 -c 'from pathlib import Path; p=Path("app/build.gradle.kts"); s=p.read_text(); old="abiFilters += listOf(\\"arm64-v8a\\")"; new="abiFilters += listOf(\\"arm64-v8a\\", \\"x86_64\\")"; assert s.count(old)==1, "Expected exactly one ARM64-only ABI filter"; p.write_text(s.replace(old,new,1))'
+
+            chmod +x ./gradlew
+            ./gradlew --no-daemon --stacktrace connectedDebugAndroidTest
+
+            restore_arm64_only
+            trap - EXIT
+            grep -q 'abiFilters += listOf("arm64-v8a")' app/build.gradle.kts
 
       - name: Build debug APK
         working-directory: /tmp/chatterbox-android
@@ -2065,14 +2137,24 @@ jobs:
       - name: Publish direct APK download
         env:
           GH_TOKEN: ${{ github.token }}
+          PTE_E2E_RESULT: ${{ needs['validate-pte-e2e'].result }}
         shell: bash
         run: |
           set -euo pipefail
           test -s output/Chatterbox-Playtest-v2-arm64-v8a.apk
           TAG="playtest-v2-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}"
+
+          if [[ "$PTE_E2E_RESULT" == "success" ]]; then
+            TITLE="Chatterbox Playtest 2 - ARM64 APK (PTE E2E verified)"
+            NOTES="Direct APK download. Package: com.sun1423.playtest.v2. ABI: arm64-v8a only. Cold-start Android emulator smoke test passed. Full seven-PTE speech generation E2E also passed and produced a validated non-silent 24 kHz WAV. Model revision: ${{ needs.build.outputs.model_revision }}. Signed with the persistent Playtest v2 key."
+          else
+            TITLE="Chatterbox Playtest 2 - ARM64 APK (launch smoke tested)"
+            NOTES="Direct APK download. Package: com.sun1423.playtest.v2. ABI: arm64-v8a only. Cold-start Android emulator smoke test passed: the home screen opens without downloading or initializing PTE models. Full speech-generation E2E was not run for this build. Model revision: ${{ needs.build.outputs.model_revision }}. Signed with the persistent Playtest v2 key."
+          fi
+
           gh release create "$TAG" \
             output/Chatterbox-Playtest-v2-arm64-v8a.apk \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Chatterbox Playtest 2 - ARM64 APK (E2E verified)" \
-            --notes "Direct APK download. Package: com.sun1423.playtest.v2. ABI: arm64-v8a only. Model revision: ${{ needs.build.outputs.model_revision }}. Full 7-PTE audio generation test produced and validated a non-silent 24 kHz WAV. Signed with the persistent Playtest v2 key." \
+            --title "$TITLE" \
+            --notes "$NOTES" \
             --prerelease
