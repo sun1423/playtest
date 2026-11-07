@@ -1,9 +1,13 @@
 package com.sun1423.playtest
 
 import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioTrack
 import android.net.Uri
 import android.os.Bundle
 import android.os.StatFs
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.view.ViewGroup
 import android.widget.ArrayAdapter
@@ -17,6 +21,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -29,6 +34,11 @@ private val requiredProfileFiles = setOf(
     "prompt_feat.npy",
     "prompt_token.npy",
     "cond_prompt_speech_tokens.npy"
+)
+
+private data class PcmPlaybackStats(
+    val audioSeconds: Double,
+    val underruns: Int
 )
 
 class MainActivity : ComponentActivity() {
@@ -67,8 +77,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         // The UI opens without loading JNI, GGUF models or the QVAC engine.
-        t3Ready = t3File.isFile && t3File.length() > 1024 * 1024
-        s3genReady = s3genFile.isFile && s3genFile.length() > 1024 * 1024
+        t3Ready = isValidGgufFile(t3File)
+        s3genReady = isValidGgufFile(s3genFile)
         voiceReady = try {
             validateVoiceProfile(voiceDirectory)
             true
@@ -239,22 +249,19 @@ class MainActivity : ComponentActivity() {
             setStatus("Load the QVAC engine first.")
             return
         }
-        runBusy("Generating and playing QVAC audio chunks...") {
-            val stats = withContext(Dispatchers.IO) {
-                bridge.beginStreamingRequest()
-                try {
-                    bridge.synthesizeStreaming(text)
-                    bridge.finishStreamingPlayback()
-                } catch (error: Throwable) {
-                    bridge.abortStreamingPlayback()
-                    throw error
-                }
-            }
+
+        runBusy("Generating the complete utterance first to avoid generation-time playback gaps...") {
+            val generationStarted = SystemClock.elapsedRealtime()
+            val pcm = withContext(Dispatchers.IO) { bridge.synthesize(text) }
+            val generationMs = SystemClock.elapsedRealtime() - generationStarted
+            require(pcm.isNotEmpty()) { "QVAC returned no audio." }
+
+            val playback = playPcmWithoutGenerationGaps(pcm)
+            val rtf = generationMs.toDouble() / (playback.audioSeconds * 1000.0)
             setStatus(
-                "Playback completed: " + String.format("%.1f", stats.audioSeconds) + " seconds; " +
-                    "first chunk " + stats.firstChunkLatencyMs + " ms; " +
-                    stats.chunkCount + " chunks; AudioTrack underruns " + stats.underruns +
-                    " (0 is ideal)."
+                "Played " + String.format("%.1f", playback.audioSeconds) + " seconds. " +
+                    "Generation " + generationMs + " ms (RTF " + String.format("%.2f", rtf) + "). " +
+                    "AudioTrack underruns " + playback.underruns + " (0 expected)."
             )
         }
     }
@@ -306,6 +313,96 @@ class MainActivity : ComponentActivity() {
         languagePicker.isEnabled = !busy
         textInput.isEnabled = !busy
     }
+
+    // Synthesis is complete before AudioTrack starts. This prevents a slow
+    // CPU/Vulkan inference backend from starving the player between chunks.
+    private suspend fun playPcmWithoutGenerationGaps(samples: FloatArray): PcmPlaybackStats =
+        withContext(Dispatchers.IO) {
+            require(samples.isNotEmpty()) { "No audio samples to play." }
+
+            val sampleRate = 24000
+            val channelMask = AudioFormat.CHANNEL_OUT_MONO
+            val encoding = AudioFormat.ENCODING_PCM_16BIT
+            val minBufferBytes = AudioTrack.getMinBufferSize(sampleRate, channelMask, encoding)
+            require(minBufferBytes > 0) { "Android does not support 24 kHz mono PCM16 playback." }
+
+            val track = AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setSampleRate(sampleRate)
+                        .setChannelMask(channelMask)
+                        .setEncoding(encoding)
+                        .build()
+                )
+                // Two seconds of buffer; prime 500 ms before starting playback.
+                .setBufferSizeInBytes(maxOf(minBufferBytes, sampleRate * 2 * 2))
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+
+            try {
+                check(track.state == AudioTrack.STATE_INITIALIZED) {
+                    "Android could not initialize AudioTrack."
+                }
+
+                fun writeRange(start: Int, count: Int) {
+                    var sourceOffset = start
+                    val end = start + count
+                    while (sourceOffset < end) {
+                        val chunkCount = minOf(4096, end - sourceOffset)
+                        val pcm16 = ShortArray(chunkCount)
+                        for (i in 0 until chunkCount) {
+                            val value = samples[sourceOffset + i]
+                            val safe = if (value.isFinite()) value.coerceIn(-1.0f, 1.0f) else 0.0f
+                            val scaled = if (safe <= -1.0f) Short.MIN_VALUE.toInt()
+                                else (safe * 32767.0f).toInt()
+                            pcm16[i] = scaled.toShort()
+                        }
+
+                        var writtenOffset = 0
+                        while (writtenOffset < pcm16.size) {
+                            val written = track.write(
+                                pcm16,
+                                writtenOffset,
+                                pcm16.size - writtenOffset,
+                                AudioTrack.WRITE_BLOCKING
+                            )
+                            check(written > 0) { "AudioTrack write failed: " + written }
+                            writtenOffset += written
+                        }
+                        sourceOffset += chunkCount
+                    }
+                }
+
+                // Prime before play(); all model inference has already finished.
+                val prebufferSamples = minOf(samples.size, sampleRate / 2)
+                writeRange(0, prebufferSamples)
+                track.play()
+                writeRange(prebufferSamples, samples.size - prebufferSamples)
+
+                val expectedFrames = samples.size.toLong()
+                val deadline = SystemClock.elapsedRealtime() +
+                    (expectedFrames * 1000L / sampleRate) + 10000L
+                while ((track.playbackHeadPosition.toLong() and 0xffffffffL) < expectedFrames) {
+                    check(SystemClock.elapsedRealtime() <= deadline) {
+                        "Timed out waiting for Android audio playback to finish."
+                    }
+                    delay(20)
+                }
+
+                PcmPlaybackStats(
+                    audioSeconds = expectedFrames.toDouble() / sampleRate,
+                    underruns = track.underrunCount
+                )
+            } finally {
+                track.release()
+            }
+        }
 
 }
 
@@ -534,6 +631,16 @@ private fun validateNpyTensor(
         require(file.length() == expectedFileBytes) {
             file.name + " has a truncated or inconsistent NumPy payload."
         }
+    }
+}
+
+private fun isValidGgufFile(file: File): Boolean {
+    if (!file.isFile || file.length() < 1024L * 1024L) return false
+    return try {
+        val magic = ByteArray(4)
+        file.inputStream().use { it.read(magic) == 4 && magic.contentEquals(byteArrayOf(0x47, 0x47, 0x55, 0x46)) }
+    } catch (_: Exception) {
+        false
     }
 }
 
