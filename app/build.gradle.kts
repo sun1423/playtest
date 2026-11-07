@@ -22,7 +22,7 @@ android {
         externalNativeBuild {
             cmake {
                 arguments += listOf(
-                    "-DQVAC_TTS_SOURCE_DIR=$rootProject.projectDir/third_party/qvac-fabric-speech.cpp/engines/tts"
+                    "-DQVAC_TTS_SOURCE_DIR=${rootProject.projectDir}/third_party/qvac-fabric-speech.cpp/engines/tts"
                 )
                 cppFlags += listOf("-std=c++17")
             }
