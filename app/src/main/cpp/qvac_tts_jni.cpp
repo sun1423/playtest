@@ -1,4 +1,5 @@
 #include <jni.h>
+#include <android/log.h>
 
 #include <array>
 #include <filesystem>
@@ -9,6 +10,7 @@
 #include <string>
 
 #include "tts-cpp/chatterbox/engine.h"
+#include "tts-cpp/chatterbox/fit.h"
 
 namespace {
 std::mutex g_engine_mutex;
@@ -77,6 +79,25 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
             g_last_error.clear();
         }
 
+        tts_cpp::chatterbox::FitOptions fit_options;
+        fit_options.t3_gguf_path = t3;
+        fit_options.s3gen_gguf_path = s3gen;
+        fit_options.n_gpu_layers = 99;
+        fit_options.n_ctx = 1024;
+        fit_options.kv_cache_type = "f16";
+        fit_options.text_tokens = 256;
+        fit_options.n_predict = 1000;
+        fit_options.margin_bytes = 768ull * 1024ull * 1024ull;
+
+        const auto fit = tts_cpp::chatterbox::fit_params(fit_options);
+        if (fit.status != tts_cpp::FitStatus::Success || !fit.fits) {
+            throw std::runtime_error(
+                "QVAC memory preflight refused to load the models (" +
+                fit.reason + ").\\n" + fit.report);
+        }
+        __android_log_print(
+            ANDROID_LOG_INFO, "QVAC_FIT", "%s", fit.report.c_str());
+
         tts_cpp::chatterbox::EngineOptions options;
         options.t3_gguf_path = t3;
         options.s3gen_gguf_path = s3gen;
@@ -88,6 +109,9 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         options.n_gpu_layers = 99; // Try compiled Vulkan; QVAC may fall back to CPU.
         options.max_sentence_chars = 180;
         options.output_sample_rate = 24000;
+        options.stream_chunk_tokens = 25;
+        options.stream_first_chunk_tokens = 25;
+        options.stream_left_context_tokens = 25;
         options.stream_chunk_tokens = 25;
         options.stream_first_chunk_tokens = 10;
         options.stream_left_context_tokens = 25;
@@ -129,7 +153,7 @@ Java_com_sun1423_playtest_NativeBridge_nativeSynthesize(
         bridge_class = env->GetObjectClass(bridge);
         if (bridge_class == nullptr) throw std::runtime_error("Could not resolve Android audio callback class.");
 
-        const jmethodID on_chunk = env->GetMethodID(bridge_class, "onPcmChunk", "([F)V");
+        const jmethodID on_chunk = env->GetMethodID(bridge_class, "onPcmChunk", "([FZ)V");
         if (on_chunk == nullptr) {
             if (env->ExceptionCheck()) env->ExceptionClear();
             throw std::runtime_error("Android PCM chunk callback is unavailable.");
@@ -137,7 +161,7 @@ Java_com_sun1423_playtest_NativeBridge_nativeSynthesize(
 
         const auto result = g_engine->synthesize(
             text,
-            [env, bridge, on_chunk](const float * pcm, std::size_t samples, int, bool) {
+            [env, bridge, on_chunk](const float * pcm, std::size_t samples, int, bool is_last) {
                 if (samples == 0) return;
                 if (samples > static_cast<std::size_t>(std::numeric_limits<jsize>::max())) {
                     throw std::runtime_error("QVAC produced an audio chunk that is too large.");
@@ -153,7 +177,7 @@ Java_com_sun1423_playtest_NativeBridge_nativeSynthesize(
                     chunk, 0, static_cast<jsize>(samples), pcm);
 
                 if (!env->ExceptionCheck()) {
-                    env->CallVoidMethod(bridge, on_chunk, chunk);
+                    env->CallVoidMethod(bridge, on_chunk, chunk, is_last ? JNI_TRUE : JNI_FALSE);
                 }
 
                 const bool callback_failed = env->ExceptionCheck();
