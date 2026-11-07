@@ -1828,11 +1828,32 @@ jobs:
             # Temporarily include x86_64 for the hosted emulator test only.
             # Always restore the distributable APK configuration to ARM64-only.
             restore_arm64_only() {
-              python3 -c 'from pathlib import Path; p=Path("app/build.gradle.kts"); s=p.read_text(); old="abiFilters += listOf(\\"arm64-v8a\\", \\"x86_64\\")"; new="abiFilters += listOf(\\"arm64-v8a\\")"; assert s.count(old)==1 or s.count(new)==1, "Cannot restore ARM64-only ABI filter"; p.write_text(s.replace(old,new,1) if s.count(old)==1 else s)'
+              python3 - <<'PY'
+            from pathlib import Path
+
+            path = Path("app/build.gradle.kts")
+            text = path.read_text()
+            old = 'abiFilters += listOf("arm64-v8a", "x86_64")'
+            new = 'abiFilters += listOf("arm64-v8a")'
+            if text.count(old) == 1:
+                path.write_text(text.replace(old, new, 1))
+            elif text.count(new) != 1:
+                raise SystemExit("Cannot restore ARM64-only ABI filter")
+            PY
             }
             trap restore_arm64_only EXIT
 
-            python3 -c 'from pathlib import Path; p=Path("app/build.gradle.kts"); s=p.read_text(); old="abiFilters += listOf(\\"arm64-v8a\\")"; new="abiFilters += listOf(\\"arm64-v8a\\", \\"x86_64\\")"; assert s.count(old)==1, "Expected exactly one ARM64-only ABI filter"; p.write_text(s.replace(old,new,1))'
+            python3 - <<'PY'
+            from pathlib import Path
+
+            path = Path("app/build.gradle.kts")
+            text = path.read_text()
+            old = 'abiFilters += listOf("arm64-v8a")'
+            new = 'abiFilters += listOf("arm64-v8a", "x86_64")'
+            if text.count(old) != 1:
+                raise SystemExit("Expected exactly one ARM64-only ABI filter")
+            path.write_text(text.replace(old, new, 1))
+            PY
 
             chmod +x ./gradlew
             ./gradlew --no-daemon --stacktrace connectedDebugAndroidTest
@@ -2123,7 +2144,7 @@ jobs:
           retention-days: 7
 
   publish:
-    name: Publish direct APK only after PTE validation
+    name: Publish APK after Android launch smoke test
     needs: [build, validate-pte-e2e]
     if: always() && needs.build.result == 'success' && needs.build.outputs.model_revision == 'e444904352a22332a8083d6fb7b9354ee5e96daf' && (needs['validate-pte-e2e'].result == 'success' || needs['validate-pte-e2e'].result == 'skipped')
     runs-on: ubuntu-latest
