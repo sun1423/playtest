@@ -43,7 +43,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y glslc
-          yes | sdkmanager --licenses >/dev/null
+          (yes || true) | sdkmanager --licenses >/dev/null
           sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;28.2.13676358" "cmake;3.31.0"
 
       - name: Fetch pinned QVAC Chatterbox source and matching GGML
@@ -70,7 +70,8 @@ jobs:
           fi
           KEYSTORE_PATH="$RUNNER_TEMP/playtest-signing.p12"
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
-          keytool -list -storetype PKCS12 -keystore "$KEYSTORE_PATH"             -storepass "$KEYSTORE_PASSWORD" -alias playtest >/dev/null
+          keytool -list -storetype PKCS12 -keystore "$KEYSTORE_PATH" \
+            -storepass "$KEYSTORE_PASSWORD" -alias playtest >/dev/null
           echo "PLAYTEST_KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
 
       - name: Build ARM64 debug APK
