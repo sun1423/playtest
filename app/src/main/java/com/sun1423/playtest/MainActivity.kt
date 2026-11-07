@@ -1,9 +1,6 @@
 package com.sun1423.playtest
 
 import android.content.Context
-import android.media.AudioAttributes
-import android.media.AudioFormat
-import android.media.AudioTrack
 import android.net.Uri
 import android.os.Bundle
 import android.os.StatFs
@@ -20,7 +17,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -185,11 +181,13 @@ class MainActivity : ComponentActivity() {
 
     private fun importModel(uri: Uri, targetName: String, isT3: Boolean) {
         runBusy("Copying model into private app storage...") {
+            if (engineLoaded) {
+                withContext(Dispatchers.IO) { bridge.unload() }
+                engineLoaded = false
+            }
             val imported = withContext(Dispatchers.IO) {
                 copyModelIntoPrivateStorage(this@MainActivity, uri, targetName)
             }
-            withContext(Dispatchers.IO) { bridge.unload() }
-            engineLoaded = false
             if (isT3) t3Ready = true else s3genReady = true
             setStatus("Imported " + targetName + " (" + imported.length() / (1024 * 1024) + " MB).")
         }
@@ -197,11 +195,13 @@ class MainActivity : ComponentActivity() {
 
     private fun importProfile(uri: Uri) {
         runBusy("Validating and importing Azure QVAC voice profile...") {
+            if (engineLoaded) {
+                withContext(Dispatchers.IO) { bridge.unload() }
+                engineLoaded = false
+            }
             withContext(Dispatchers.IO) {
                 importVoiceProfileZip(this@MainActivity, uri, voiceDirectory)
             }
-            withContext(Dispatchers.IO) { bridge.unload() }
-            engineLoaded = false
             voiceReady = true
             setStatus("Azure QVAC voice profile imported. All five .npy tensors are ready.")
         }
@@ -238,11 +238,23 @@ class MainActivity : ComponentActivity() {
             setStatus("Load the QVAC engine first.")
             return
         }
-        runBusy("Generating speech locally...") {
-            val audio = withContext(Dispatchers.IO) { bridge.synthesize(text) }
-            setStatus("Generated " + String.format("%.1f", audio.size / 24000f) + " seconds of 24 kHz audio. Playing...")
-            playPcm(audio)
-            setStatus("Playback completed. QVAC remains loaded for another short request.")
+        runBusy("Generating and playing QVAC audio chunks...") {
+            val stats = withContext(Dispatchers.IO) {
+                bridge.beginStreamingRequest()
+                try {
+                    bridge.synthesizeStreaming(text)
+                    bridge.finishStreamingPlayback()
+                } catch (error: Throwable) {
+                    bridge.abortStreamingPlayback()
+                    throw error
+                }
+            }
+            setStatus(
+                "Playback completed: " + String.format("%.1f", stats.audioSeconds) + " seconds; " +
+                    "first chunk " + stats.firstChunkLatencyMs + " ms; " +
+                    stats.chunkCount + " chunks; AudioTrack underruns " + stats.underruns +
+                    " (0 is ideal)."
+            )
         }
     }
 
@@ -287,56 +299,13 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshButtons() {
         if (!::loadButton.isInitialized) return
-        loadButton.isEnabled = !busy && t3Ready && s3genReady && voiceReady
+        loadButton.isEnabled = !busy && !engineLoaded && t3Ready && s3genReady && voiceReady
         playButton.isEnabled = !busy && engineLoaded
         unloadButton.isEnabled = !busy && engineLoaded
         languagePicker.isEnabled = !busy
         textInput.isEnabled = !busy
     }
 
-    private suspend fun playPcm(samples: FloatArray) = withContext(Dispatchers.IO) {
-        require(samples.isNotEmpty()) { "No audio samples to play." }
-
-        val rate = 24000
-        val channel = AudioFormat.CHANNEL_OUT_MONO
-        val encoding = AudioFormat.ENCODING_PCM_FLOAT
-        val minBuffer = AudioTrack.getMinBufferSize(rate, channel, encoding)
-        require(minBuffer > 0) { "Android AudioTrack does not support 24 kHz float PCM." }
-
-        val track = AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-            )
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setSampleRate(rate)
-                    .setChannelMask(channel)
-                    .setEncoding(encoding)
-                    .build()
-            )
-            .setBufferSizeInBytes(maxOf(minBuffer, rate * 4))
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .build()
-
-        try {
-            check(track.state == AudioTrack.STATE_INITIALIZED) { "Android could not initialize AudioTrack." }
-            track.play()
-            var offset = 0
-            while (offset < samples.size) {
-                val count = minOf(4096, samples.size - offset)
-                val written = track.write(samples, offset, count, AudioTrack.WRITE_BLOCKING)
-                check(written > 0) { "AudioTrack write failed: " + written }
-                offset += written
-            }
-            while (track.playbackHeadPosition.toLong() < samples.size.toLong()) delay(20)
-            track.stop()
-        } finally {
-            track.release()
-        }
-    }
 }
 
 private fun copyModelIntoPrivateStorage(context: Context, uri: Uri, targetName: String): File {
