@@ -123,9 +123,10 @@ class MainActivity : ComponentActivity() {
         languagePicker.adapter = ArrayAdapter(
             this,
             android.R.layout.simple_spinner_dropdown_item,
-            listOf("English", "Hindi")
+            listOf("English", "Hindi (experimental)")
         )
         column.addView(languagePicker, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        addText("Hindi currently uses the model's experimental external-preprocessing path; validate pronunciation before judging support.", 12f)
         languagePicker.isEnabled = true
         languagePicker.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             private var firstSelection = true
@@ -141,10 +142,20 @@ class MainActivity : ComponentActivity() {
                     return
                 }
                 if (engineLoaded && !busy) {
+                    busy = true
                     engineLoaded = false
-                    lifecycleScope.launch(Dispatchers.IO) { bridge.unload() }
-                    statusView.text = "Language changed. Load the QVAC engine again."
                     refreshButtons()
+                    lifecycleScope.launch {
+                        try {
+                            withContext(Dispatchers.IO) { bridge.unload() }
+                            setStatus("Language changed. Load the QVAC engine again.")
+                        } catch (error: Throwable) {
+                            setStatus("Engine unload failed: " + (error.message ?: error.toString()))
+                        } finally {
+                            busy = false
+                            refreshButtons()
+                        }
+                    }
                 }
             }
         }
@@ -267,9 +278,9 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshStatus() {
         setStatus(
-            "Files: T3 " + if (t3Ready) "ready" else "missing" +
-                " | S3Gen " + if (s3genReady) "ready" else "missing" +
-                " | Azure voice " + if (voiceReady) "ready" else "missing" +
+            "Files: T3 ${if (t3Ready) "ready" else "missing"}" +
+                " | S3Gen ${if (s3genReady) "ready" else "missing"}" +
+                " | Azure voice ${if (voiceReady) "ready" else "missing"}" +
                 ". Models are not bundled in the APK and are not loaded on app open."
         )
     }
@@ -365,8 +376,21 @@ private fun copyModelIntoPrivateStorage(context: Context, uri: Uri, targetName: 
         }
 
         require(copied >= 1024L * 1024L) { "Selected file is too small to be a GGUF model." }
-        if (target.exists()) check(target.delete()) { "Could not replace previous model file." }
-        check(temporary.renameTo(target)) { "Could not finalize copied model file." }
+        val header = ByteArray(4)
+        temporary.inputStream().use { input ->
+            require(input.read(header) == 4 && header.contentEquals(byteArrayOf(0x47, 0x47, 0x55, 0x46))) {
+                "Selected file does not have a GGUF header."
+            }
+        }
+
+        val backup = File(directory, targetName + ".backup")
+        if (backup.exists()) backup.delete()
+        if (target.exists()) check(target.renameTo(backup)) { "Could not preserve the previous model." }
+        if (!temporary.renameTo(target)) {
+            if (backup.exists()) backup.renameTo(target)
+            throw IllegalStateException("Could not finalize copied model file.")
+        }
+        backup.delete()
         return target
     } catch (error: Throwable) {
         temporary.delete()
@@ -427,8 +451,16 @@ private fun importVoiceProfileZip(context: Context, uri: Uri, destination: File)
         val missing = requiredProfileFiles - imported
         require(missing.isEmpty()) { "ZIP is missing: " + missing.joinToString() }
 
-        destination.deleteRecursively()
-        check(temporary.renameTo(destination)) { "Could not finalize voice profile import." }
+        val backup = File(destination.parentFile, ".azure-qvac-profile-backup")
+        backup.deleteRecursively()
+        if (destination.exists()) {
+            check(destination.renameTo(backup)) { "Could not preserve the previous voice profile." }
+        }
+        if (!temporary.renameTo(destination)) {
+            if (backup.exists()) backup.renameTo(destination)
+            throw IllegalStateException("Could not finalize voice profile import.")
+        }
+        backup.deleteRecursively()
     } catch (error: Throwable) {
         temporary.deleteRecursively()
         throw error
