@@ -17,6 +17,7 @@ jobs:
     timeout-minutes: 120
     env:
       QVAC_COMMIT: 12ae8b2f98b2a5d6713fe44cc91b0ae4027def3c
+      GGML_COMMIT: 6fe02a1b03958dc882fb1c115a150abec4e3e379
       PLAYTEST_KEYSTORE_PASSWORD: ${{ secrets.PLAYTEST_KEYSTORE_PASSWORD }}
 
     steps:
@@ -53,9 +54,11 @@ jobs:
           mkdir -p third_party
           git clone --filter=blob:none https://github.com/tetherto/qvac-fabric-speech.cpp.git third_party/qvac-fabric-speech.cpp
           git -C third_party/qvac-fabric-speech.cpp checkout --detach "$QVAC_COMMIT"
-          bash third_party/qvac-fabric-speech.cpp/engines/tts/scripts/setup-ggml.sh
+          GGML_DIR="third_party/qvac-fabric-speech.cpp/engines/tts/ggml"
+          git clone --filter=blob:none https://github.com/tetherto/qvac-ext-ggml.git "$GGML_DIR"
+          git -C "$GGML_DIR" checkout --detach "$GGML_COMMIT"
           echo "QVAC source: $(git -C third_party/qvac-fabric-speech.cpp rev-parse HEAD)"
-          echo "GGML source: $(git -C third_party/qvac-fabric-speech.cpp/engines/tts/ggml rev-parse HEAD)"
+          echo "GGML source: $(git -C "$GGML_DIR" rev-parse HEAD)"
 
       - name: Prepare persistent Playtest signing key
         shell: bash
