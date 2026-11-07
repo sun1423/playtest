@@ -112,9 +112,6 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         options.stream_chunk_tokens = 25;
         options.stream_first_chunk_tokens = 25;
         options.stream_left_context_tokens = 25;
-        options.stream_chunk_tokens = 25;
-        options.stream_first_chunk_tokens = 10;
-        options.stream_left_context_tokens = 25;
 
         auto candidate = std::make_unique<tts_cpp::chatterbox::Engine>(options);
         {
