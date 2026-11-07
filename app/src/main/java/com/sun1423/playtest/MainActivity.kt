@@ -194,6 +194,18 @@ class MainActivity : ComponentActivity() {
         refreshButtons()
     }
 
+    override fun onDestroy() {
+        // A finished Activity must not leave process-global native model buffers resident.
+        // Serialize with any in-flight JNI call; the native bridge owns that lock.
+        try {
+            bridge.unload()
+        } catch (error: Exception) {
+            android.util.Log.w("QVAC_Playtest", "Native engine cleanup failed.", error)
+        }
+        engineLoaded = false
+        super.onDestroy()
+    }
+
     private fun importModel(uri: Uri, targetName: String, isT3: Boolean) {
         runBusy("Copying model into private app storage...") {
             withContext(Dispatchers.IO) { bridge.unload() }
@@ -340,8 +352,8 @@ class MainActivity : ComponentActivity() {
                         .setEncoding(encoding)
                         .build()
                 )
-                // Two seconds of buffer; prime 500 ms before starting playback.
-                .setBufferSizeInBytes(maxOf(minBufferBytes, sampleRate * 2 * 2))
+                // Four seconds of buffer; prime one second before starting playback.
+                .setBufferSizeInBytes(maxOf(minBufferBytes, sampleRate * 2 * 4))
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
 
@@ -380,7 +392,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 // Prime before play(); all model inference has already finished.
-                val prebufferSamples = minOf(samples.size, sampleRate / 2)
+                val prebufferSamples = minOf(samples.size, sampleRate)
                 writeRange(0, prebufferSamples)
                 track.play()
                 writeRange(prebufferSamples, samples.size - prebufferSamples)
