@@ -44,6 +44,9 @@ set(GGML_VULKAN_DISABLE_COOPMAT2 ON CACHE BOOL "" FORCE)
 add_subdirectory("${QVAC_TTS_SOURCE_DIR}" qvac-tts)
 
 add_library(qvac_tts_jni SHARED qvac_tts_jni.cpp)
+target_include_directories(qvac_tts_jni PRIVATE
+    "${QVAC_TTS_SOURCE_DIR}/ggml/include"
+)
 target_compile_features(qvac_tts_jni PRIVATE cxx_std_17)
 target_compile_options(qvac_tts_jni PRIVATE -fexceptions -frtti)
 target_link_libraries(qvac_tts_jni PRIVATE tts-cpp android log)
