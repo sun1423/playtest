@@ -31,7 +31,9 @@ set(TTS_CPP_OPENMP OFF CACHE BOOL "" FORCE)
 # OpenCL libraries or the separate Qualcomm SDK/toolchain.
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
 set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
-set(GGML_CPU_ALL_VARIANTS ON CACHE BOOL "" FORCE)
+# CPU variants are runtime-loaded plugins and require GGML_BACKEND_DL=ON.
+# This prototype statically links GGML backends, so keep the portable CPU backend.
+set(GGML_CPU_ALL_VARIANTS OFF CACHE BOOL "" FORCE)
 set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
 set(GGML_OPENCL OFF CACHE BOOL "" FORCE)
 set(GGML_HEXAGON OFF CACHE BOOL "" FORCE)
