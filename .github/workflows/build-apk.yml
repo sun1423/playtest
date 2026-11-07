@@ -75,8 +75,46 @@ jobs:
             echo "::error::Add PLAYTEST_KEYSTORE_BASE64 and PLAYTEST_KEYSTORE_PASSWORD as repository Actions secrets."
             exit 1
           fi
+
           KEYSTORE_PATH="$RUNNER_TEMP/playtest-signing.p12"
-          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          export KEYSTORE_PATH
+          python3 - <<'PY'
+          import base64
+          import binascii
+          import os
+          import re
+          import sys
+
+          raw = os.environ.get("KEYSTORE_BASE64", "")
+          compact = "".join(raw.split())
+
+          if not compact:
+              sys.exit("::error::PLAYTEST_KEYSTORE_BASE64 is empty.")
+          invalid = re.search(r"[^A-Za-z0-9+/=]", compact)
+          if invalid:
+              sys.exit(
+                  "::error::PLAYTEST_KEYSTORE_BASE64 contains an invalid character "
+                  f"at position {invalid.start() + 1} (character code {ord(invalid.group())}). "
+                  "Replace the secret using the original Base64 file; do not paste terminal prompts."
+              )
+          if len(compact) % 4 != 0:
+              sys.exit(
+                  "::error::PLAYTEST_KEYSTORE_BASE64 length is not a multiple of 4. "
+                  "The secret is likely truncated; copy the complete one-line file again."
+              )
+          try:
+              decoded = base64.b64decode(compact, validate=True)
+          except (binascii.Error, ValueError) as exc:
+              sys.exit(f"::error::PLAYTEST_KEYSTORE_BASE64 padding/encoding is invalid: {exc}")
+          if not decoded:
+              sys.exit("::error::Decoded signing keystore is empty.")
+          if base64.b64encode(decoded).decode("ascii") != compact:
+              sys.exit("::error::PLAYTEST_KEYSTORE_BASE64 is not canonical Base64.")
+          with open(os.environ["KEYSTORE_PATH"], "wb") as output:
+              output.write(decoded)
+          print(f"Decoded signing keystore successfully ({len(decoded)} bytes).")
+          PY
+
           keytool -list -storetype PKCS12 -keystore "$KEYSTORE_PATH" \
             -storepass "$KEYSTORE_PASSWORD" -alias playtest >/dev/null
           echo "PLAYTEST_KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
