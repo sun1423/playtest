@@ -69,7 +69,12 @@ class MainActivity : ComponentActivity() {
         // The UI opens without loading JNI, GGUF models or the QVAC engine.
         t3Ready = t3File.isFile && t3File.length() > 1024 * 1024
         s3genReady = s3genFile.isFile && s3genFile.length() > 1024 * 1024
-        voiceReady = requiredProfileFiles.all { File(voiceDirectory, it).isFile }
+        voiceReady = try {
+            validateVoiceProfile(voiceDirectory)
+            true
+        } catch (_: Exception) {
+            false
+        }
 
         val scroll = ScrollView(this)
         val column = LinearLayout(this).apply {
@@ -181,10 +186,8 @@ class MainActivity : ComponentActivity() {
 
     private fun importModel(uri: Uri, targetName: String, isT3: Boolean) {
         runBusy("Copying model into private app storage...") {
-            if (engineLoaded) {
-                withContext(Dispatchers.IO) { bridge.unload() }
-                engineLoaded = false
-            }
+            withContext(Dispatchers.IO) { bridge.unload() }
+            engineLoaded = false
             val imported = withContext(Dispatchers.IO) {
                 copyModelIntoPrivateStorage(this@MainActivity, uri, targetName)
             }
@@ -195,10 +198,8 @@ class MainActivity : ComponentActivity() {
 
     private fun importProfile(uri: Uri) {
         runBusy("Validating and importing Azure QVAC voice profile...") {
-            if (engineLoaded) {
-                withContext(Dispatchers.IO) { bridge.unload() }
-                engineLoaded = false
-            }
+            withContext(Dispatchers.IO) { bridge.unload() }
+            engineLoaded = false
             withContext(Dispatchers.IO) {
                 importVoiceProfileZip(this@MainActivity, uri, voiceDirectory)
             }
@@ -275,7 +276,7 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             try {
                 action()
-            } catch (error: Throwable) {
+            } catch (error: Exception) {
                 setStatus("Operation failed: " + (error.message ?: error.toString()))
             } finally {
                 busy = false
@@ -403,13 +404,13 @@ private fun importVoiceProfileZip(context: Context, uri: Uri, destination: File)
                         }
 
                         require(entryBytes >= 10L) { name + " is empty or truncated." }
-                        val magic = ByteArray(6)
-                        outputFile.inputStream().use { it.read(magic) }
-                        val expectedMagic = byteArrayOf(
-                            0x93.toByte(), 'N'.code.toByte(), 'U'.code.toByte(),
-                            'M'.code.toByte(), 'P'.code.toByte(), 'Y'.code.toByte()
+                        val expectedDtype = if (name == "prompt_token.npy" ||
+                            name == "cond_prompt_speech_tokens.npy") "<i4" else "<f4"
+                        validateNpyTensor(
+                            outputFile,
+                            expectedDtype,
+                            requirePromptFeatureShape = name == "prompt_feat.npy"
                         )
-                        require(magic.contentEquals(expectedMagic)) { name + " is not a NumPy .npy tensor." }
                     }
                     zip.closeEntry()
                     entry = zip.nextEntry
@@ -419,6 +420,7 @@ private fun importVoiceProfileZip(context: Context, uri: Uri, destination: File)
 
         val missing = requiredProfileFiles - imported
         require(missing.isEmpty()) { "ZIP is missing: " + missing.joinToString() }
+        validateVoiceProfile(temporary)
 
         val backup = File(destination.parentFile, ".azure-qvac-profile-backup")
         backup.deleteRecursively()
@@ -433,6 +435,105 @@ private fun importVoiceProfileZip(context: Context, uri: Uri, destination: File)
     } catch (error: Throwable) {
         temporary.deleteRecursively()
         throw error
+    }
+}
+
+private fun validateVoiceProfile(directory: File) {
+    require(directory.isDirectory) { "Voice profile directory is missing." }
+    val specs = mapOf(
+        "embedding.npy" to "<f4",
+        "speaker_emb.npy" to "<f4",
+        "prompt_feat.npy" to "<f4",
+        "prompt_token.npy" to "<i4",
+        "cond_prompt_speech_tokens.npy" to "<i4"
+    )
+    for ((name, dtype) in specs) {
+        validateNpyTensor(
+            File(directory, name),
+            dtype,
+            requirePromptFeatureShape = name == "prompt_feat.npy"
+        )
+    }
+}
+
+private fun validateNpyTensor(
+    file: File,
+    expectedDtype: String,
+    requirePromptFeatureShape: Boolean
+) {
+    require(file.isFile && file.length() <= 20L * 1024L * 1024L) {
+        "Missing or oversized voice tensor: " + file.name
+    }
+
+    java.io.DataInputStream(file.inputStream().buffered()).use { input ->
+        val magic = ByteArray(6)
+        input.readFully(magic)
+        require(magic.contentEquals(byteArrayOf(
+            0x93.toByte(), 'N'.code.toByte(), 'U'.code.toByte(),
+            'M'.code.toByte(), 'P'.code.toByte(), 'Y'.code.toByte()
+        ))) { file.name + " is not a NumPy .npy tensor." }
+
+        val major = input.readUnsignedByte()
+        input.readUnsignedByte() // minor version
+        require(major in 1..3) { file.name + " uses an unsupported NumPy format version." }
+
+        val headerLengthBytes = if (major == 1) 2 else 4
+        val headerLength = if (major == 1) {
+            input.readUnsignedByte() or (input.readUnsignedByte() shl 8)
+        } else {
+            input.readUnsignedByte().toLong() or
+                (input.readUnsignedByte().toLong() shl 8) or
+                (input.readUnsignedByte().toLong() shl 16) or
+                (input.readUnsignedByte().toLong() shl 24)
+        }.toLong()
+
+        require(headerLength in 1..65536) { file.name + " has an invalid NumPy header length." }
+        val headerBytes = ByteArray(headerLength.toInt())
+        input.readFully(headerBytes)
+        val header = headerBytes.toString(Charsets.US_ASCII)
+
+        val dtype = Regex("""['"]descr['"]\s*:\s*['"]([^'"]+)['"]""")
+            .find(header)?.groupValues?.get(1)
+            ?: throw IllegalArgumentException(file.name + " is missing its NumPy dtype.")
+        require(dtype == expectedDtype) {
+            file.name + " has dtype " + dtype + "; expected " + expectedDtype + "."
+        }
+
+        val fortranOrder = Regex("""['"]fortran_order['"]\s*:\s*(True|False)""")
+            .find(header)?.groupValues?.get(1)
+            ?: throw IllegalArgumentException(file.name + " is missing its NumPy storage-order flag.")
+        require(fortranOrder == "False") { file.name + " must use contiguous C-order storage." }
+
+        val shapeText = Regex("""['"]shape['"]\s*:\s*\(([^)]*)\)""")
+            .find(header)?.groupValues?.get(1)
+            ?: throw IllegalArgumentException(file.name + " is missing its NumPy shape.")
+
+        val dimensions = shapeText.split(',')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .map { it.toLongOrNull() ?: throw IllegalArgumentException(file.name + " has an invalid shape.") }
+
+        require(dimensions.isNotEmpty() && dimensions.all { it > 0L }) {
+            file.name + " contains an empty or invalid tensor shape."
+        }
+        if (requirePromptFeatureShape) {
+            require(dimensions.size == 2 && dimensions[1] == 80L) {
+                "prompt_feat.npy must have shape (frames, 80)."
+            }
+        }
+
+        val elements = dimensions.fold(1L) { total, dimension ->
+            Math.multiplyExact(total, dimension)
+        }
+        val payloadBytes = Math.multiplyExact(elements, 4L)
+        val headerPrefixBytes = 6L + 2L + headerLengthBytes.toLong()
+        val expectedFileBytes = Math.addExact(
+            Math.addExact(headerPrefixBytes, headerLength),
+            payloadBytes
+        )
+        require(file.length() == expectedFileBytes) {
+            file.name + " has a truncated or inconsistent NumPy payload."
+        }
     }
 }
 
