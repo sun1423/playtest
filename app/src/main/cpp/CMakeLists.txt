@@ -26,6 +26,10 @@ set(TTS_CPP_INSTALL OFF CACHE BOOL "" FORCE)
 set(TTS_CPP_USE_SYSTEM_GGML OFF CACHE BOOL "" FORCE)
 set(TTS_CPP_OPENMP OFF CACHE BOOL "" FORCE)
 
+# This prototype statically links GGML and all selected backends into the JNI
+# library; avoid extra libggml / backend .so dependencies in the APK.
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+
 # First Android prototype: Vulkan when available, with QVAC's CPU fallback.
 # OpenCL and Hexagon are excluded because they need vendor-specific Android
 # OpenCL libraries or the separate Qualcomm SDK/toolchain.
