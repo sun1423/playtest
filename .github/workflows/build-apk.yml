@@ -77,19 +77,19 @@ jobs:
             -storepass "$KEYSTORE_PASSWORD" -alias playtest >/dev/null
           echo "PLAYTEST_KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
 
-      - name: Build ARM64 debug APK
+      - name: Build ARM64 optimized release APK
         shell: bash
         run: |
           set -euo pipefail
           gradle --no-daemon wrapper --gradle-version 8.9
           chmod +x ./gradlew
-          ./gradlew --no-daemon --stacktrace assembleDebug
+          ./gradlew --no-daemon --stacktrace assembleRelease
 
       - name: Verify APK ABI and native QVAC library
         shell: bash
         run: |
           set -euo pipefail
-          APK="app/build/outputs/apk/debug/app-debug.apk"
+          APK="app/build/outputs/apk/release/app-release.apk"
           if [[ ! -s "$APK" ]]; then
             echo "::error::APK output is missing."
             exit 1
@@ -123,7 +123,7 @@ jobs:
             echo "- Context: 1024; KV cache: F16"
             echo "- Backend: Vulkan when available, QVAC CPU fallback"
             echo "- ABI: arm64-v8a"
-            echo "- Build: no test suites or emulator jobs are run by this workflow"
+            echo "- Build: optimized Release variant; no test suites or emulator jobs are run by this workflow"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload APK artifact
