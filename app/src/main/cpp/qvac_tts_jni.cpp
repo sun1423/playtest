@@ -12,6 +12,7 @@
 
 #include "tts-cpp/chatterbox/engine.h"
 #include "tts-cpp/chatterbox/fit.h"
+#include "ggml.h"
 #include "gguf.h"
 
 namespace {
@@ -54,6 +55,57 @@ std::string read_gguf_string(const std::string & path, const char * key) {
         throw std::runtime_error(std::string("GGUF metadata value is empty: ") + key);
     }
     return value;
+}
+
+struct QuantizationSummary {
+    int q4_0_tensors = 0;
+    int q8_0_tensors = 0;
+    uint64_t q4_0_bytes = 0;
+    uint64_t q8_0_bytes = 0;
+};
+
+QuantizationSummary read_quantization_summary(const std::string & path) {
+    gguf_init_params params{};
+    params.no_alloc = true;
+    params.ctx = nullptr;
+    params.kv_only = false;
+
+    std::unique_ptr<gguf_context, void (*)(gguf_context *)> context(
+        gguf_init_from_file(path.c_str(), params), gguf_free);
+    if (!context) {
+        throw std::runtime_error("Cannot inspect GGUF tensor types: " + path);
+    }
+
+    QuantizationSummary summary;
+    const int64_t tensor_count = gguf_get_n_tensors(context.get());
+    for (int64_t i = 0; i < tensor_count; ++i) {
+        const auto type = gguf_get_tensor_type(context.get(), i);
+        const auto bytes = static_cast<uint64_t>(gguf_get_tensor_size(context.get(), i));
+        if (type == GGML_TYPE_Q4_0) {
+            ++summary.q4_0_tensors;
+            summary.q4_0_bytes += bytes;
+        } else if (type == GGML_TYPE_Q8_0) {
+            ++summary.q8_0_tensors;
+            summary.q8_0_bytes += bytes;
+        }
+    }
+    return summary;
+}
+
+void require_q4_0_model(
+    const std::string & path,
+    const char * label,
+    int minimum_q4_tensors) {
+    const auto summary = read_quantization_summary(path);
+    if (summary.q4_0_tensors < minimum_q4_tensors || summary.q8_0_tensors != 0) {
+        throw std::runtime_error(
+            std::string(label) + " model must be the Q4_0 file. Detected " +
+            std::to_string(summary.q4_0_tensors) + " Q4_0 tensors (" +
+            std::to_string(summary.q4_0_bytes / (1024 * 1024)) + " MiB) and " +
+            std::to_string(summary.q8_0_tensors) + " Q8_0 tensors (" +
+            std::to_string(summary.q8_0_bytes / (1024 * 1024)) +
+            " MiB). Re-import the matching Q4_0 multilingual model.");
+    }
 }
 
 void require_profile(const std::string & directory) {
@@ -110,6 +162,11 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
                 "found T3='" + t3_variant + "', S3Gen='" + s3_variant + "'.");
         }
 
+        // Do not accept Q8 imports on a phone profile tuned for Q4_0.
+        // S3Gen intentionally keeps many F32 tensors; validate its distinctive
+        // Q4_0 tensor inventory rather than using a crude file-size threshold.
+        require_q4_0_model(t3, "T3", 200);
+        require_q4_0_model(s3gen, "S3Gen", 300);
         require_profile(voice);
 
         // Release an old engine before constructing another one to avoid holding
