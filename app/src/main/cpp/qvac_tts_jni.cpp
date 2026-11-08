@@ -117,36 +117,72 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         fit_options.t3_gguf_path = t3;
         fit_options.s3gen_gguf_path = s3gen;
         fit_options.n_gpu_layers = 99;
-        fit_options.n_ctx = 1024;
+        fit_options.n_ctx = 512;
         fit_options.kv_cache_type = "f16";
-        fit_options.text_tokens = 256;
-        fit_options.n_predict = 1000;
+        fit_options.text_tokens = 128;
         fit_options.margin_bytes = 768ull * 1024ull * 1024ull;
 
-        const auto fit = tts_cpp::chatterbox::fit_params(fit_options);
-        if (fit.status != tts_cpp::FitStatus::Success || !fit.fits) {
-            throw std::runtime_error(
-                "QVAC memory preflight refused to load the models (" +
-                fit.reason + ").\\n" + fit.report);
+        // Pick the longest utterance budget that still leaves at least 256 MiB
+        // beyond QVAC's 768 MiB safety margin. Smaller phones automatically get
+        // shorter output instead of attempting a workload that can OOM.
+        constexpr uint64_t EXTRA_HEADROOM = 256ull * 1024ull * 1024ull;
+        constexpr std::array<int, 4> SPEECH_TOKEN_BUDGETS = {192, 160, 128, 96};
+        tts_cpp::FitResult selected_fit;
+        int selected_budget = 0;
+
+        for (const int budget : SPEECH_TOKEN_BUDGETS) {
+            fit_options.n_predict = budget;
+            const auto attempt = tts_cpp::chatterbox::fit_params(fit_options);
+            selected_fit = attempt;
+
+            if (attempt.status == tts_cpp::FitStatus::Error) {
+                throw std::runtime_error(
+                    "QVAC memory preflight failed (" + attempt.reason + ").\\n" +
+                    attempt.report);
+            }
+            if (attempt.status != tts_cpp::FitStatus::Success || !attempt.fits) {
+                continue;
+            }
+
+            uint64_t required = attempt.device.total_bytes + fit_options.margin_bytes;
+            if (attempt.device_shares_host_memory) {
+                required += attempt.host_bytes;
+            }
+            if (attempt.device_free_bytes >= required &&
+                attempt.device_free_bytes - required >= EXTRA_HEADROOM) {
+                selected_budget = budget;
+                break;
+            }
         }
-        if (fit.model_variant != "chatterbox-t3-mtl") {
+
+        if (selected_budget == 0) {
+            throw std::runtime_error(
+                "This phone does not have enough free RAM for a safe Chatterbox run, "
+                "even at the smallest 96-token utterance budget. Use the matching Q4_0 "
+                "multilingual T3 + S3Gen models, close other apps, and retry.\\n" +
+                selected_fit.report);
+        }
+        if (selected_fit.model_variant != "chatterbox-t3-mtl") {
             throw std::runtime_error(
                 "The selected T3 GGUF is not the Chatterbox multilingual model. "
                 "Select the T3 MTL GGUF produced for the Azure voice profile.");
         }
         __android_log_print(
-            ANDROID_LOG_INFO, "QVAC_FIT", "%s", fit.report.c_str());
+            ANDROID_LOG_INFO, "QVAC_FIT",
+            "Selected speech budget: %d tokens\\n%s",
+            selected_budget, selected_fit.report.c_str());
 
         tts_cpp::chatterbox::EngineOptions options;
         options.t3_gguf_path = t3;
         options.s3gen_gguf_path = s3gen;
         options.voice_dir = voice;
         options.language = lang.empty() ? "en" : lang;
-        options.n_ctx = 1024;
+        options.n_ctx = 512;
+        options.n_predict = selected_budget;
         options.kv_cache_type = "f16";
         options.n_threads = 4;
-        options.n_gpu_layers = 99; // Try compiled Vulkan; QVAC may fall back to CPU.
-        options.max_sentence_chars = 180;
+        options.n_gpu_layers = 99; // Vulkan when available; QVAC safely falls back to CPU.
+        options.max_sentence_chars = 120;
         options.output_sample_rate = 24000;
         // Batch synthesis is intentional in this prototype: playback starts
         // only after the whole utterance is ready, so slow inference cannot
@@ -154,22 +190,32 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         // target phone demonstrates RTF <= 1 on the selected backend.
 
         auto candidate = std::make_unique<tts_cpp::chatterbox::Engine>(options);
+        const std::string backend_name = candidate->backend_name();
+        const bool gpu_unvalidated = candidate->gpu_unsupported();
+        __android_log_print(
+            ANDROID_LOG_INFO, "QVAC_RUNTIME",
+            "Backend=%s; GPU skipped by validation policy=%s; n_ctx=%d; n_predict=%d",
+            backend_name.c_str(), gpu_unvalidated ? "true" : "false",
+            options.n_ctx, options.n_predict);
         {
             std::lock_guard<std::mutex> lock(g_engine_mutex);
             g_engine = std::move(candidate);
             g_last_error.clear();
         }
-        return to_java(env, "");
+        return to_java(env,
+            "QVAC_OK: Loaded on " + backend_name +
+            " with a " + std::to_string(selected_budget) +
+            "-speech-token memory profile.");
     } catch (const std::exception & error) {
         std::lock_guard<std::mutex> lock(g_engine_mutex);
         g_engine.reset();
         g_last_error = error.what();
-        return to_java(env, g_last_error);
+        return to_java(env, "QVAC_ERROR: " + g_last_error);
     } catch (...) {
         std::lock_guard<std::mutex> lock(g_engine_mutex);
         g_engine.reset();
         g_last_error = "Unknown native QVAC initialization failure.";
-        return to_java(env, g_last_error);
+        return to_java(env, "QVAC_ERROR: " + g_last_error);
     }
 }
 
