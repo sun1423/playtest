@@ -182,7 +182,7 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         fit_options.s3gen_gguf_path = s3gen;
         fit_options.n_gpu_layers = 99;
         fit_options.n_ctx = 320;
-        fit_options.kv_cache_type = "q8_0";
+        fit_options.kv_cache_type = "f16";
         fit_options.text_tokens = 192; // conservative ceiling for the 120-character input field
         fit_options.low_memory = true;
         fit_options.margin_bytes = 768ull * 1024ull * 1024ull;
@@ -250,7 +250,7 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         options.language = lang.empty() ? "en" : lang;
         options.n_ctx = 320;
         options.n_predict = selected_budget;
-        options.kv_cache_type = "q8_0";
+        options.kv_cache_type = "f16";
         // Keep CPU scratch/thread pressure lower on smaller-RAM phones.
         options.n_threads = selected_fit.device_total_bytes < (6ull * 1024ull * 1024ull * 1024ull) ? 2 : 4;
         options.cfm_steps = 7; // Multilingual quality knee: fewer S3Gen steps, lower latency.
@@ -268,7 +268,7 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         const bool gpu_unvalidated = candidate->gpu_unsupported();
         __android_log_print(
             ANDROID_LOG_INFO, "QVAC_RUNTIME",
-            "Backend=%s; GPU skipped by validation policy=%s; n_ctx=%d; n_predict=%d; kv=q8_0; low_memory=1",
+            "Backend=%s; GPU skipped by validation policy=%s; n_ctx=%d; n_predict=%d; kv=f16; low_memory=1",
             backend_name.c_str(), gpu_unvalidated ? "true" : "false",
             options.n_ctx, options.n_predict);
         {
@@ -278,7 +278,7 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         }
         return to_java(env,
             "QVAC_OK: Loaded on " + backend_name +
-            " with low-memory mode, Q8 KV, context 320 and a " +
+            " with low-memory mode, F16 KV, context 320 and a " +
             std::to_string(selected_budget) + "-speech-token limit.");
     } catch (const std::exception & error) {
         std::lock_guard<std::mutex> lock(g_engine_mutex);
