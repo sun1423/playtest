@@ -450,17 +450,15 @@ class MainActivity : ComponentActivity() {
                     }
                     return true
                 }
-                // Prime one second before playback; remaining chunks are fed as AudioTrack drains.
-                while (transferred < minOf(sampleCount, sampleRate.toLong())) {
-                    check(writeNextChunk()) { "Native PCM ended before the prebuffer was filled." }
-                }
-                Log.i("QVAC_AUDIO", "Prebuffer ready: samples=$transferred; requesting audio focus")
+                // Start the streaming track before its first write. Some OEM AudioFlinger
+                // implementations invalidate an idle track during prebuffer writes
+                // (restoreTrack_l: dead IAudioTrack), leaving playbackHeadPosition stuck at 0.
                 val focusResult = audioManager.requestAudioFocus(focusRequest)
                 check(focusResult == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
                     "Android denied audio focus (result=$focusResult); cannot start speech playback."
                 }
                 track.play()
-                Log.i("QVAC_AUDIO", "AudioTrack.play() called; playState=${track.playState}")
+                Log.i("QVAC_AUDIO", "AudioTrack.play() called before PCM writes; playState=${track.playState}")
                 while (transferred < sampleCount) {
                     check(writeNextChunk()) { "Native PCM ended before all samples were transferred." }
                 }
