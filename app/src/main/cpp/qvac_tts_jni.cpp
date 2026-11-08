@@ -346,9 +346,9 @@ Java_com_sun1423_playtest_NativeBridge_nativeSynthesize(
                 "QVAC returned silent PCM (peak=" + std::to_string(pcm_peak) +
                 ", RMS=" + std::to_string(pcm_rms) + "). Check voice conditioning and S3Gen output.");
         }
-        // Protect against an unusually quiet but otherwise valid model output.
-        // Normal Chatterbox output is left untouched; gain is applied only below -26 dBFS.
-        const float pcm_gain = pcm_peak < 0.05f
+        // Normalize quiet model output to a usable playback peak, capped at 20x.
+        // This preserves waveform/prosody; only amplitude changes.
+        const float pcm_gain = pcm_peak < 0.8f
             ? std::min(20.0f, 0.8f / pcm_peak) : 1.0f;
         for (float & sample : result.pcm) {
             if (!std::isfinite(sample)) sample = 0.0f;
@@ -356,9 +356,9 @@ Java_com_sun1423_playtest_NativeBridge_nativeSynthesize(
         }
         __android_log_print(
             ANDROID_LOG_INFO, "QVAC_AUDIO",
-            "Synthesis PCM: samples=%zu rate=%d peak=%.6f rms=%.6f nonfinite=%zu gain=%.2f",
+            "Synthesis PCM: samples=%zu rate=%d peak_before=%.6f rms_before=%.6f peak_after=%.6f nonfinite=%zu gain=%.2f",
             result.pcm.size(), result.sample_rate, pcm_peak, pcm_rms,
-            pcm_non_finite, pcm_gain);
+            std::min(0.8f, pcm_peak * pcm_gain), pcm_non_finite, pcm_gain);
         g_pcm_buffer = std::move(result.pcm);
         g_last_error.clear();
         return static_cast<jlong>(g_pcm_buffer.size());
