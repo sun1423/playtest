@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: qvac-chatterbox-playtest-arm64
@@ -175,10 +175,23 @@ jobs:
             echo "- Build: optimized Release variant; no test suites or emulator jobs are run by this workflow"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: qvac-chatterbox-playtest-arm64-apk
-          path: output/QVAC-Chatterbox-Playtest-arm64-v8a.apk
-          if-no-files-found: error
-          retention-days: 5
+      - name: Publish direct APK download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="qvac-playtest-${GITHUB_RUN_ID}"
+          APK="output/QVAC-Chatterbox-Playtest-arm64-v8a.apk"
+          test -s "$APK"
+
+          # GitHub Actions artifacts are always packaged as ZIP archives.
+          # Publish the APK as a GitHub Release asset so it downloads as a
+          # standalone .apk file without an artifact ZIP wrapper.
+          gh release create "$TAG" "$APK#QVAC-Chatterbox-Playtest-arm64-v8a.apk" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "QVAC Chatterbox Playtest ${GITHUB_RUN_NUMBER}" \
+            --notes "Manual ARM64 Android playtest build from commit ${GITHUB_SHA}. Models and voice profile are imported separately in the app." \
+            --prerelease
+
+          echo "Direct APK: https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/QVAC-Chatterbox-Playtest-arm64-v8a.apk" >> "$GITHUB_STEP_SUMMARY"
