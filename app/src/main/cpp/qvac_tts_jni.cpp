@@ -226,12 +226,21 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
             }
         }
 
-        if (selected_budget == 0) {
-            throw std::runtime_error(
-                "This phone does not have enough free RAM for the low-memory Q4_0 "
-                "Chatterbox profile, even at the smallest 48-token utterance budget. "
-                "Close other apps and retry when more RAM is available.\\n" +
-                selected_fit.report);
+        // A failed fit estimate is a warning, not an automatic load veto.
+        // The estimator is conservative and cannot know every allocation the
+        // Android runtime/backend will actually make. Try the smallest workload
+        // once; the real Engine constructor remains the authority on whether
+        // model/backend initialization succeeds. Never weaken model validation
+        // or silently change Q4/F16/context settings to manufacture a fit.
+        const bool memory_preflight_warning = selected_budget == 0;
+        if (memory_preflight_warning) {
+            selected_budget = 48;
+            fit_options.n_predict = selected_budget;
+            __android_log_print(
+                ANDROID_LOG_WARN, "QVAC_FIT",
+                "Memory preflight did not pass; continuing with the minimum "
+                "48-token workload. Runtime allocation may still fail.\\n%s",
+                selected_fit.report.c_str());
         }
         if (selected_fit.model_variant != "chatterbox-t3-mtl") {
             throw std::runtime_error(
@@ -279,7 +288,12 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         return to_java(env,
             "QVAC_OK: Loaded on " + backend_name +
             " with verified Q4_0 models, low-memory mode, F16 KV, context 320 and a " +
-            std::to_string(selected_budget) + "-speech-token limit.");
+            std::to_string(selected_budget) + "-speech-token limit." +
+            (memory_preflight_warning
+                ? " WARNING: Memory preflight was below the recommended reserve; "
+                  "the minimum workload was attempted. Synthesis may still fail "
+                  "if Android cannot provide the required memory."
+                : ""));
     } catch (const std::exception & error) {
         std::lock_guard<std::mutex> lock(g_engine_mutex);
         g_engine.reset();
