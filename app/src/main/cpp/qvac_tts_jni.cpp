@@ -187,10 +187,12 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         fit_options.low_memory = true;
         fit_options.margin_bytes = 768ull * 1024ull * 1024ull;
 
-        // Keep both QVAC's 768 MiB safety margin and a separate 256 MiB
-        // runtime headroom. Low-memory mode prices and releases sequential
-        // S3Gen stage arenas; it does not relax the fit threshold.
-        constexpr uint64_t EXTRA_HEADROOM = 256ull * 1024ull * 1024ull;
+        // Keep QVAC's 768 MiB safety margin. Add 128 MiB headroom on
+        // sub-6-GiB devices and 256 MiB on larger devices; this adapts to
+        // Android's smaller memory pool without removing the QVAC reserve.
+        constexpr uint64_t SMALL_DEVICE_EXTRA_HEADROOM = 128ull * 1024ull * 1024ull;
+        constexpr uint64_t LARGE_DEVICE_EXTRA_HEADROOM = 256ull * 1024ull * 1024ull;
+        constexpr uint64_t SMALL_DEVICE_RAM_LIMIT = 6ull * 1024ull * 1024ull * 1024ull;
         constexpr std::array<int, 3> SPEECH_TOKEN_BUDGETS = {80, 64, 48};
         tts_cpp::FitResult selected_fit;
         int selected_budget = 0;
@@ -213,8 +215,12 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
             if (attempt.device_shares_host_memory) {
                 required += attempt.host_bytes;
             }
+            const uint64_t extra_headroom =
+                attempt.device_total_bytes < SMALL_DEVICE_RAM_LIMIT
+                    ? SMALL_DEVICE_EXTRA_HEADROOM
+                    : LARGE_DEVICE_EXTRA_HEADROOM;
             if (attempt.device_free_bytes >= required &&
-                attempt.device_free_bytes - required >= EXTRA_HEADROOM) {
+                attempt.device_free_bytes - required >= extra_headroom) {
                 selected_budget = budget;
                 break;
             }
