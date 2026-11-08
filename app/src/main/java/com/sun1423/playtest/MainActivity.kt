@@ -202,7 +202,7 @@ class MainActivity : ComponentActivity() {
 
         statusView = addText("", 14f)
         addText(
-            "Mobile settings: T3 context 1,024; F16 KV cache; four CPU threads; attempt Vulkan with CPU fallback. This first prototype does not include OpenCL or Hexagon.",
+            "Adaptive mobile settings: T3 context 512; F16 KV cache; 2–4 CPU threads; speech budget selected from available RAM; Vulkan attempted with CPU fallback. OpenCL and Hexagon are not included.",
             12f
         )
 
