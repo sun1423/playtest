@@ -182,6 +182,7 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         options.kv_cache_type = "f16";
         options.n_threads = 4;
         options.n_gpu_layers = 99; // Vulkan when available; QVAC safely falls back to CPU.
+        options.verbose = true; // Surface precise GPU discovery / initialization diagnostics.
         options.max_sentence_chars = 120;
         options.output_sample_rate = 24000;
         // Batch synthesis is intentional in this prototype: playback starts
