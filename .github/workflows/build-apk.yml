@@ -162,7 +162,7 @@ jobs:
             echo "- Runtime: QVAC Fabric Speech C++ / GGML"
             echo "- Models: user-imported T3 + S3Gen GGUF (not bundled)"
             echo "- Voice: Azure QVAC five-tensor NumPy profile (user-imported)"
-            echo "- Context: 1024; KV cache: F16"
+            echo "- Context: 512; F16 KV cache; adaptive speech-token budget (192–48); 2–4 CPU threads"
             echo "- Backend: Vulkan when available, QVAC CPU fallback"
             echo "- ABI: arm64-v8a"
             echo "- Build: optimized Release variant; no test suites or emulator jobs are run by this workflow"
