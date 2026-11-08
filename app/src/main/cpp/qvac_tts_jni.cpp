@@ -278,7 +278,7 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         }
         return to_java(env,
             "QVAC_OK: Loaded on " + backend_name +
-            " with low-memory mode, F16 KV, context 320 and a " +
+            " with verified Q4_0 models, low-memory mode, F16 KV, context 320 and a " +
             std::to_string(selected_budget) + "-speech-token limit.");
     } catch (const std::exception & error) {
         std::lock_guard<std::mutex> lock(g_engine_mutex);
