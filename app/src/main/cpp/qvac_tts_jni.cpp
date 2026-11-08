@@ -183,7 +183,7 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         fit_options.n_gpu_layers = 99;
         fit_options.n_ctx = 320;
         fit_options.kv_cache_type = "q8_0";
-        fit_options.text_tokens = 160;
+        fit_options.text_tokens = 192; // conservative ceiling for the 120-character input field
         fit_options.low_memory = true;
         fit_options.margin_bytes = 768ull * 1024ull * 1024ull;
 
