@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.util.Log
 import android.net.Uri
 import android.os.Bundle
 import android.os.StatFs
@@ -303,16 +304,19 @@ class MainActivity : ComponentActivity() {
 
         runBusy("Generating the complete utterance first to avoid generation-time playback gaps...") {
             val generationStarted = SystemClock.elapsedRealtime()
+            Log.i("QVAC_AUDIO", "Generate start: chars=${text.length}")
             val sampleCount = withContext(Dispatchers.IO) { bridge.synthesize(text) }
             val generationMs = SystemClock.elapsedRealtime() - generationStarted
+            Log.i("QVAC_AUDIO", "Generate complete: samples=$sampleCount durationMs=$generationMs")
+            setStatus("Generated " + String.format("%.2f", sampleCount / 24000.0) + "s audio. Starting playback...")
             try {
                 val playback = playPcmWithoutGenerationGaps(sampleCount)
                 val rtf = generationMs.toDouble() / (playback.audioSeconds * 1000.0)
-                setStatus(
-                    "Played " + String.format("%.1f", playback.audioSeconds) + " seconds. " +
-                        "Generation " + generationMs + " ms (RTF " + String.format("%.2f", rtf) + "). " +
-                        "AudioTrack underruns " + playback.underruns + " (0 expected)."
-                )
+                val summary = "Audio played: " + String.format("%.2f", playback.audioSeconds) +
+                    "s | generation " + generationMs + "ms | RTF " + String.format("%.2f", rtf) +
+                    " | underruns " + playback.underruns
+                Log.i("QVAC_AUDIO", summary)
+                setStatus(summary)
             } finally {
                 withContext(Dispatchers.IO) { bridge.releasePcm() }
             }
@@ -402,7 +406,10 @@ class MainActivity : ComponentActivity() {
                 .build()
             try {
                 check(track.state == AudioTrack.STATE_INITIALIZED) { "Android could not initialize AudioTrack." }
+                track.setVolume(1.0f)
+                Log.i("QVAC_AUDIO", "AudioTrack initialized: sampleRate=$sampleRate minBufferBytes=$minBufferBytes")
                 var transferred = 0L
+                var totalBytesWritten = 0L
                 fun writeNextChunk(): Boolean {
                     val pcm16 = bridge.readPcm16(4096)
                     if (pcm16.isEmpty()) return false
@@ -411,15 +418,21 @@ class MainActivity : ComponentActivity() {
                         val written = track.write(pcm16, offset, pcm16.size - offset, AudioTrack.WRITE_BLOCKING)
                         check(written > 0) { "AudioTrack write failed: " + written }
                         offset += written
+                        totalBytesWritten += written.toLong() * 2L
                     }
                     transferred += pcm16.size
+                    if (transferred == pcm16.size.toLong() || transferred % 24000L < pcm16.size) {
+                        Log.i("QVAC_AUDIO", "PCM transfer: samples=$transferred/$sampleCount bytes=$totalBytesWritten")
+                    }
                     return true
                 }
                 // Prime one second before playback; remaining chunks are fed as AudioTrack drains.
                 while (transferred < minOf(sampleCount, sampleRate.toLong())) {
                     check(writeNextChunk()) { "Native PCM ended before the prebuffer was filled." }
                 }
+                Log.i("QVAC_AUDIO", "Prebuffer ready: samples=$transferred; starting AudioTrack")
                 track.play()
+                Log.i("QVAC_AUDIO", "AudioTrack.play() called")
                 while (transferred < sampleCount) {
                     check(writeNextChunk()) { "Native PCM ended before all samples were transferred." }
                 }
@@ -429,6 +442,11 @@ class MainActivity : ComponentActivity() {
                         "Timed out waiting for Android audio playback to finish."
                     }
                     delay(20)
+                }
+                val playedFrames = track.playbackHeadPosition.toLong() and 0xffffffffL
+                Log.i("QVAC_AUDIO", "Playback complete: frames=$playedFrames expected=$sampleCount bytesWritten=$totalBytesWritten underruns=${track.underrunCount}")
+                check(playedFrames >= sampleCount) {
+                    "Playback ended early: $playedFrames of $sampleCount frames."
                 }
                 PcmPlaybackStats(sampleCount.toDouble() / sampleRate, track.underrunCount)
             } finally {
