@@ -7,6 +7,7 @@ import android.media.AudioTrack
 import android.net.Uri
 import android.os.Bundle
 import android.os.StatFs
+import android.view.View
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.view.ViewGroup
@@ -14,6 +15,7 @@ import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
@@ -50,6 +52,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var loadButton: Button
     private lateinit var playButton: Button
     private lateinit var unloadButton: Button
+    private lateinit var operationProgress: ProgressBar
 
     private var t3Ready = false
     private var s3genReady = false
@@ -129,6 +132,19 @@ class MainActivity : ComponentActivity() {
             if (!busy) voicePicker.launch(arrayOf("application/zip", "application/octet-stream", "*/*"))
         }
 
+        operationProgress = ProgressBar(
+            this, null, android.R.attr.progressBarStyleHorizontal
+        ).apply {
+            max = 1000
+            isIndeterminate = true
+            visibility = View.GONE
+        }
+        column.addView(
+            operationProgress,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+
         addText("Language", 15f, true)
         languagePicker = Spinner(this)
         languagePicker.adapter = ArrayAdapter(
@@ -206,7 +222,24 @@ class MainActivity : ComponentActivity() {
             withContext(Dispatchers.IO) { bridge.unload() }
             engineLoaded = false
             val imported = withContext(Dispatchers.IO) {
-                copyModelIntoPrivateStorage(this@MainActivity, uri, targetName)
+                copyModelIntoPrivateStorage(this@MainActivity, uri, targetName) { copied, total ->
+                    runOnUiThread {
+                        if (total > 0L) {
+                            operationProgress.isIndeterminate = false
+                            operationProgress.progress =
+                                ((copied.toDouble() * operationProgress.max) / total)
+                                    .toInt().coerceIn(0, operationProgress.max)
+                            setStatus(
+                                "Importing " + targetName + ": " +
+                                    (copied * 100 / total) + "% (" +
+                                    formatMiB(copied) + " / " + formatMiB(total) + " MiB)"
+                            )
+                        } else {
+                            operationProgress.isIndeterminate = true
+                            setStatus("Importing " + targetName + ": " + formatMiB(copied) + " MiB copied...")
+                        }
+                    }
+                }
             }
             if (isT3) t3Ready = true else s3genReady = true
             setStatus("Imported " + targetName + " (" + imported.length() / (1024 * 1024) + " MB).")
@@ -240,9 +273,18 @@ class MainActivity : ComponentActivity() {
                     language
                 )
             }
-            if (message.isNotBlank()) throw IllegalStateException(message)
+            if (message.startsWith("QVAC_ERROR:")) {
+                throw IllegalStateException(message.removePrefix("QVAC_ERROR:").trim())
+            }
+            if (message.isNotBlank() && !message.startsWith("QVAC_OK:")) {
+                throw IllegalStateException(message)
+            }
             engineLoaded = true
-            setStatus("QVAC engine loaded. Vulkan is attempted when available; CPU fallback remains enabled.")
+            setStatus(
+                message.removePrefix("QVAC_OK:").trim().ifBlank {
+                    "QVAC engine loaded."
+                }
+            )
         }
     }
 
@@ -286,6 +328,11 @@ class MainActivity : ComponentActivity() {
         if (busy) return
         busy = true
         setStatus(message)
+        if (::operationProgress.isInitialized) {
+            operationProgress.progress = 0
+            operationProgress.isIndeterminate = true
+            operationProgress.visibility = View.VISIBLE
+        }
         refreshButtons()
         lifecycleScope.launch {
             try {
@@ -294,10 +341,14 @@ class MainActivity : ComponentActivity() {
                 setStatus("Operation failed: " + (error.message ?: error.toString()))
             } finally {
                 busy = false
+                if (::operationProgress.isInitialized) operationProgress.visibility = View.GONE
                 refreshButtons()
             }
         }
     }
+
+    private fun formatMiB(bytes: Long): String =
+        String.format("%.0f", bytes.toDouble() / (1024.0 * 1024.0))
 
     private fun setStatus(message: String) {
         if (::statusView.isInitialized) statusView.text = message
@@ -413,7 +464,12 @@ class MainActivity : ComponentActivity() {
 
 }
 
-private fun copyModelIntoPrivateStorage(context: Context, uri: Uri, targetName: String): File {
+private fun copyModelIntoPrivateStorage(
+    context: Context,
+    uri: Uri,
+    targetName: String,
+    onProgress: (copiedBytes: Long, totalBytes: Long) -> Unit
+): File {
     val directory = File(context.filesDir, "models")
     check(directory.mkdirs() || directory.isDirectory) { "Cannot create private model directory." }
 
@@ -434,6 +490,8 @@ private fun copyModelIntoPrivateStorage(context: Context, uri: Uri, targetName: 
         val input = context.contentResolver.openInputStream(uri)
             ?: throw IllegalArgumentException("Android could not open the selected file.")
         var copied = 0L
+        var nextProgressUpdate = 4L * 1024L * 1024L
+        onProgress(0L, sourceSize)
         input.use { source ->
             FileOutputStream(temporary).use { output ->
                 val buffer = ByteArray(1024 * 1024)
@@ -443,12 +501,17 @@ private fun copyModelIntoPrivateStorage(context: Context, uri: Uri, targetName: 
                     copied += count
                     require(copied <= 8L * 1024L * 1024L * 1024L) { "Model exceeded the 8 GB import limit." }
                     output.write(buffer, 0, count)
+                    if (copied >= nextProgressUpdate || (sourceSize > 0L && copied >= sourceSize)) {
+                        onProgress(copied, sourceSize)
+                        nextProgressUpdate = copied + 4L * 1024L * 1024L
+                    }
                 }
                 output.flush()
                 output.fd.sync()
             }
         }
 
+        onProgress(copied, sourceSize)
         require(copied >= 1024L * 1024L) { "Selected file is too small to be a GGUF model." }
         val header = ByteArray(4)
         temporary.inputStream().use { input ->
