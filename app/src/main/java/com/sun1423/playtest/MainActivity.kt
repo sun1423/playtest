@@ -188,9 +188,9 @@ class MainActivity : ComponentActivity() {
         }
 
         textInput = EditText(this).apply {
-            hint = "Text to speak (maximum 300 characters)"
+            hint = "Text to speak (maximum 120 characters)"
             setText("Hello. This is a local QVAC Chatterbox voice test.")
-            filters = arrayOf(android.text.InputFilter.LengthFilter(300))
+            filters = arrayOf(android.text.InputFilter.LengthFilter(120))
             minLines = 3
             gravity = android.view.Gravity.TOP
         }
