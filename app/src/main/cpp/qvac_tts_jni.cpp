@@ -180,10 +180,11 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         options.n_ctx = 512;
         options.n_predict = selected_budget;
         options.kv_cache_type = "f16";
-        options.n_threads = 4;
+        // Keep CPU scratch/thread pressure lower on smaller-RAM phones.
+        options.n_threads = selected_fit.device_total_bytes < (6ull * 1024ull * 1024ull * 1024ull) ? 2 : 4;
         options.n_gpu_layers = 99; // Vulkan when available; QVAC safely falls back to CPU.
         options.verbose = true; // Surface precise GPU discovery / initialization diagnostics.
-        options.max_sentence_chars = 120;
+        options.max_sentence_chars = 480; // 120 UTF-8 characters without splitting Hindi code points.
         options.output_sample_rate = 24000;
         // Batch synthesis is intentional in this prototype: playback starts
         // only after the whole utterance is ready, so slow inference cannot
