@@ -366,11 +366,13 @@ Java_com_sun1423_playtest_NativeBridge_nativeSynthesize(
         std::vector<float>().swap(g_pcm_buffer);
         g_pcm_offset = 0;
         g_last_error = error.what();
+        __android_log_print(ANDROID_LOG_ERROR, "QVAC_AUDIO", "Synthesis failed: %s", g_last_error.c_str());
         return 0;
     } catch (...) {
         std::vector<float>().swap(g_pcm_buffer);
         g_pcm_offset = 0;
         g_last_error = "Unknown native QVAC synthesis failure.";
+        __android_log_print(ANDROID_LOG_ERROR, "QVAC_AUDIO", "%s", g_last_error.c_str());
         return 0;
     }
 }
@@ -409,9 +411,11 @@ Java_com_sun1423_playtest_NativeBridge_nativeReadPcm16(
         return output;
     } catch (const std::exception & error) {
         g_last_error = error.what();
+        __android_log_print(ANDROID_LOG_ERROR, "QVAC_AUDIO", "PCM transfer failed: %s", g_last_error.c_str());
         return nullptr;
     } catch (...) {
         g_last_error = "Unknown native PCM transfer failure.";
+        __android_log_print(ANDROID_LOG_ERROR, "QVAC_AUDIO", "%s", g_last_error.c_str());
         return nullptr;
     }
 }
