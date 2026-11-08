@@ -2,7 +2,10 @@ package com.sun1423.playtest
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
+import android.media.AudioFocusRequest
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioTrack
 import android.util.Log
 import android.net.Uri
@@ -392,11 +395,21 @@ class MainActivity : ComponentActivity() {
             val encoding = AudioFormat.ENCODING_PCM_16BIT
             val minBufferBytes = AudioTrack.getMinBufferSize(sampleRate, channelMask, encoding)
             require(minBufferBytes > 0) { "Android does not support 24 kHz mono PCM16 playback." }
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val musicVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+            check(musicVolume > 0) { "Android media volume is muted. Raise the phone's media volume and try again." }
+            val speaker = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                ?: throw IllegalStateException("Android did not report a built-in speaker output.")
+            val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
+            val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                .setAudioAttributes(attributes)
+                .setOnAudioFocusChangeListener { change -> Log.i("QVAC_AUDIO", "Audio focus change: $change") }
+                .setWillPauseWhenDucked(false)
+                .build()
             val track = AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
-                )
+                .setAudioAttributes(attributes)
                 .setAudioFormat(
                     AudioFormat.Builder().setSampleRate(sampleRate).setChannelMask(channelMask)
                         .setEncoding(encoding).build()
@@ -406,8 +419,9 @@ class MainActivity : ComponentActivity() {
                 .build()
             try {
                 check(track.state == AudioTrack.STATE_INITIALIZED) { "Android could not initialize AudioTrack." }
+                check(track.setPreferredDevice(speaker)) { "Android rejected the built-in speaker output route." }
                 track.setVolume(1.0f)
-                Log.i("QVAC_AUDIO", "AudioTrack initialized: sampleRate=$sampleRate minBufferBytes=$minBufferBytes")
+                Log.i("QVAC_AUDIO", "AudioTrack initialized: sampleRate=$sampleRate minBufferBytes=$minBufferBytes speakerId=${speaker.id} mediaVolume=$musicVolume")
                 var transferred = 0L
                 var totalBytesWritten = 0L
                 var pcmMin = Short.MAX_VALUE
@@ -440,9 +454,24 @@ class MainActivity : ComponentActivity() {
                 while (transferred < minOf(sampleCount, sampleRate.toLong())) {
                     check(writeNextChunk()) { "Native PCM ended before the prebuffer was filled." }
                 }
-                Log.i("QVAC_AUDIO", "Prebuffer ready: samples=$transferred; starting AudioTrack")
+                Log.i("QVAC_AUDIO", "Prebuffer ready: samples=$transferred; requesting audio focus")
+                val focusResult = audioManager.requestAudioFocus(focusRequest)
+                check(focusResult == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+                    "Android denied audio focus (result=$focusResult); cannot start speech playback."
+                }
                 track.play()
-                Log.i("QVAC_AUDIO", "AudioTrack.play() called")
+                Log.i("QVAC_AUDIO", "AudioTrack.play() called; playState=${track.playState}")
+                val routeDeadline = SystemClock.elapsedRealtime() + 1500L
+                var routedDevice = track.routedDevice
+                while (routedDevice?.type != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER &&
+                    SystemClock.elapsedRealtime() < routeDeadline) {
+                    delay(50)
+                    routedDevice = track.routedDevice
+                }
+                check(routedDevice?.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+                    "AudioTrack did not route to the phone speaker (routedType=${routedDevice?.type})."
+                }
+                Log.i("QVAC_AUDIO", "Speaker route confirmed: id=${routedDevice.id} type=${routedDevice.type}")
                 while (transferred < sampleCount) {
                     check(writeNextChunk()) { "Native PCM ended before all samples were transferred." }
                 }
@@ -461,6 +490,9 @@ class MainActivity : ComponentActivity() {
                 var lastHead = -1L
                 var lastAdvanceAt = SystemClock.elapsedRealtime()
                 while (true) {
+                    check(track.playState == AudioTrack.PLAYSTATE_PLAYING) {
+                        "AudioTrack stopped before playback completed (head=${track.playbackHeadPosition})."
+                    }
                     val head = track.playbackHeadPosition.toLong() and 0xffffffffL
                     if (head >= sampleCount) break
                     check(SystemClock.elapsedRealtime() <= deadline) {
@@ -480,6 +512,7 @@ class MainActivity : ComponentActivity() {
                 PcmPlaybackStats(sampleCount.toDouble() / sampleRate, track.underrunCount)
             } finally {
                 track.release()
+                audioManager.abandonAudioFocusRequest(focusRequest)
             }
         }
 
