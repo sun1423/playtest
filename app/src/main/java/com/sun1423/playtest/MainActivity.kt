@@ -461,17 +461,6 @@ class MainActivity : ComponentActivity() {
                 }
                 track.play()
                 Log.i("QVAC_AUDIO", "AudioTrack.play() called; playState=${track.playState}")
-                val routeDeadline = SystemClock.elapsedRealtime() + 1500L
-                var routedDevice = track.routedDevice
-                while (routedDevice?.type != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER &&
-                    SystemClock.elapsedRealtime() < routeDeadline) {
-                    delay(50)
-                    routedDevice = track.routedDevice
-                }
-                check(routedDevice?.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
-                    "AudioTrack did not route to the phone speaker (routedType=${routedDevice?.type})."
-                }
-                Log.i("QVAC_AUDIO", "Speaker route confirmed: id=${routedDevice.id} type=${routedDevice.type}")
                 while (transferred < sampleCount) {
                     check(writeNextChunk()) { "Native PCM ended before all samples were transferred." }
                 }
@@ -486,6 +475,14 @@ class MainActivity : ComponentActivity() {
                 check(pcmNonZero > sampleCount / 100L && pcmRms > 100.0) {
                     "PCM became silent during JNI transfer (min=$pcmMin max=$pcmMax RMS=$pcmRms)."
                 }
+
+                // Never pause feeding PCM while waiting for Android's route callback.
+                // The player is already running; keep its queue supplied first.
+                val routedDevice = track.routedDevice
+                check(routedDevice?.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+                    "AudioTrack did not route to the phone speaker (routedType=${routedDevice?.type})."
+                }
+                Log.i("QVAC_AUDIO", "Speaker route confirmed: id=${routedDevice.id} type=${routedDevice.type}")
                 val deadline = SystemClock.elapsedRealtime() + (sampleCount * 1000L / sampleRate) + 10000L
                 var lastHead = -1L
                 var lastAdvanceAt = SystemClock.elapsedRealtime()
