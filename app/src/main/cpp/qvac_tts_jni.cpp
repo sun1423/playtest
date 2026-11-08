@@ -261,7 +261,7 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         options.n_predict = selected_budget;
         options.kv_cache_type = "f16";
         // Keep CPU scratch/thread pressure lower on smaller-RAM phones.
-        options.n_threads = selected_fit.device_total_bytes < (6ull * 1024ull * 1024ull * 1024ull) ? 2 : 4;
+        options.n_threads = memory_preflight_warning ? 1 :\n            (selected_fit.device_total_bytes < (6ull * 1024ull * 1024ull * 1024ull) ? 2 : 4);
         options.cfm_steps = 7; // Multilingual quality knee: fewer S3Gen steps, lower latency.
         options.n_gpu_layers = 99; // Vulkan when available; QVAC safely falls back to CPU.
         options.verbose = true; // Surface precise GPU discovery / initialization diagnostics.
