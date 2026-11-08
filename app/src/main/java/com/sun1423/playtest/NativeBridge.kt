@@ -58,9 +58,20 @@ class NativeBridge {
             nativeCreate(t3Path, s3genPath, voiceDirectory, language)
         }
 
-    fun synthesize(text: String): FloatArray = QvacNativeWorker.call {
+    fun synthesize(text: String): Long = QvacNativeWorker.call {
         QvacNativeWorker.ensureLibraryLoaded()
-        nativeSynthesize(text) ?: throw IllegalStateException(nativeLastError())
+        nativeSynthesize(text).also {
+            if (it <= 0L) throw IllegalStateException(nativeLastError())
+        }
+    }
+
+    fun readPcm16(maxSamples: Int = 4096): ShortArray = QvacNativeWorker.call {
+        QvacNativeWorker.ensureLibraryLoaded()
+        nativeReadPcm16(maxSamples) ?: throw IllegalStateException(nativeLastError())
+    }
+
+    fun releasePcm() = QvacNativeWorker.call {
+        if (QvacNativeWorker.libraryLoaded) nativeReleasePcm()
     }
 
     fun unload() = QvacNativeWorker.call {
@@ -84,7 +95,9 @@ class NativeBridge {
         language: String
     ): String
 
-    private external fun nativeSynthesize(text: String): FloatArray?
+    private external fun nativeSynthesize(text: String): Long
+    private external fun nativeReadPcm16(maxSamples: Int): ShortArray?
+    private external fun nativeReleasePcm()
     private external fun nativeLastError(): String
     private external fun nativeDestroy()
 }
