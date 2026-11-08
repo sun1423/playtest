@@ -157,9 +157,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gradle --no-daemon wrapper --gradle-version 8.9
-          chmod +x ./gradlew
-          ./gradlew --no-daemon --stacktrace --parallel --max-workers=2 assembleRelease
+          gradle --no-daemon --stacktrace --parallel --max-workers=2 assembleRelease
 
       - name: Verify APK ABI and native QVAC library
         shell: bash
