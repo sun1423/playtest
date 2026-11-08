@@ -314,3 +314,47 @@ index 2499d70..ce79693 100644
              c.destroy();
          }
          const uint64_t dev = sat_add(direct_dev, sched_dev);
+
+diff --git a/engines/tts/src/backend_selection.cpp b/engines/tts/src/backend_selection.cpp
+index 0000000..0000000 100644
+--- a/engines/tts/src/backend_selection.cpp
++++ b/engines/tts/src/backend_selection.cpp
+@@ -707,18 +707,29 @@
+ #if defined(__ANDROID__)
+-        // Android allowlist: Adreno + Xclipse always; Mali only when the engine opts in.
+-        // Others fall through to CPU: unvalidated drivers can miscompute or ggml_abort() (uncatchable).
+-        if (!is_qualcomm_adreno(name, desc) && !is_samsung_xclipse(name, desc) &&
+-            !(is_arm_mali(name, desc) && allow_arm_mali)) {
++        // QVAC Chatterbox can opt into every enumerated Vulkan vendor with
++        // TTS_CPP_ANDROID_VULKAN_ANY=1. This is deliberately Vulkan-only:
++        // OpenCL remains restricted to its validated Adreno generations.
++        // Devices that fail Vulkan backend initialization still fall through
++        // to CPU; unknown-driver graph stability must be verified on hardware.
++        const char * any_vulkan_env = std::getenv("TTS_CPP_ANDROID_VULKAN_ANY");
++        const bool allow_any_android_vulkan =
++            is_vulkan && any_vulkan_env && any_vulkan_env[0] == '1';
++        if (!allow_any_android_vulkan &&
++            !is_qualcomm_adreno(name, desc) &&
++            !is_samsung_xclipse(name, desc) &&
++            !(is_arm_mali(name, desc) && allow_arm_mali)) {
+             gpu_present_but_unvalidated = true;
+             if (verbose) {
+                 fprintf(stderr,
+                     "%s: Android GPU '%s' (%s) is not a validated vendor for this "
+-                    "engine (Qualcomm Adreno / Samsung Xclipse; ARM Mali is "
+-                    "engine opt-in only); skipping (falling through to CPU)\n",
++                    "engine; skipping (set TTS_CPP_ANDROID_VULKAN_ANY=1 to attempt "
++                    "any Vulkan adapter)\n",
+                     log_prefix,
+                     name ? name : "?",
+                     desc ? desc : "?");
+             }
+             continue;
+         }
++        if (allow_any_android_vulkan && verbose) {
++            fprintf(stderr,
++                "%s: experimental all-vendor Android Vulkan enabled for '%s'; "
++                "driver stability is not guaranteed\n",
++                log_prefix, name ? name : "?");
++        }
+ #endif
