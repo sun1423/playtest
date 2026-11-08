@@ -303,17 +303,19 @@ class MainActivity : ComponentActivity() {
 
         runBusy("Generating the complete utterance first to avoid generation-time playback gaps...") {
             val generationStarted = SystemClock.elapsedRealtime()
-            val pcm = withContext(Dispatchers.IO) { bridge.synthesize(text) }
+            val sampleCount = withContext(Dispatchers.IO) { bridge.synthesize(text) }
             val generationMs = SystemClock.elapsedRealtime() - generationStarted
-            require(pcm.isNotEmpty()) { "QVAC returned no audio." }
-
-            val playback = playPcmWithoutGenerationGaps(pcm)
-            val rtf = generationMs.toDouble() / (playback.audioSeconds * 1000.0)
-            setStatus(
-                "Played " + String.format("%.1f", playback.audioSeconds) + " seconds. " +
-                    "Generation " + generationMs + " ms (RTF " + String.format("%.2f", rtf) + "). " +
-                    "AudioTrack underruns " + playback.underruns + " (0 expected)."
-            )
+            try {
+                val playback = playPcmWithoutGenerationGaps(sampleCount)
+                val rtf = generationMs.toDouble() / (playback.audioSeconds * 1000.0)
+                setStatus(
+                    "Played " + String.format("%.1f", playback.audioSeconds) + " seconds. " +
+                        "Generation " + generationMs + " ms (RTF " + String.format("%.2f", rtf) + "). " +
+                        "AudioTrack underruns " + playback.underruns + " (0 expected)."
+                )
+            } finally {
+                withContext(Dispatchers.IO) { bridge.releasePcm() }
+            }
         }
     }
 
@@ -376,89 +378,59 @@ class MainActivity : ComponentActivity() {
 
     // Synthesis is complete before AudioTrack starts. This prevents a slow
     // CPU/Vulkan inference backend from starving the player between chunks.
-    private suspend fun playPcmWithoutGenerationGaps(samples: FloatArray): PcmPlaybackStats =
+    // Synthesis completes before playback starts. Native PCM remains in one
+    // float buffer; JNI transfers only bounded PCM16 chunks to AudioTrack.
+    private suspend fun playPcmWithoutGenerationGaps(sampleCount: Long): PcmPlaybackStats =
         withContext(Dispatchers.IO) {
-            require(samples.isNotEmpty()) { "No audio samples to play." }
-
+            require(sampleCount > 0L) { "No audio samples to play." }
             val sampleRate = 24000
             val channelMask = AudioFormat.CHANNEL_OUT_MONO
             val encoding = AudioFormat.ENCODING_PCM_16BIT
             val minBufferBytes = AudioTrack.getMinBufferSize(sampleRate, channelMask, encoding)
             require(minBufferBytes > 0) { "Android does not support 24 kHz mono PCM16 playback." }
-
             val track = AudioTrack.Builder()
                 .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
+                    AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
                 )
                 .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setSampleRate(sampleRate)
-                        .setChannelMask(channelMask)
-                        .setEncoding(encoding)
-                        .build()
+                    AudioFormat.Builder().setSampleRate(sampleRate).setChannelMask(channelMask)
+                        .setEncoding(encoding).build()
                 )
-                // Four seconds of buffer; prime one second before starting playback.
                 .setBufferSizeInBytes(maxOf(minBufferBytes, sampleRate * 2 * 4))
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
-
             try {
-                check(track.state == AudioTrack.STATE_INITIALIZED) {
-                    "Android could not initialize AudioTrack."
-                }
-
-                fun writeRange(start: Int, count: Int) {
-                    var sourceOffset = start
-                    val end = start + count
-                    while (sourceOffset < end) {
-                        val chunkCount = minOf(4096, end - sourceOffset)
-                        val pcm16 = ShortArray(chunkCount)
-                        for (i in 0 until chunkCount) {
-                            val value = samples[sourceOffset + i]
-                            val safe = if (value.isFinite()) value.coerceIn(-1.0f, 1.0f) else 0.0f
-                            val scaled = if (safe <= -1.0f) Short.MIN_VALUE.toInt()
-                                else (safe * 32767.0f).toInt()
-                            pcm16[i] = scaled.toShort()
-                        }
-
-                        var writtenOffset = 0
-                        while (writtenOffset < pcm16.size) {
-                            val written = track.write(
-                                pcm16,
-                                writtenOffset,
-                                pcm16.size - writtenOffset,
-                                AudioTrack.WRITE_BLOCKING
-                            )
-                            check(written > 0) { "AudioTrack write failed: " + written }
-                            writtenOffset += written
-                        }
-                        sourceOffset += chunkCount
+                check(track.state == AudioTrack.STATE_INITIALIZED) { "Android could not initialize AudioTrack." }
+                var transferred = 0L
+                fun writeNextChunk(): Boolean {
+                    val pcm16 = bridge.readPcm16(4096)
+                    if (pcm16.isEmpty()) return false
+                    var offset = 0
+                    while (offset < pcm16.size) {
+                        val written = track.write(pcm16, offset, pcm16.size - offset, AudioTrack.WRITE_BLOCKING)
+                        check(written > 0) { "AudioTrack write failed: " + written }
+                        offset += written
                     }
+                    transferred += pcm16.size
+                    return true
                 }
-
-                // Prime before play(); all model inference has already finished.
-                val prebufferSamples = minOf(samples.size, sampleRate)
-                writeRange(0, prebufferSamples)
+                // Prime one second before playback; remaining chunks are fed as AudioTrack drains.
+                while (transferred < minOf(sampleCount, sampleRate.toLong())) {
+                    check(writeNextChunk()) { "Native PCM ended before the prebuffer was filled." }
+                }
                 track.play()
-                writeRange(prebufferSamples, samples.size - prebufferSamples)
-
-                val expectedFrames = samples.size.toLong()
-                val deadline = SystemClock.elapsedRealtime() +
-                    (expectedFrames * 1000L / sampleRate) + 10000L
-                while ((track.playbackHeadPosition.toLong() and 0xffffffffL) < expectedFrames) {
+                while (transferred < sampleCount) {
+                    check(writeNextChunk()) { "Native PCM ended before all samples were transferred." }
+                }
+                val deadline = SystemClock.elapsedRealtime() + (sampleCount * 1000L / sampleRate) + 10000L
+                while ((track.playbackHeadPosition.toLong() and 0xffffffffL) < sampleCount) {
                     check(SystemClock.elapsedRealtime() <= deadline) {
                         "Timed out waiting for Android audio playback to finish."
                     }
                     delay(20)
                 }
-
-                PcmPlaybackStats(
-                    audioSeconds = expectedFrames.toDouble() / sampleRate,
-                    underruns = track.underrunCount
-                )
+                PcmPlaybackStats(sampleCount.toDouble() / sampleRate, track.underrunCount)
             } finally {
                 track.release()
             }
