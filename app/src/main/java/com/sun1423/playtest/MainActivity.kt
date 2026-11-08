@@ -204,7 +204,7 @@ class MainActivity : ComponentActivity() {
 
         statusView = addText("", 14f)
         addText(
-            "Low-memory settings: T3 context 320; Q8_0 KV cache on supported backends; sequential S3Gen stage-cache release; 2–4 CPU threads; 768 MiB safety reserve plus 256 MiB extra headroom. Vulkan is attempted with safe CPU fallback; OpenCL and Hexagon are not included.",
+            "Low-memory settings: T3 context 320; Q8_0 KV cache on supported backends; sequential S3Gen stage-cache release; 2–4 CPU threads; 768 MiB QVAC safety reserve plus adaptive extra headroom (128 MiB below 6 GiB RAM; 256 MiB on larger devices). Vulkan is attempted with safe CPU fallback; OpenCL and Hexagon are not included.",
             12f
         )
 
