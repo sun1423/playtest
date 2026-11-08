@@ -325,6 +325,11 @@ Java_com_sun1423_playtest_NativeBridge_nativeSynthesize(
         if (text.empty()) throw std::runtime_error("Enter a short sentence first.");
         if (text.size() > 1200) throw std::runtime_error("Prototype input limit is 120 characters (UTF-8 byte guard).");
         auto result = g_engine->synthesize(text);
+        if (result.sample_rate != 24000) {
+            throw std::runtime_error(
+                "Unexpected QVAC sample rate: " + std::to_string(result.sample_rate) +
+                " Hz; Android playback is configured for 24000 Hz.");
+        }
         if (result.pcm.empty()) throw std::runtime_error("QVAC completed without producing audio.");
         if (result.pcm.size() > static_cast<std::size_t>(std::numeric_limits<jlong>::max()))
             throw std::runtime_error("Generated audio is too large for Android playback.");
@@ -341,7 +346,14 @@ Java_com_sun1423_playtest_NativeBridge_nativeSynthesize(
         }
         const double pcm_rms = std::sqrt(
             pcm_square_sum / static_cast<double>(result.pcm.size()));
-        if (pcm_peak < 1.0e-6f) {
+        const double non_finite_ratio =
+            static_cast<double>(pcm_non_finite) / static_cast<double>(result.pcm.size());
+        if (non_finite_ratio > 0.001) {
+            throw std::runtime_error(
+                "QVAC produced invalid PCM samples (" +
+                std::to_string(pcm_non_finite) + " non-finite samples).");
+        }
+        if (pcm_peak < 1.0e-6f || pcm_rms < 1.0e-5) {
             throw std::runtime_error(
                 "QVAC returned silent PCM (peak=" + std::to_string(pcm_peak) +
                 ", RMS=" + std::to_string(pcm_rms) + "). Check voice conditioning and S3Gen output.");
