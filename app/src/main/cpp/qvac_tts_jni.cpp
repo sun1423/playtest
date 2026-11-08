@@ -2,6 +2,7 @@
 #include <android/log.h>
 
 #include <array>
+#include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <memory>
@@ -88,6 +89,12 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         const std::string voice = from_java(env, voice_directory);
         const std::string lang = from_java(env, language);
 
+        // Enable sequential S3Gen stage-cache reclamation before either the
+        // metadata preflight or the real Engine is constructed.
+        if (setenv("TTS_CPP_CHATTERBOX_LOW_MEMORY", "1", 1) != 0) {
+            throw std::runtime_error("Could not enable the QVAC low-memory runtime mode.");
+        }
+
         if (!std::filesystem::is_regular_file(t3)) {
             throw std::runtime_error("T3 GGUF file is missing.");
         }
@@ -117,16 +124,17 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         fit_options.t3_gguf_path = t3;
         fit_options.s3gen_gguf_path = s3gen;
         fit_options.n_gpu_layers = 99;
-        fit_options.n_ctx = 512;
-        fit_options.kv_cache_type = "f16";
-        fit_options.text_tokens = 128;
+        fit_options.n_ctx = 320;
+        fit_options.kv_cache_type = "q8_0";
+        fit_options.text_tokens = 160;
+        fit_options.low_memory = true;
         fit_options.margin_bytes = 768ull * 1024ull * 1024ull;
 
-        // Pick the longest utterance budget that still leaves at least 256 MiB
-        // beyond QVAC's 768 MiB safety margin. Smaller phones automatically get
-        // shorter output instead of attempting a workload that can OOM.
+        // Keep both QVAC's 768 MiB safety margin and a separate 256 MiB
+        // runtime headroom. Low-memory mode prices and releases sequential
+        // S3Gen stage arenas; it does not relax the fit threshold.
         constexpr uint64_t EXTRA_HEADROOM = 256ull * 1024ull * 1024ull;
-        constexpr std::array<int, 7> SPEECH_TOKEN_BUDGETS = {192, 160, 128, 96, 80, 64, 48};
+        constexpr std::array<int, 3> SPEECH_TOKEN_BUDGETS = {80, 64, 48};
         tts_cpp::FitResult selected_fit;
         int selected_budget = 0;
 
@@ -157,9 +165,9 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
 
         if (selected_budget == 0) {
             throw std::runtime_error(
-                "This phone does not have enough free RAM for a safe Chatterbox run, "
-                "even at the smallest 48-token utterance budget. Use the matching Q4_0 "
-                "multilingual T3 + S3Gen models, close other apps, and retry.\\n" +
+                "This phone does not have enough free RAM for the low-memory Q4_0 "
+                "Chatterbox profile, even at the smallest 48-token utterance budget. "
+                "Close other apps and retry when more RAM is available.\\n" +
                 selected_fit.report);
         }
         if (selected_fit.model_variant != "chatterbox-t3-mtl") {
@@ -177,9 +185,9 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         options.s3gen_gguf_path = s3gen;
         options.voice_dir = voice;
         options.language = lang.empty() ? "en" : lang;
-        options.n_ctx = 512;
+        options.n_ctx = 320;
         options.n_predict = selected_budget;
-        options.kv_cache_type = "f16";
+        options.kv_cache_type = "q8_0";
         // Keep CPU scratch/thread pressure lower on smaller-RAM phones.
         options.n_threads = selected_fit.device_total_bytes < (6ull * 1024ull * 1024ull * 1024ull) ? 2 : 4;
         options.cfm_steps = 7; // Multilingual quality knee: fewer S3Gen steps, lower latency.
@@ -197,7 +205,7 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         const bool gpu_unvalidated = candidate->gpu_unsupported();
         __android_log_print(
             ANDROID_LOG_INFO, "QVAC_RUNTIME",
-            "Backend=%s; GPU skipped by validation policy=%s; n_ctx=%d; n_predict=%d",
+            "Backend=%s; GPU skipped by validation policy=%s; n_ctx=%d; n_predict=%d; kv=q8_0; low_memory=1",
             backend_name.c_str(), gpu_unvalidated ? "true" : "false",
             options.n_ctx, options.n_predict);
         {
@@ -207,8 +215,8 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         }
         return to_java(env,
             "QVAC_OK: Loaded on " + backend_name +
-            " with a " + std::to_string(selected_budget) +
-            "-speech-token memory profile.");
+            " with low-memory mode, Q8 KV, context 320 and a " +
+            std::to_string(selected_budget) + "-speech-token limit.");
     } catch (const std::exception & error) {
         std::lock_guard<std::mutex> lock(g_engine_mutex);
         g_engine.reset();
