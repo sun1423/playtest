@@ -1,7 +1,9 @@
 #include <jni.h>
 #include <android/log.h>
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <limits>
@@ -9,6 +11,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "tts-cpp/chatterbox/engine.h"
 #include "tts-cpp/chatterbox/fit.h"
@@ -19,6 +22,8 @@ namespace {
 std::mutex g_engine_mutex;
 std::unique_ptr<tts_cpp::chatterbox::Engine> g_engine;
 std::string g_last_error;
+std::vector<float> g_pcm_buffer;
+std::size_t g_pcm_offset = 0;
 
 std::string from_java(JNIEnv * env, jstring value) {
     if (value == nullptr) return {};
@@ -308,49 +313,83 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
     }
 }
 
-extern "C" JNIEXPORT jfloatArray JNICALL
+extern "C" JNIEXPORT jlong JNICALL
 Java_com_sun1423_playtest_NativeBridge_nativeSynthesize(
     JNIEnv * env, jobject, jstring text_value) {
-
     std::lock_guard<std::mutex> lock(g_engine_mutex);
     try {
         if (!g_engine) throw std::runtime_error("QVAC engine is not loaded.");
-
+        std::vector<float>().swap(g_pcm_buffer);
+        g_pcm_offset = 0;
         const std::string text = from_java(env, text_value);
         if (text.empty()) throw std::runtime_error("Enter a short sentence first.");
         if (text.size() > 1200) throw std::runtime_error("Prototype input limit is 120 characters (UTF-8 byte guard).");
+        auto result = g_engine->synthesize(text);
+        if (result.pcm.empty()) throw std::runtime_error("QVAC completed without producing audio.");
+        if (result.pcm.size() > static_cast<std::size_t>(std::numeric_limits<jlong>::max()))
+            throw std::runtime_error("Generated audio is too large for Android playback.");
+        g_pcm_buffer = std::move(result.pcm);
+        g_last_error.clear();
+        return static_cast<jlong>(g_pcm_buffer.size());
+    } catch (const std::exception & error) {
+        std::vector<float>().swap(g_pcm_buffer);
+        g_pcm_offset = 0;
+        g_last_error = error.what();
+        return 0;
+    } catch (...) {
+        std::vector<float>().swap(g_pcm_buffer);
+        g_pcm_offset = 0;
+        g_last_error = "Unknown native QVAC synthesis failure.";
+        return 0;
+    }
+}
 
-        const auto result = g_engine->synthesize(text);
-        if (result.pcm.empty()) {
-            throw std::runtime_error("QVAC completed without producing audio.");
-        }
-        if (result.pcm.size() > static_cast<std::size_t>(std::numeric_limits<jsize>::max())) {
-            throw std::runtime_error("Generated audio is too large for the Android playback buffer.");
-        }
-
-        jfloatArray output = env->NewFloatArray(static_cast<jsize>(result.pcm.size()));
+extern "C" JNIEXPORT jshortArray JNICALL
+Java_com_sun1423_playtest_NativeBridge_nativeReadPcm16(
+    JNIEnv * env, jobject, jint requested_samples) {
+    std::lock_guard<std::mutex> lock(g_engine_mutex);
+    try {
+        if (requested_samples <= 0 || requested_samples > 8192)
+            throw std::runtime_error("PCM chunk size must be between 1 and 8192 samples.");
+        const std::size_t remaining = g_pcm_buffer.size() - g_pcm_offset;
+        const std::size_t count = std::min<std::size_t>(remaining, static_cast<std::size_t>(requested_samples));
+        jshortArray output = env->NewShortArray(static_cast<jsize>(count));
         if (output == nullptr) {
             if (env->ExceptionCheck()) env->ExceptionClear();
-            throw std::runtime_error("Android could not allocate the generated PCM buffer.");
+            throw std::runtime_error("Android could not allocate a PCM playback chunk.");
         }
-
-        env->SetFloatArrayRegion(
-            output, 0, static_cast<jsize>(result.pcm.size()), result.pcm.data());
-        if (env->ExceptionCheck()) {
-            env->ExceptionClear();
-            env->DeleteLocalRef(output);
-            throw std::runtime_error("Android could not copy generated PCM.");
+        std::vector<jshort> converted(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            const float sample = g_pcm_buffer[g_pcm_offset + i];
+            const float safe = std::isfinite(sample) ? std::clamp(sample, -1.0f, 1.0f) : 0.0f;
+            const int value = safe <= -1.0f ? std::numeric_limits<int16_t>::min()
+                                             : static_cast<int>(safe * 32767.0f);
+            converted[i] = static_cast<jshort>(value);
         }
-
-        g_last_error.clear();
+        if (count > 0) {
+            env->SetShortArrayRegion(output, 0, static_cast<jsize>(count), converted.data());
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                env->DeleteLocalRef(output);
+                throw std::runtime_error("Android could not copy a PCM playback chunk.");
+            }
+            g_pcm_offset += count;
+        }
         return output;
     } catch (const std::exception & error) {
         g_last_error = error.what();
         return nullptr;
     } catch (...) {
-        g_last_error = "Unknown native QVAC synthesis failure.";
+        g_last_error = "Unknown native PCM transfer failure.";
         return nullptr;
     }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_sun1423_playtest_NativeBridge_nativeReleasePcm(JNIEnv *, jobject) {
+    std::lock_guard<std::mutex> lock(g_engine_mutex);
+    std::vector<float>().swap(g_pcm_buffer);
+    g_pcm_offset = 0;
 }
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -363,5 +402,7 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_sun1423_playtest_NativeBridge_nativeDestroy(JNIEnv *, jobject) {
     std::lock_guard<std::mutex> lock(g_engine_mutex);
     g_engine.reset();
+    std::vector<float>().swap(g_pcm_buffer);
+    g_pcm_offset = 0;
     g_last_error.clear();
 }
