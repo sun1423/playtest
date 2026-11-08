@@ -122,10 +122,12 @@ class MainActivity : ComponentActivity() {
             13f
         )
 
-        addButton("Select T3 multilingual GGUF") {
+        addText("Import the matching Q4_0 multilingual T3 + S3Gen pair only. Q8_0 model files are rejected by the engine's quantization check.", 13f, true)
+
+        addButton("Select T3 multilingual Q4_0 GGUF") {
             if (!busy) t3Picker.launch(arrayOf("*/*"))
         }
-        addButton("Select S3Gen multilingual GGUF") {
+        addButton("Select S3Gen multilingual Q4_0 GGUF") {
             if (!busy) s3genPicker.launch(arrayOf("*/*"))
         }
         addButton("Import Azure QVAC voice profile ZIP") {
@@ -202,7 +204,7 @@ class MainActivity : ComponentActivity() {
 
         statusView = addText("", 14f)
         addText(
-            "Adaptive mobile settings: T3 context 512; F16 KV cache; 2–4 CPU threads; speech budget selected from available RAM; Vulkan attempted with CPU fallback. OpenCL and Hexagon are not included.",
+            "Low-memory settings: T3 context 320; Q8_0 KV cache on supported backends; sequential S3Gen stage-cache release; 2–4 CPU threads; 768 MiB safety reserve plus 256 MiB extra headroom. Vulkan is attempted with safe CPU fallback; OpenCL and Hexagon are not included.",
             12f
         )
 
