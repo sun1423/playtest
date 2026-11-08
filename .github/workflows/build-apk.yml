@@ -97,6 +97,7 @@ jobs:
           git -C "$QVAC_DIR" diff --check
           grep -q "bool low_memory = false;" third_party/qvac-fabric-speech.cpp/engines/tts/include/tts-cpp/chatterbox/fit.h
           grep -q "TTS_CPP_CHATTERBOX_LOW_MEMORY" third_party/qvac-fabric-speech.cpp/engines/tts/src/chatterbox_tts.cpp
+          grep -q "TTS_CPP_ANDROID_VULKAN_ANY" third_party/qvac-fabric-speech.cpp/engines/tts/src/backend_selection.cpp
 
       - name: Prepare persistent Playtest signing key
         shell: bash
@@ -196,7 +197,8 @@ jobs:
             echo "- Voice: Azure QVAC five-tensor NumPy profile (user-imported)"
             echo "- Context: 320; F16 KV cache; low-memory sequential S3Gen stage-cache release"
             echo "- Adaptive speech-token budget (80–48); 2–4 CPU threads; 768 MiB QVAC margin plus 128/256 MiB RAM-tiered extra headroom"
-            echo "- Backend: Vulkan when available, QVAC CPU fallback"
+            echo "- Backend: attempt Vulkan across Android GPU vendors; CPU fallback if Vulkan is unavailable or cannot initialize"
+            echo "- CFM: 7-step, CFG disabled experimental latency profile; audio quality requires device listening validation"
             echo "- ABI: arm64-v8a"
             echo "- Build: optimized Release variant; no test suites or emulator jobs are run by this workflow"
           } >> "$GITHUB_STEP_SUMMARY"
