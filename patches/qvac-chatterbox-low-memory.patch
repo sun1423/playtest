@@ -319,7 +319,7 @@ diff --git a/engines/tts/src/backend_selection.cpp b/engines/tts/src/backend_sel
 index 0000000..0000000 100644
 --- a/engines/tts/src/backend_selection.cpp
 +++ b/engines/tts/src/backend_selection.cpp
-@@ -707,18 +707,29 @@
+@@ -707,18 +707,33 @@
  #if defined(__ANDROID__)
 -        // Android allowlist: Adreno + Xclipse always; Mali only when the engine opts in.
 -        // Others fall through to CPU: unvalidated drivers can miscompute or ggml_abort() (uncatchable).
