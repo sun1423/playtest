@@ -1,12 +1,6 @@
 package com.sun1423.playtest
 
 import android.content.Context
-import android.media.AudioAttributes
-import android.media.AudioDeviceInfo
-import android.media.AudioFocusRequest
-import android.media.AudioFormat
-import android.media.AudioManager
-import android.media.AudioTrack
 import android.util.Log
 import android.net.Uri
 import android.os.Bundle
@@ -26,10 +20,19 @@ import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.lifecycleScope
+import androidx.media3.common.AudioAttributes as Media3AudioAttributes
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import java.io.File
 import java.io.FileOutputStream
 import java.util.zip.ZipInputStream
@@ -44,7 +47,7 @@ private val requiredProfileFiles = setOf(
 
 private data class PcmPlaybackStats(
     val audioSeconds: Double,
-    val underruns: Int
+    val bytesWritten: Long
 )
 
 class MainActivity : ComponentActivity() {
@@ -315,9 +318,9 @@ class MainActivity : ComponentActivity() {
             try {
                 val playback = playPcmWithoutGenerationGaps(sampleCount)
                 val rtf = generationMs.toDouble() / (playback.audioSeconds * 1000.0)
-                val summary = "Audio played: " + String.format("%.2f", playback.audioSeconds) +
+                val summary = "Audio playback completed: " + String.format("%.2f", playback.audioSeconds) +
                     "s | generation " + generationMs + "ms | RTF " + String.format("%.2f", rtf) +
-                    " | underruns " + playback.underruns
+                    " | WAV " + formatMiB(playback.bytesWritten) + " MiB"
                 Log.i("QVAC_AUDIO", summary)
                 setStatus(summary)
             } finally {
@@ -383,134 +386,60 @@ class MainActivity : ComponentActivity() {
         textInput.isEnabled = !busy
     }
 
-    // Synthesis is complete before AudioTrack starts. This prevents a slow
-    // CPU/Vulkan inference backend from starving the player between chunks.
-    // Synthesis completes before playback starts. Native PCM remains in one
-    // float buffer; JNI transfers only bounded PCM16 chunks to AudioTrack.
-    private suspend fun playPcmWithoutGenerationGaps(sampleCount: Long): PcmPlaybackStats =
-        withContext(Dispatchers.IO) {
-            require(sampleCount > 0L) { "No audio samples to play." }
-            val sampleRate = 24000
-            val channelMask = AudioFormat.CHANNEL_OUT_MONO
-            val encoding = AudioFormat.ENCODING_PCM_16BIT
-            val minBufferBytes = AudioTrack.getMinBufferSize(sampleRate, channelMask, encoding)
-            require(minBufferBytes > 0) { "Android does not support 24 kHz mono PCM16 playback." }
-            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            val musicVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-            check(musicVolume > 0) { "Android media volume is muted. Raise the phone's media volume and try again." }
-            val speaker = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-                .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
-                ?: throw IllegalStateException("Android did not report a built-in speaker output.")
-            val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
-            val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
-                .setAudioAttributes(attributes)
-                .setOnAudioFocusChangeListener { change -> Log.i("QVAC_AUDIO", "Audio focus change: $change") }
-                .setWillPauseWhenDucked(false)
-                .build()
-            val track = AudioTrack.Builder()
-                .setAudioAttributes(attributes)
-                .setAudioFormat(
-                    AudioFormat.Builder().setSampleRate(sampleRate).setChannelMask(channelMask)
-                        .setEncoding(encoding).build()
-                )
-                .setBufferSizeInBytes(maxOf(minBufferBytes, sampleRate * 2 * 4))
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .build()
-            try {
-                check(track.state == AudioTrack.STATE_INITIALIZED) { "Android could not initialize AudioTrack." }
-                check(track.setPreferredDevice(speaker)) { "Android rejected the built-in speaker output route." }
-                track.setVolume(1.0f)
-                Log.i("QVAC_AUDIO", "AudioTrack initialized: sampleRate=$sampleRate minBufferBytes=$minBufferBytes speakerId=${speaker.id} mediaVolume=$musicVolume")
-                var transferred = 0L
-                var totalBytesWritten = 0L
-                var pcmMin = Short.MAX_VALUE
-                var pcmMax = Short.MIN_VALUE
-                var pcmSquareSum = 0.0
-                var pcmNonZero = 0L
-                fun writeNextChunk(): Boolean {
-                    val pcm16 = bridge.readPcm16(4096)
-                    if (pcm16.isEmpty()) return false
-                    for (sample in pcm16) {
-                        if (sample < pcmMin) pcmMin = sample
-                        if (sample > pcmMax) pcmMax = sample
-                        if (sample.toInt() != 0) pcmNonZero++
-                        pcmSquareSum += sample.toDouble() * sample.toDouble()
-                    }
-                    var offset = 0
-                    while (offset < pcm16.size) {
-                        val written = track.write(pcm16, offset, pcm16.size - offset, AudioTrack.WRITE_BLOCKING)
-                        check(written > 0) { "AudioTrack write failed: " + written }
-                        offset += written
-                        totalBytesWritten += written.toLong() * 2L
-                    }
-                    transferred += pcm16.size
-                    if (transferred == pcm16.size.toLong() || transferred % 24000L < pcm16.size) {
-                        Log.i("QVAC_AUDIO", "PCM transfer: samples=$transferred/$sampleCount bytes=$totalBytesWritten")
-                    }
-                    return true
-                }
-                // Start the streaming track before its first write. Some OEM AudioFlinger
-                // implementations invalidate an idle track during prebuffer writes
-                // (restoreTrack_l: dead IAudioTrack), leaving playbackHeadPosition stuck at 0.
-                val focusResult = audioManager.requestAudioFocus(focusRequest)
-                check(focusResult == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-                    "Android denied audio focus (result=$focusResult); cannot start speech playback."
-                }
-                track.play()
-                Log.i("QVAC_AUDIO", "AudioTrack.play() called before PCM writes; playState=${track.playState}")
-                while (transferred < sampleCount) {
-                    check(writeNextChunk()) { "Native PCM ended before all samples were transferred." }
-                }
-                check(transferred == sampleCount) {
-                    "PCM sample mismatch: transferred $transferred of $sampleCount samples."
-                }
-                check(totalBytesWritten == sampleCount * 2L) {
-                    "PCM byte mismatch: wrote $totalBytesWritten of ${sampleCount * 2L} bytes."
-                }
-                val pcmRms = kotlin.math.sqrt(pcmSquareSum / sampleCount)
-                Log.i("QVAC_AUDIO", "PCM verified: min=$pcmMin max=$pcmMax rms=$pcmRms nonZero=$pcmNonZero/$sampleCount")
-                check(pcmNonZero > sampleCount / 100L && pcmRms > 100.0) {
-                    "PCM became silent during JNI transfer (min=$pcmMin max=$pcmMax RMS=$pcmRms)."
-                }
+    // QVAC synthesis is unchanged. PCM is written in bounded chunks to a private WAV;
+    // Media3 owns buffering, audio focus and the Android playback lifecycle.
+    private suspend fun playPcmWithoutGenerationGaps(sampleCount: Long): PcmPlaybackStats {
+        require(sampleCount > 0L) { "No audio samples to play." }
+        val directory = File(cacheDir, "qvac-playback")
+        check(directory.mkdirs() || directory.isDirectory) { "Cannot create private playback cache." }
+        val wavFile = File.createTempFile("qvac-", ".wav", directory)
+        try {
+            val stats = withContext(Dispatchers.IO) { PcmWavFile.writeFromNativePcm(bridge, sampleCount, wavFile) }
+            Log.i("QVAC_AUDIO", "WAV ready: file=${wavFile.name} bytes=${stats.bytesWritten}")
+            playWavWithExoPlayer(wavFile, sampleCount * 1000L / 24000L)
+            Log.i("QVAC_AUDIO", "Media3 playback completed: bytes=${stats.bytesWritten}")
+            return PcmPlaybackStats(sampleCount.toDouble() / 24000.0, stats.bytesWritten)
+        } finally {
+            if (wavFile.exists() && !wavFile.delete()) Log.w("QVAC_AUDIO", "Could not delete temporary WAV: ${wavFile.absolutePath}")
+        }
+    }
 
-                // Never pause feeding PCM while waiting for Android's route callback.
-                // The player is already running; keep its queue supplied first.
-                val routedDevice = track.routedDevice
-                check(routedDevice?.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
-                    "AudioTrack did not route to the phone speaker (routedType=${routedDevice?.type})."
-                }
-                Log.i("QVAC_AUDIO", "Speaker route confirmed: id=${routedDevice.id} type=${routedDevice.type}")
-                val deadline = SystemClock.elapsedRealtime() + (sampleCount * 1000L / sampleRate) + 10000L
-                var lastHead = -1L
-                var lastAdvanceAt = SystemClock.elapsedRealtime()
-                while (true) {
-                    check(track.playState == AudioTrack.PLAYSTATE_PLAYING) {
-                        "AudioTrack stopped before playback completed (head=${track.playbackHeadPosition})."
-                    }
-                    val head = track.playbackHeadPosition.toLong() and 0xffffffffL
-                    if (head >= sampleCount) break
-                    check(SystemClock.elapsedRealtime() <= deadline) {
-                        "Timed out waiting for playback: Android played $head of $sampleCount frames."
-                    }
-                    if (head != lastHead) {
-                        lastHead = head
-                        lastAdvanceAt = SystemClock.elapsedRealtime()
-                    } else if (SystemClock.elapsedRealtime() - lastAdvanceAt > 3000L) {
-                        throw IllegalStateException(
-                            "AudioTrack playback stalled at $head of $sampleCount frames (playState=${track.playState}).")
-                    }
-                    delay(20)
-                }
-                val playedFrames = track.playbackHeadPosition.toLong() and 0xffffffffL
-                Log.i("QVAC_AUDIO", "Playback complete: frames=$playedFrames expected=$sampleCount bytesWritten=$totalBytesWritten underruns=${track.underrunCount} session=${track.audioSessionId}")
-                PcmPlaybackStats(sampleCount.toDouble() / sampleRate, track.underrunCount)
-            } finally {
-                track.release()
-                audioManager.abandonAudioFocusRequest(focusRequest)
+    private suspend fun playWavWithExoPlayer(file: File, expectedDurationMs: Long) {
+        val player = withContext(Dispatchers.Main.immediate) {
+            ExoPlayer.Builder(this@MainActivity).build().apply {
+                setAudioAttributes(Media3AudioAttributes.Builder().setUsage(C.USAGE_MEDIA)
+                    .setContentType(C.AUDIO_CONTENT_TYPE_SPEECH).build(), true)
+                setHandleAudioBecomingNoisy(true)
+                setMediaItem(MediaItem.fromUri(Uri.fromFile(file)))
+                prepare()
             }
         }
-
+        try {
+            withTimeout((expectedDurationMs + 15000L).coerceAtLeast(20000L)) {
+                withContext(Dispatchers.Main.immediate) {
+                    suspendCancellableCoroutine<Unit> { continuation ->
+                        val listener = object : Player.Listener {
+                            override fun onPlaybackStateChanged(playbackState: Int) {
+                                if (playbackState == Player.STATE_ENDED && continuation.isActive) continuation.resume(Unit)
+                            }
+                            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                                if (continuation.isActive) continuation.resumeWithException(
+                                    IllegalStateException("Media3 WAV playback failed (${error.errorCodeName}): " +
+                                        (error.message ?: error.toString()), error)
+                                )
+                            }
+                        }
+                        player.addListener(listener)
+                        continuation.invokeOnCancellation { player.removeListener(listener) }
+                        Log.i("QVAC_AUDIO", "Media3 prepared local WAV; starting playback")
+                        player.play()
+                    }
+                }
+            }
+        } finally {
+            withContext(NonCancellable + Dispatchers.Main.immediate) { player.stop(); player.release() }
+        }
+    }
 }
 
 private fun copyModelIntoPrivateStorage(
