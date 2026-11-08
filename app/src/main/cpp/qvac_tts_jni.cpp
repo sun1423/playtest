@@ -152,6 +152,12 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
             throw std::runtime_error("Could not enable the QVAC low-memory runtime mode.");
         }
 
+        // Attempt Vulkan on any Android GPU vendor. Backend initialization
+        // failures retain QVAC's normal CPU fallback path.
+        if (setenv("TTS_CPP_ANDROID_VULKAN_ANY", "1", 1) != 0) {
+            throw std::runtime_error("Could not enable all-vendor Android Vulkan discovery.");
+        }
+
         if (!std::filesystem::is_regular_file(t3)) {
             throw std::runtime_error("T3 GGUF file is missing.");
         }
@@ -268,7 +274,8 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         // Keep CPU scratch/thread pressure lower on smaller-RAM phones.
         options.n_threads = memory_preflight_warning ? 1 :
             (selected_fit.device_total_bytes < (6ull * 1024ull * 1024ull * 1024ull) ? 2 : 4);
-        options.cfm_steps = 7; // Multilingual quality knee: fewer S3Gen steps, lower latency.
+        options.cfm_steps = 7; // Experimental MTL quality/speed setting; validate on device.
+        options.s3gen_cfg_rate = 0.0f; // One conditional CFM pass; compare voice quality before release.
         options.n_gpu_layers = 99; // Vulkan when available; QVAC safely falls back to CPU.
         options.verbose = true; // Surface precise GPU discovery / initialization diagnostics.
         options.max_sentence_chars = 480; // 120 UTF-8 characters without splitting Hindi code points.
