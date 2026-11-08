@@ -410,9 +410,19 @@ class MainActivity : ComponentActivity() {
                 Log.i("QVAC_AUDIO", "AudioTrack initialized: sampleRate=$sampleRate minBufferBytes=$minBufferBytes")
                 var transferred = 0L
                 var totalBytesWritten = 0L
+                var pcmMin = Short.MAX_VALUE
+                var pcmMax = Short.MIN_VALUE
+                var pcmSquareSum = 0.0
+                var pcmNonZero = 0L
                 fun writeNextChunk(): Boolean {
                     val pcm16 = bridge.readPcm16(4096)
                     if (pcm16.isEmpty()) return false
+                    for (sample in pcm16) {
+                        if (sample < pcmMin) pcmMin = sample
+                        if (sample > pcmMax) pcmMax = sample
+                        if (sample.toInt() != 0) pcmNonZero++
+                        pcmSquareSum += sample.toDouble() * sample.toDouble()
+                    }
                     var offset = 0
                     while (offset < pcm16.size) {
                         val written = track.write(pcm16, offset, pcm16.size - offset, AudioTrack.WRITE_BLOCKING)
@@ -436,18 +446,37 @@ class MainActivity : ComponentActivity() {
                 while (transferred < sampleCount) {
                     check(writeNextChunk()) { "Native PCM ended before all samples were transferred." }
                 }
+                check(transferred == sampleCount) {
+                    "PCM sample mismatch: transferred $transferred of $sampleCount samples."
+                }
+                check(totalBytesWritten == sampleCount * 2L) {
+                    "PCM byte mismatch: wrote $totalBytesWritten of ${sampleCount * 2L} bytes."
+                }
+                val pcmRms = kotlin.math.sqrt(pcmSquareSum / sampleCount)
+                Log.i("QVAC_AUDIO", "PCM verified: min=$pcmMin max=$pcmMax rms=$pcmRms nonZero=$pcmNonZero/$sampleCount")
+                check(pcmNonZero > sampleCount / 100L && pcmRms > 100.0) {
+                    "PCM became silent during JNI transfer (min=$pcmMin max=$pcmMax RMS=$pcmRms)."
+                }
                 val deadline = SystemClock.elapsedRealtime() + (sampleCount * 1000L / sampleRate) + 10000L
-                while ((track.playbackHeadPosition.toLong() and 0xffffffffL) < sampleCount) {
+                var lastHead = -1L
+                var lastAdvanceAt = SystemClock.elapsedRealtime()
+                while (true) {
+                    val head = track.playbackHeadPosition.toLong() and 0xffffffffL
+                    if (head >= sampleCount) break
                     check(SystemClock.elapsedRealtime() <= deadline) {
-                        "Timed out waiting for Android audio playback to finish."
+                        "Timed out waiting for playback: Android played $head of $sampleCount frames."
+                    }
+                    if (head != lastHead) {
+                        lastHead = head
+                        lastAdvanceAt = SystemClock.elapsedRealtime()
+                    } else if (SystemClock.elapsedRealtime() - lastAdvanceAt > 3000L) {
+                        throw IllegalStateException(
+                            "AudioTrack playback stalled at $head of $sampleCount frames (playState=${track.playState}).")
                     }
                     delay(20)
                 }
                 val playedFrames = track.playbackHeadPosition.toLong() and 0xffffffffL
-                Log.i("QVAC_AUDIO", "Playback complete: frames=$playedFrames expected=$sampleCount bytesWritten=$totalBytesWritten underruns=${track.underrunCount}")
-                check(playedFrames >= sampleCount) {
-                    "Playback ended early: $playedFrames of $sampleCount frames."
-                }
+                Log.i("QVAC_AUDIO", "Playback complete: frames=$playedFrames expected=$sampleCount bytesWritten=$totalBytesWritten underruns=${track.underrunCount} session=${track.audioSessionId}")
                 PcmPlaybackStats(sampleCount.toDouble() / sampleRate, track.underrunCount)
             } finally {
                 track.release()
