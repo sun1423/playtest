@@ -126,7 +126,7 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         // beyond QVAC's 768 MiB safety margin. Smaller phones automatically get
         // shorter output instead of attempting a workload that can OOM.
         constexpr uint64_t EXTRA_HEADROOM = 256ull * 1024ull * 1024ull;
-        constexpr std::array<int, 4> SPEECH_TOKEN_BUDGETS = {192, 160, 128, 96};
+        constexpr std::array<int, 7> SPEECH_TOKEN_BUDGETS = {192, 160, 128, 96, 80, 64, 48};
         tts_cpp::FitResult selected_fit;
         int selected_budget = 0;
 
@@ -158,7 +158,7 @@ Java_com_sun1423_playtest_NativeBridge_nativeCreate(
         if (selected_budget == 0) {
             throw std::runtime_error(
                 "This phone does not have enough free RAM for a safe Chatterbox run, "
-                "even at the smallest 96-token utterance budget. Use the matching Q4_0 "
+                "even at the smallest 48-token utterance budget. Use the matching Q4_0 "
                 "multilingual T3 + S3Gen models, close other apps, and retry.\\n" +
                 selected_fit.report);
         }
