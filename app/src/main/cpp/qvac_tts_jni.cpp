@@ -232,7 +232,7 @@ Java_com_sun1423_playtest_NativeBridge_nativeSynthesize(
 
         const std::string text = from_java(env, text_value);
         if (text.empty()) throw std::runtime_error("Enter a short sentence first.");
-        if (text.size() > 1200) throw std::runtime_error("Prototype input limit is 300 characters.");
+        if (text.size() > 1200) throw std::runtime_error("Prototype input limit is 120 characters (UTF-8 byte guard).");
 
         const auto result = g_engine->synthesize(text);
         if (result.pcm.empty()) {
