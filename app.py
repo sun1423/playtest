@@ -244,6 +244,30 @@ def logout():
     return response
 
 
+@app.delete("/api/jobs/{job_id}")
+def delete_job(job_id: str):
+    # Serialize against the worker's queued -> running claim. A running job
+    # cannot be removed while FFmpeg or TTS may still be writing its output.
+    with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Job not found")
+        if row["status"] == "running":
+            raise HTTPException(409, "This job is running. Delete it after it finishes.")
+        job = dict(row)
+        conn.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+
+    cleanup_upload(job.get("input_path"))
+    cleanup_failed_output(job_id)
+    output_path = job.get("output_path")
+    if output_path:
+        output_file = Path(output_path).resolve()
+        if OUT.resolve() in output_file.parents:
+            output_file.unlink(missing_ok=True)
+    return {"deleted": True, "job_id": job_id}
+
+
 @app.get("/api/jobs")
 def jobs():
     with db() as conn:
@@ -343,6 +367,19 @@ async def voice(name: str = Form(...), file: UploadFile = File(...)):
 @app.get("/api/voices")
 def voices():
     return [{"voice_id": path.stem} for path in VOICES.glob("*.wav")]
+
+
+@app.delete("/api/voices/{voice_id}")
+def delete_voice(voice_id: str):
+    if not voice_id or len(voice_id) > 48 or any(
+        not (char.isalnum() or char in "-_") for char in voice_id
+    ):
+        raise HTTPException(400, "Invalid voice profile ID")
+    path = (VOICES / (voice_id + ".wav")).resolve()
+    if VOICES.resolve() not in path.parents or not path.is_file():
+        raise HTTPException(404, "Voice profile not found")
+    path.unlink()
+    return {"deleted": True, "voice_id": voice_id}
 
 
 @app.get("/api/jobs/{job_id}/output")
