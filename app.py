@@ -146,11 +146,7 @@ def cleanup_upload(input_path):
     upload_root = UP.resolve()
     if upload_root not in source.parents:
         return
-    source.unlink(missing_ok=True)
-    try:
-        source.parent.rmdir()
-    except OSError:
-        pass
+    shutil.rmtree(source.parent, ignore_errors=True)
 
 
 def cleanup_failed_output(job_id):
@@ -300,6 +296,7 @@ async def video(
     audio: str = Form("keep"),
     overlay_text: str = Form("", max_length=160),
     overlay_position: str = Form("bottom"),
+    subtitle_file: UploadFile | None = File(None),
 ):
     if preset not in {"reel", "landscape", "square"}:
         raise HTTPException(400, "Invalid preset")
@@ -310,6 +307,8 @@ async def video(
     if overlay_position not in {"top", "center", "bottom"}:
         raise HTTPException(400, "Invalid overlay position")
     overlay_text = overlay_text.strip()
+    if subtitle_file and Path(subtitle_file.filename or "").suffix.lower() != ".srt":
+        raise HTTPException(415, "Subtitles must be an .srt file")
     extension = Path(file.filename or "").suffix.lower()
     if extension not in {".mp4", ".mov", ".mkv", ".webm"}:
         raise HTTPException(415, "Unsupported video")
@@ -330,6 +329,22 @@ async def video(
         raise
     finally:
         await file.close()
+    subtitle_path = None
+    if subtitle_file:
+        subtitle_path = folder / "captions.srt"
+        subtitle_size = 0
+        try:
+            with subtitle_path.open("xb") as subtitle_out:
+                while chunk := await subtitle_file.read(64 * 1024):
+                    subtitle_size += len(chunk)
+                    if subtitle_size > 2 * 1024 * 1024:
+                        raise HTTPException(413, "Subtitle file exceeds 2 MB")
+                    subtitle_out.write(chunk)
+        except Exception:
+            shutil.rmtree(folder, ignore_errors=True)
+            raise
+        finally:
+            await subtitle_file.close()
     return enqueue(
         "video_transform",
         {
@@ -338,6 +353,7 @@ async def video(
             "audio": audio,
             "overlay_text": overlay_text,
             "overlay_position": overlay_position,
+            "subtitle_path": str(subtitle_path) if subtitle_path else "",
         },
         str(target),
     )
@@ -445,6 +461,12 @@ def work(job):
                 f":boxborderw=16:x=(w-text_w)/2:y={position}"
             )
             video_filter += "," + drawtext
+        subtitle_path = payload.get("subtitle_path", "")
+        if subtitle_path:
+            subtitle_file = Path(subtitle_path).resolve()
+            if UP.resolve() not in subtitle_file.parents or not subtitle_file.is_file():
+                raise RuntimeError("Subtitle file is missing or outside the upload directory.")
+            video_filter += f",subtitles=filename={subtitle_file}:fontsdir=/usr/share/fonts/truetype/noto"
         audio_args = ["-an"] if payload.get("audio", "keep") == "mute" else ["-c:a", "aac"]
         update(job_id, stage="FFmpeg rendering", progress=20)
         subprocess.run(
