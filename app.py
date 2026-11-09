@@ -269,9 +269,18 @@ def tts(payload: TTS):
 
 
 @app.post("/api/video")
-async def video(file: UploadFile = File(...), preset: str = Form("reel")):
+async def video(
+    file: UploadFile = File(...),
+    preset: str = Form("reel"),
+    framing: str = Form("fill"),
+    audio: str = Form("keep"),
+):
     if preset not in {"reel", "landscape", "square"}:
         raise HTTPException(400, "Invalid preset")
+    if framing not in {"fill", "fit"}:
+        raise HTTPException(400, "Invalid framing mode")
+    if audio not in {"keep", "mute"}:
+        raise HTTPException(400, "Invalid audio mode")
     extension = Path(file.filename or "").suffix.lower()
     if extension not in {".mp4", ".mov", ".mkv", ".webm"}:
         raise HTTPException(415, "Unsupported video")
@@ -292,7 +301,11 @@ async def video(file: UploadFile = File(...), preset: str = Form("reel")):
         raise
     finally:
         await file.close()
-    return enqueue("video_transform", {"preset": preset}, str(target))
+    return enqueue(
+        "video_transform",
+        {"preset": preset, "framing": framing, "audio": audio},
+        str(target),
+    )
 
 
 @app.post("/api/voices")
@@ -358,10 +371,17 @@ def work(job):
             else (1080, 1080)
         )
         destination = folder / "video.mp4"
-        video_filter = (
-            f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height},setsar=1"
-        )
+        if payload.get("framing", "fill") == "fit":
+            video_filter = (
+                f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"
+            )
+        else:
+            video_filter = (
+                f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{height},setsar=1"
+            )
+        audio_args = ["-an"] if payload.get("audio", "keep") == "mute" else ["-c:a", "aac"]
         update(job_id, stage="FFmpeg rendering", progress=20)
         subprocess.run(
             [
@@ -370,7 +390,7 @@ def work(job):
                 "-map", "0:v:0", "-map", "0:a?",
                 "-vf", video_filter, "-filter_threads", "1",
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
-                "-threads", "2", "-c:a", "aac", "-movflags", "+faststart",
+                "-threads", "2", *audio_args, "-movflags", "+faststart",
                 str(destination),
             ],
             check=True,
