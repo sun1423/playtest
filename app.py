@@ -297,13 +297,20 @@ async def video(
     overlay_text: str = Form("", max_length=160),
     overlay_position: str = Form("bottom"),
     subtitle_file: UploadFile | None = File(None),
+    music_file: UploadFile | None = File(None),
 ):
     if preset not in {"reel", "landscape", "square"}:
         raise HTTPException(400, "Invalid preset")
     if framing not in {"fill", "fit"}:
         raise HTTPException(400, "Invalid framing mode")
-    if audio not in {"keep", "mute"}:
+    if audio not in {"keep", "mute", "music"}:
         raise HTTPException(400, "Invalid audio mode")
+    if audio == "music" and not music_file:
+        raise HTTPException(400, "Choose a background music file")
+    if music_file and Path(music_file.filename or "").suffix.lower() not in {
+        ".mp3", ".wav", ".m4a", ".aac", ".ogg"
+    }:
+        raise HTTPException(415, "Unsupported background music format")
     if overlay_position not in {"top", "center", "bottom"}:
         raise HTTPException(400, "Invalid overlay position")
     overlay_text = overlay_text.strip()
@@ -345,6 +352,22 @@ async def video(
             raise
         finally:
             await subtitle_file.close()
+    music_path = None
+    if music_file:
+        music_path = folder / ("background" + Path(music_file.filename).suffix.lower())
+        music_size = 0
+        try:
+            with music_path.open("xb") as music_out:
+                while chunk := await music_file.read(64 * 1024):
+                    music_size += len(chunk)
+                    if music_size > 30 * 1024 * 1024:
+                        raise HTTPException(413, "Background music exceeds 30 MB")
+                    music_out.write(chunk)
+        except Exception:
+            shutil.rmtree(folder, ignore_errors=True)
+            raise
+        finally:
+            await music_file.close()
     return enqueue(
         "video_transform",
         {
@@ -354,6 +377,7 @@ async def video(
             "overlay_text": overlay_text,
             "overlay_position": overlay_position,
             "subtitle_path": str(subtitle_path) if subtitle_path else "",
+            "music_path": str(music_path) if music_path else "",
         },
         str(target),
     )
@@ -467,16 +491,25 @@ def work(job):
             if UP.resolve() not in subtitle_file.parents or not subtitle_file.is_file():
                 raise RuntimeError("Subtitle file is missing or outside the upload directory.")
             video_filter += f",subtitles=filename={subtitle_file}:fontsdir=/usr/share/fonts/truetype/noto"
-        audio_args = ["-an"] if payload.get("audio", "keep") == "mute" else ["-c:a", "aac"]
+        music_path = payload.get("music_path", "")
+        if music_path:
+            music_file = Path(music_path).resolve()
+            if UP.resolve() not in music_file.parents or not music_file.is_file():
+                raise RuntimeError("Background music is missing or outside the upload directory.")
+            input_args = ["-i", job["input_path"], "-stream_loop", "-1", "-i", str(music_file)]
+            map_args = ["-map", "0:v:0", "-map", "1:a:0", "-shortest", "-c:a", "aac"]
+        else:
+            input_args = ["-i", job["input_path"]]
+            map_args = ["-map", "0:v:0", "-map", "0:a?"]
+            map_args += ["-an"] if payload.get("audio", "keep") == "mute" else ["-c:a", "aac"]
         update(job_id, stage="FFmpeg rendering", progress=20)
         subprocess.run(
             [
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
-                "-y", "-i", job["input_path"],
-                "-map", "0:v:0", "-map", "0:a?",
+                "-y", *input_args, *map_args,
                 "-vf", video_filter, "-filter_threads", "1",
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
-                "-threads", "2", *audio_args, "-movflags", "+faststart",
+                "-threads", "2", "-movflags", "+faststart",
                 str(destination),
             ],
             check=True,
