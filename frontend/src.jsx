@@ -26,6 +26,7 @@ function App() {
   const [trimStart, setTrimStart] = useState('0');
   const [trimEnd, setTrimEnd] = useState('0');
   const [musicVolume, setMusicVolume] = useState(0.35);
+  const [transitionDuration, setTransitionDuration] = useState('0.5');
   const [preset, setPreset] = useState('reel');
   const [framing, setFraming] = useState('fill');
   const [audioMode, setAudioMode] = useState('keep');
@@ -168,7 +169,7 @@ function App() {
   function addScenes(event) {
     const incoming = Array.from(event.target.files || []);
     setSceneFiles(current => [...current, ...incoming].slice(0, 10).map((scene, index) =>
-      scene.file ? scene : { id: `${Date.now()}-${index}-${scene.name}`, file: scene, trimStart: '0', trimEnd: '0' }
+      scene.file ? scene : { id: `${Date.now()}-${index}-${scene.name}`, file: scene, trimStart: '0', trimEnd: '0', transition: 'cut' }
     ));
     event.target.value = '';
   }
@@ -200,8 +201,10 @@ function App() {
     sceneFiles.forEach(scene => form.append('scenes', scene.file));
     form.append('scene_settings', JSON.stringify(sceneFiles.map(scene => ({
       trim_start: Number(scene.trimStart || 0),
-      trim_end: Number(scene.trimEnd || 0)
+      trim_end: Number(scene.trimEnd || 0),
+      transition: scene.transition || 'cut'
     }))));
+    form.append('transition_duration', transitionDuration);
     form.append('preset', preset);
     form.append('framing', framing);
     form.append('audio', audioMode);
@@ -364,10 +367,12 @@ function App() {
                   <label>START (SECONDS)<input type="number" min="0" max="14400" step="0.1" value={scene.trimStart} onChange={event => updateScene(scene.id,{trimStart:event.target.value})}/></label>
                   <label>END (0 = FULL CLIP)<input type="number" min="0" max="14400" step="0.1" value={scene.trimEnd} onChange={event => updateScene(scene.id,{trimEnd:event.target.value})}/></label>
                 </div>
+                <label>TRANSITION BEFORE THIS SCENE<select value={scene.transition} onChange={event => updateScene(scene.id,{transition:event.target.value})}><option value="cut">Cut</option><option value="fade">Fade through black</option></select></label>
                 {Number(scene.trimEnd) > 0 && Number(scene.trimEnd) <= Number(scene.trimStart) && <small className="validation-error">End must be greater than start.</small>}
               </article>)}
             </div>
             <form onSubmit={renderTimeline}>
+              <label>FADE DURATION<select value={transitionDuration} onChange={event => setTransitionDuration(event.target.value)}><option value="0.5">0.5 seconds</option><option value="1">1 second</option></select></label>
               <div className="row">
                 <label>EXPORT FORMAT<select value={preset} onChange={event => setPreset(event.target.value)}><option value="reel">Reels / Shorts · 9:16</option><option value="landscape">YouTube · 16:9</option><option value="square">Square · 1:1</option></select></label>
                 <label>FRAMING<select value={framing} onChange={event => setFraming(event.target.value)}><option value="fill">Fill · crop edges</option><option value="fit">Fit · black bars</option></select></label>
