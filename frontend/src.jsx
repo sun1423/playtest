@@ -31,6 +31,10 @@ function App() {
   const [savedProjects, setSavedProjects] = useState([]);
   const [savedProjectName, setSavedProjectName] = useState('');
   const [savingProject, setSavingProject] = useState(false);
+  const [llmInfo, setLlmInfo] = useState({ models: [], catalog: [], active_model: '', pull: null, runtime_ready: false });
+  const [llmModelInput, setLlmModelInput] = useState('qwen3.5:4b-q4_K_M');
+  const [llmBusy, setLlmBusy] = useState(false);
+  const [llmTest, setLlmTest] = useState(null);
 
   const [previewUrl, setPreviewUrl] = useState('');
   const [trimStart, setTrimStart] = useState('0');
@@ -96,6 +100,52 @@ function App() {
     setMsg('You have been signed out.');
   }
 
+  async function refreshLlm() {
+    try { setLlmInfo(await api('/api/llm')); } catch (error) { setMsg(error.message); }
+  }
+
+  async function pullLlmModel(model) {
+    setLlmBusy(true); setMsg('');
+    try {
+      await api('/api/llm/pull', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model }) });
+      setLlmModelInput(model);
+      setMsg('Model download started. You can leave this page; progress is saved on the server.');
+      await refreshLlm();
+    } catch (error) { setMsg(error.message); }
+    finally { setLlmBusy(false); }
+  }
+
+  async function activateLlmModel(model) {
+    setLlmBusy(true);
+    try {
+      await api('/api/llm/active', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model }) });
+      await refreshLlm();
+      setMsg('Active local LLM changed to ' + model);
+    } catch (error) { setMsg(error.message); }
+    finally { setLlmBusy(false); }
+  }
+
+  async function testLlmModel(model) {
+    setLlmBusy(true); setLlmTest(null);
+    try {
+      const result = await api('/api/llm/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model }) });
+      setLlmTest(result);
+      setMsg('Local model test completed.');
+    } catch (error) { setMsg(error.message); }
+    finally { setLlmBusy(false); await refreshLlm(); }
+  }
+
+  async function deleteLlmModel(model) {
+    if (!window.confirm('Delete downloaded model ' + model + '? This frees disk space.')) return;
+    setLlmBusy(true);
+    try {
+      await api('/api/llm/models', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model }) });
+      await refreshLlm();
+      setMsg('Deleted ' + model);
+    } catch (error) { setMsg(error.message); }
+    finally { setLlmBusy(false); }
+  }
+
   async function refresh() {
     try {
       const [jobList, voiceList, savedList] = await Promise.all([
@@ -112,6 +162,7 @@ function App() {
   }
 
   useEffect(() => { checkSession(); }, []);
+  useEffect(() => { if (authenticated) refreshLlm(); }, [authenticated]);
   useEffect(() => {
     const selected = sceneFiles[activeScene]?.file;
     if (!selected) {
@@ -518,7 +569,8 @@ function App() {
     ['transform', 'Transform', Film],
     ['timeline', 'Timeline', Film],
     ['voice', 'Voice studio', Mic2],
-    ['projects', 'Projects', FolderOpen]
+    ['projects', 'Projects', FolderOpen],
+    ['models', 'Local AI models', WandSparkles]
   ];
 
   if (checking) return <div className="auth-shell"><section><p>Checking secure session…</p></section></div>;
@@ -728,6 +780,38 @@ function App() {
               </button>
             </article>
           )}
+        </section>}
+        {tab === 'models' && <section className="llm-workspace">
+          <span>PRIVATE LOCAL INFERENCE</span><h1>Local AI models.</h1>
+          <p>Models run on this Azure server through Ollama. No paid API keys, cloud AI calls or external inference. Only one model is active for studio tasks at a time.</p>
+          <div className="llm-status">
+            <b>{llmInfo.runtime_ready ? '● Ollama runtime available' : '● Ollama runtime unavailable'}</b>
+            <small>{llmInfo.active_model ? 'Active: ' + llmInfo.active_model : 'No active model selected'}</small>
+            {llmInfo.pull && <small>{llmInfo.pull.status === 'downloading' ? 'Downloading ' + llmInfo.pull.model : 'Last download: ' + llmInfo.pull.model + ' · ' + llmInfo.pull.status}</small>}
+            {llmInfo.pull?.log && <pre>{llmInfo.pull.log}</pre>}
+            <button type="button" onClick={refreshLlm}>Refresh model status</button>
+          </div>
+          <h2>Recommended models</h2>
+          {llmInfo.catalog.map(item => <article className="llm-row" key={item.model}>
+            <div><b>{item.name}</b><small>{item.size} · {item.recommended ? 'Recommended starting model' : 'Smaller alternative'}</small></div>
+            {llmInfo.models.some(model => model.name === item.model) ?
+              <button type="button" disabled={llmBusy} onClick={() => activateLlmModel(item.model)}>Use model</button> :
+              <button type="button" disabled={llmBusy || llmInfo.pull?.status === 'downloading'} onClick={() => pullLlmModel(item.model)}>Download</button>}
+          </article>)}
+          <h2>Try another Ollama model</h2>
+          <p>Enter a model name and tag from the Ollama library. Downloads are stored on the server; avoid downloading multiple large models at once.</p>
+          <div className="llm-download-form"><input value={llmModelInput} onChange={event => setLlmModelInput(event.target.value)} placeholder="e.g. gemma4:e2b"/><button type="button" disabled={llmBusy || !llmModelInput.trim() || llmInfo.pull?.status === 'downloading'} onClick={() => pullLlmModel(llmModelInput.trim())}>Download model</button></div>
+          <h2>Downloaded models</h2>
+          {llmInfo.models.length === 0 ? <p>No models downloaded yet.</p> : llmInfo.models.map(model => <article className="llm-row" key={model.name}>
+            <div><b>{model.name}</b><small>{(model.size / 1073741824).toFixed(2)} GB · {model.details?.parameter_size || 'Local model'}</small></div>
+            <div className="llm-actions">
+              {llmInfo.active_model === model.name ? <b className="llm-active">Active</b> : <button type="button" disabled={llmBusy} onClick={() => activateLlmModel(model.name)}>Activate</button>}
+              <button type="button" disabled={llmBusy} onClick={() => testLlmModel(model.name)}>Test</button>
+              <button type="button" className="danger" disabled={llmBusy} onClick={() => deleteLlmModel(model.name)}>Delete</button>
+            </div>
+          </article>)}
+          {llmTest && <article className="llm-test"><b>Test: {llmTest.model}</b><small>{llmTest.seconds}s · {Number(llmTest.tokens_per_second).toFixed(2)} tokens/sec</small><p>{llmTest.response}</p></article>}
+          <small>Model downloads are free to use under their respective licences, but consume Azure disk, RAM and CPU. Review each model's licence before production use.</small>
         </section>}
         {tab === 'projects' && <section>
           <span>SAVED PROJECTS</span>
