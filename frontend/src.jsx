@@ -167,12 +167,13 @@ function App() {
 
   async function refresh() {
     try {
-      const [jobList, voiceList, savedList] = await Promise.all([
-        api('/api/jobs'), api('/api/voices'), api('/api/saved-projects')
+      const [jobList, voiceList, savedList, vaceInfo] = await Promise.all([
+        api('/api/jobs'), api('/api/voices'), api('/api/saved-projects'), api('/api/vace/status')
       ]);
       setJobs(jobList);
       setVoices(voiceList);
       setSavedProjects(savedList);
+      setVaceStatus(vaceInfo);
       setStatus('Azure connected');
     } catch (error) {
       setStatus(error.message === 'Authentication required' ? 'Session expired' : 'Server offline');
@@ -196,6 +197,22 @@ function App() {
     const timer = setInterval(check, 10000);
     return () => { cancelled = true; clearInterval(timer); };
   }, [authenticated]);
+  useEffect(() => {
+    if (!voices.length) {
+      setVaceVoiceId('');
+    } else if (!voices.some(item => item.voice_id === vaceVoiceId)) {
+      setVaceVoiceId(voices[0].voice_id);
+    }
+  }, [voices, vaceVoiceId]);
+  useEffect(() => {
+    if (!vaceFile) {
+      setVacePreviewUrl('');
+      return undefined;
+    }
+    const url = URL.createObjectURL(vaceFile);
+    setVacePreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [vaceFile]);
   useEffect(() => {
     const selected = sceneFiles[activeScene]?.file;
     if (!selected) {
@@ -244,6 +261,30 @@ function App() {
     } catch (error) { setMsg(error.message); }
     setBusy(false);
     refresh();
+  }
+
+  async function queueVaceVideo(event) {
+    event.preventDefault();
+    if (!vaceFile || !vaceVoiceId) return;
+    const form = new FormData();
+    form.append('file', vaceFile);
+    form.append('prompt', vacePrompt.trim());
+    form.append('narration', vaceNarration.trim());
+    form.append('language', vaceLanguage);
+    form.append('voice_id', vaceVoiceId);
+    form.append('motion_mode', vaceMotionMode);
+    form.append('keep_source_audio', String(vaceKeepSourceAudio));
+    setVaceBusy(true);
+    try {
+      await api('/api/vace/video', { method: 'POST', body: form });
+      setMsg('AI video job queued. Start the Kaggle GPU runner to process it.');
+      setVaceFile(null);
+      refresh();
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      setVaceBusy(false);
+    }
   }
 
   async function upload(event) {
@@ -641,6 +682,7 @@ function App() {
     ['create', 'Create video', WandSparkles],
     ['writer', 'Script Writer', WandSparkles],
     ['storyboard', 'Storyboard', Film],
+    ['vace', 'AI Video', WandSparkles],
     ['transform', 'Transform', Film],
     ['timeline', 'Timeline', Film],
     ['voice', 'Voice studio', Mic2],
