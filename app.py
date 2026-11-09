@@ -663,25 +663,45 @@ def create_storyboard(request: StoryboardRequest):
             {"scene_number": index, "story": " ".join(group)}
             for index, group in enumerate(groups, 1)
         ]
+        output_schema = {
+            "type": "object",
+            "properties": {
+                "scenes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "visual_direction": {"type": "string"},
+                            "image_prompt": {"type": "string"},
+                            "shot_type": {"type": "string"},
+                        },
+                        "required": ["title", "visual_direction", "image_prompt", "shot_type"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["scenes"],
+            "additionalProperties": False,
+        }
+        metadata_language = "Hindi" if request.language == "hi" else "English"
         prompt = (
-            "Create cinematic storyboard metadata for these already-separated scenes. Return ONLY JSON: "
-            "{\"scenes\":[{\"title\":\"...\",\"visual_direction\":\"...\","
-            "\"image_prompt\":\"...\",\"shot_type\":\"...\"}]}. Return exactly one object per "
-            "input scene, in the same order. Do NOT return narration and do NOT change, summarize, "
-            "translate, or omit any story detail. Titles must be short and accurate. Visual directions "
-            "must be at most 12 words. Image prompts must be at most 20 words, vivid, filmable and specific. "
-            "Keep character appearance, clothing, props and locations consistent across scenes. "
-            "Do not add facts or text inside the image.\n"
-            f"Language: {request.language}\nSCENE INPUTS:\n"
-            f"{json.dumps(scene_briefs, ensure_ascii=False)}"
+            "Create concise cinematic metadata for these pre-split storyboard scenes. Return exactly "
+            "one scene object per input, in the same order. Never return narration; source narration is "
+            "preserved by the application. Do not invent facts. Keep character appearance, clothing, props "
+            "and locations consistent across scenes. Titles and visual_direction MUST be in "
+            f"{metadata_language}. image_prompt MUST be in English for image-generator compatibility. "
+            "shot_type must be a short English camera-shot label. Titles <=5 words, visual_direction "
+            "<=12 words, image_prompt <=20 words. Use specific, filmable descriptions; no text inside images.\n"
+            f"SCENE INPUTS:\n{json.dumps(scene_briefs, ensure_ascii=False)}"
         )
         result = ollama_chat(selected_model, {
             "model": selected_model,
             "messages": [{"role": "user", "content": prompt}],
-            "format": "json", "stream": False, "think": False, "keep_alive": "2m",
+            "format": output_schema, "stream": False, "think": False, "keep_alive": "2m",
             "options": {
-                "num_ctx": 3072, "num_predict": min(1100, max(400, count * 140)),
-                "num_thread": 2, "temperature": 0.2,
+                "num_ctx": 3072, "num_predict": min(2000, max(700, count * 200)),
+                "num_thread": 2, "temperature": 0.15,
             },
         }, timeout=180)
         try:
