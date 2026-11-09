@@ -163,7 +163,9 @@ def pull_state():
                 pass
         state["running"] = running
         state["log"] = Path(state.get("log_path", "")).read_text(errors="replace")[-2500:] if state.get("log_path") and Path(state["log_path"]).is_file() else ""
-        state["status"] = "downloading" if running else ("finished" if state.get("return_code") == 0 else "stopped")
+        state["status"] = "downloading" if running else (
+            "downloaded" if "success" in state.get("log", "").lower() else "failed"
+        )
         return state
     except (OSError, ValueError, TypeError):
         return None
