@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Clapperboard, Film, Mic2, FolderOpen, Upload, Play, RefreshCw,
-  Download, WandSparkles, LogOut, LockKeyhole
+  Download, WandSparkles, LogOut, LockKeyhole, Trash2
 } from 'lucide-react';
 import './style.css';
 
@@ -126,6 +126,17 @@ function App() {
     refresh();
   }
 
+  async function deleteMedia(url, description) {
+    if (!window.confirm(`Permanently delete ${description}? This cannot be undone.`)) return;
+    try {
+      await api(url, { method: 'DELETE' });
+      setMsg(`${description} deleted.`);
+      refresh();
+    } catch (error) {
+      setMsg(error.message);
+    }
+  }
+
   async function addVoice(event) {
     event.preventDefault();
     const form = new FormData();
@@ -221,7 +232,15 @@ function App() {
             <label className="drop"><Mic2/><b>{wav?.name || 'Choose reference WAV'}</b><input type="file" accept=".wav" onChange={event => setWav(event.target.files[0])}/></label>
             <button className="primary" disabled={!wav || !name}>Save voice reference</button>
           </form>
-          {voices.map(item => <p key={item.voice_id}>🎙 {item.voice_id}</p>)}
+          <h3>Saved voice references</h3>
+          {voices.length === 0 ? <p>No saved voice references.</p> : voices.map(item =>
+            <article key={item.voice_id} className="media-row">
+              <b>🎙 {item.voice_id}</b>
+              <button className="danger" onClick={() => deleteMedia('/api/voices/' + encodeURIComponent(item.voice_id), 'Voice profile ' + item.voice_id)}>
+                <Trash2 size={15}/> Delete
+              </button>
+            </article>
+          )}
         </section>}
         {tab === 'projects' && <section>
           <span>JOB QUEUE</span>
@@ -231,6 +250,10 @@ function App() {
               <progress value={job.progress} max="100"/>
               {job.status === 'completed' && <a href={'/api/jobs/' + job.id + '/output'}><Download size={16}/> Download</a>}
               {job.error && <p>{job.error}</p>}
+              <button className="danger" disabled={job.status === 'running'}
+                onClick={() => deleteMedia('/api/jobs/' + job.id, 'job and its media')}>
+                <Trash2 size={15}/> {job.status === 'running' ? 'Running — cannot delete yet' : 'Delete job and media'}
+              </button>
             </article>
           )}
         </section>}
