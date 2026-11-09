@@ -20,6 +20,8 @@ function App() {
   const [storySceneLimit, setStorySceneLimit] = useState('8');
   const [storyScenes, setStoryScenes] = useState([]);
   const [storyBusy, setStoryBusy] = useState(false);
+  const [storyImageUrls, setStoryImageUrls] = useState({});
+  const [storyRenderBusy, setStoryRenderBusy] = useState(false);
   const [voice, setVoice] = useState('');
   const [file, setFile] = useState(null);
   const [sceneFiles, setSceneFiles] = useState([]);
@@ -116,6 +118,14 @@ function App() {
     setScenePreviewUrl(url);
     return () => URL.revokeObjectURL(url);
   }, [sceneFiles, activeScene]);
+  useEffect(() => {
+    const urls = {};
+    storyScenes.forEach((scene, index) => {
+      if (scene.imageFile) urls[index] = URL.createObjectURL(scene.imageFile);
+    });
+    setStoryImageUrls(urls);
+    return () => Object.values(urls).forEach(URL.revokeObjectURL);
+  }, [storyScenes]);
   useEffect(() => {
     if (!file) {
       setPreviewUrl('');
@@ -241,7 +251,7 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ script: storyScript, language: storyLanguage, max_scenes: Number(storySceneLimit) })
       });
-      setStoryScenes(result.scenes);
+      setStoryScenes(result.scenes.map(scene => ({ ...scene, duration: '4', transition: 'cut', imageFile: null })));
       setMsg(`Storyboard drafted: ${result.scene_count} scenes, ${result.total_words} words.`);
     } catch (error) {
       setMsg(error.message);
@@ -252,6 +262,36 @@ function App() {
 
   function updateStoryboardScene(index, changes) {
     setStoryScenes(current => current.map((scene, i) => i === index ? { ...scene, ...changes } : scene));
+  }
+
+  async function renderStoryboardVideo(event) {
+    event.preventDefault();
+    if (storyScenes.length < 2 || storyScenes.some(scene => !scene.imageFile)) {
+      setMsg('Add one image to every storyboard scene before rendering.');
+      return;
+    }
+    const form = new FormData();
+    storyScenes.forEach(scene => form.append('images', scene.imageFile));
+    form.append('scene_data', JSON.stringify(storyScenes.map(scene => ({
+      duration: Number(scene.duration || 4), transition: scene.transition || 'cut'
+    }))));
+    form.append('preset', preset);
+    form.append('framing', framing);
+    form.append('transition_duration', transitionDuration);
+    form.append('music_volume', String(musicVolume));
+    form.append('overlay_text', overlayText);
+    form.append('overlay_position', overlayPosition);
+    if (musicFile) form.append('music_file', musicFile);
+    setStoryRenderBusy(true);
+    try {
+      await api('/api/storyboard/render', { method: 'POST', body: form });
+      setMsg(`Storyboard video with ${storyScenes.length} still-image scenes queued on Azure.`);
+      refresh();
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      setStoryRenderBusy(false);
+    }
   }
 
   async function copyStoryboard() {
@@ -375,9 +415,30 @@ function App() {
                 <label>NARRATION<textarea rows="3" value={scene.narration} onChange={event => updateStoryboardScene(index,{narration:event.target.value})}/></label>
                 <label>VISUAL DIRECTION<textarea rows="2" value={scene.visual_direction} onChange={event => updateStoryboardScene(index,{visual_direction:event.target.value})}/></label>
                 <label>IMAGE PROMPT<textarea rows="3" value={scene.image_prompt} onChange={event => updateStoryboardScene(index,{image_prompt:event.target.value})}/></label>
+                <label className="drop story-image-upload">
+                  <Upload/><b>{scene.imageFile?.name || 'Attach scene image'}</b><small>JPG / PNG / WebP · max 20 MB</small>
+                  <input type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" onChange={event => updateStoryboardScene(index,{imageFile:event.target.files?.[0] || null})}/>
+                </label>
+                {storyImageUrls[index] && <img className="story-image-preview" src={storyImageUrls[index]} alt={scene.title}/>}
+                <div className="row">
+                  <label>SCENE DURATION<select value={scene.duration} onChange={event => updateStoryboardScene(index,{duration:event.target.value})}>{[2,3,4,5,6,8,10,12,15,20].map(n=><option key={n} value={n}>{n} seconds</option>)}</select></label>
+                  <label>TRANSITION<select value={scene.transition} onChange={event => updateStoryboardScene(index,{transition:event.target.value})}><option value="cut">Cut</option><option value="fade">Fade through black</option></select></label>
+                </div>
               </article>)}
             </div>
-            <p className="storyboard-note">These are editable production notes. No images or video clips are generated at this stage.</p>
+            <form onSubmit={renderStoryboardVideo}>
+              <div className="row">
+                <label>EXPORT FORMAT<select value={preset} onChange={event => setPreset(event.target.value)}><option value="reel">Reels / Shorts · 9:16</option><option value="landscape">YouTube · 16:9</option><option value="square">Square · 1:1</option></select></label>
+                <label>FRAMING<select value={framing} onChange={event => setFraming(event.target.value)}><option value="fill">Fill · crop edges</option><option value="fit">Fit · black bars</option></select></label>
+              </div>
+              <label>FADE DURATION<select value={transitionDuration} onChange={event => setTransitionDuration(event.target.value)}><option value="0.5">0.5 seconds</option><option value="1">1 second</option></select></label>
+              <label>BACKGROUND MUSIC (OPTIONAL)<small> {musicFile?.name || 'No music selected; export will be silent'}</small><input type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,audio/*" onChange={event => setMusicFile(event.target.files?.[0] || null)}/></label>
+              {musicFile && <label>MUSIC VOLUME · {Math.round(musicVolume*100)}%<input type="range" min="0" max="1.5" step="0.05" value={musicVolume} onChange={event => setMusicVolume(Number(event.target.value))}/></label>}
+              <label>PROJECT TITLE (OPTIONAL)<input value={overlayText} maxLength={160} onChange={event => setOverlayText(event.target.value)}/></label>
+              <label>TITLE POSITION<select value={overlayPosition} onChange={event => setOverlayPosition(event.target.value)}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select></label>
+              <button className="primary" disabled={storyRenderBusy || storyScenes.some(scene => !scene.imageFile)}>{storyRenderBusy ? 'Queueing storyboard video…' : 'Render storyboard video'}</button>
+            </form>
+            <p className="storyboard-note">Images are supplied by you. FRAME / AI adds gentle camera motion, scene transitions and assembles the video. AI image generation is not enabled yet.</p>
           </>}
         </section>}
         {tab === 'transform' && <section>
