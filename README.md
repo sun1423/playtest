@@ -1,0 +1,2 @@
+# AI Video Studio
+Azure-hosted social video studio. Browser UI is a control panel; uploads, inference and rendering run on Azure. React/Vite + FastAPI + SQLite queue + one worker. Chatterbox Multilingual Hindi/English TTS runs on CPU; FFmpeg transforms uploaded video while preserving source audio. Prompt-to-video diffusion is intentionally disabled until a CPU image pipeline is benchmarked; ComfyUI is optional, not the main UI. Keep model weights, voice references and media outside Git. See docs/deploy.md for deployment notes.
