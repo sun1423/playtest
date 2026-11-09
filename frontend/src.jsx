@@ -840,6 +840,45 @@ function App() {
             <p className="storyboard-note">Images are supplied by you. FRAME / AI adds gentle camera motion, scene transitions and assembles the video. AI image generation is not enabled yet.</p>
           </>}
         </section>}
+
+        {tab === 'vace' && <section className="vace-workspace">
+          <span>OPEN-WEIGHT VIDEO-TO-VIDEO</span><h1>Transform your footage.</h1>
+          <p>Wan2.1 VACE edits the visuals. Chatterbox Multilingual V3 generates narration using a saved WAV voice profile. Both run on a separate free GPU session; Azure only queues jobs and stores results.</p>
+          <div className="vace-status">
+            <b>{!vaceStatus.runner_configured ? 'GPU runner not configured' : vaceStatus.runner_online ? 'GPU runner online' : 'GPU runner configured · waiting for Kaggle'}</b>
+            <small>Video model: Wan2.1 VACE 1.3B · Voice: Chatterbox Multilingual V3</small>
+            {!vaceStatus.runner_configured && <small>Configure the secure runner token using KAGGLE_VACE_SETUP.md before submitting jobs.</small>}
+          </div>
+          <form onSubmit={queueVaceVideo}>
+            <label className="drop"><Upload/><b>{vaceFile?.name || 'Choose source video'}</b><small>MP4 / MOV / MKV / WebM · max 500 MB · first 5.06 seconds processed</small><input type="file" accept="video/*" onChange={event => setVaceFile(event.target.files[0] || null)}/></label>
+            {vacePreviewUrl && <div className="video-preview"><video src={vacePreviewUrl} controls playsInline preload="metadata"/><small>Local preview · upload begins only when you queue the job</small></div>}
+            <label>VISUAL TRANSFORMATION PROMPT
+              <textarea rows="4" maxLength={1200} value={vacePrompt} onChange={event => setVacePrompt(event.target.value)} placeholder="Example: Transform the footage into a cinematic watercolor animation. Keep the subject's movement and camera motion natural." required/>
+            </label>
+            <div className="row">
+              <label>MOTION PRESERVATION<select value={vaceMotionMode} onChange={event => setVaceMotionMode(event.target.value)}><option value="flow">Flow · prioritize original motion</option><option value="depth">Depth · prioritize scene structure</option></select></label>
+              <label>NARRATION LANGUAGE<select value={vaceLanguage} onChange={event => setVaceLanguage(event.target.value)}><option value="hi">Hindi</option><option value="en">English</option></select></label>
+            </div>
+            <label>CUSTOM VOICE PROFILE
+              <select value={vaceVoiceId} onChange={event => setVaceVoiceId(event.target.value)} required>
+                <option value="">Choose a saved WAV voice</option>
+                {voices.map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}
+              </select>
+            </label>
+            {!voices.length && <button type="button" className="secondary" onClick={() => setTab('voice')}>Open Voice Studio to add a WAV profile</button>}
+            <label>NARRATION TEXT
+              <textarea rows="5" maxLength={12000} value={vaceNarration} onChange={event => setVaceNarration(event.target.value)} placeholder="Write the Hindi or English narration to be spoken in your selected custom voice…" required/>
+            </label>
+            <label className="vace-checkbox"><input type="checkbox" checked={vaceKeepSourceAudio} onChange={event => setVaceKeepSourceAudio(event.target.checked)}/> Keep source audio quietly under the custom narration</label>
+            <button className="primary" disabled={!vaceStatus.runner_configured || !vaceFile || vacePrompt.trim().length < 8 || !vaceNarration.trim() || !vaceVoiceId || vaceBusy}>
+              {vaceBusy ? 'Uploading and queueing…' : 'Queue AI video + custom voice'}
+            </button>
+          </form>
+          <div className="vace-limit-note">
+            Initial runner output is about 5 seconds at 480p. If narration is longer, the final frame holds until speech ends. Kaggle free GPU availability is not guaranteed; see <a href="https://github.com/sun1423/playtest/blob/feature/vace-video-to-video-custom-voice/KAGGLE_VACE_SETUP.md" target="_blank" rel="noreferrer">GPU setup guide</a>.
+          </div>
+        </section>}
+
         {tab === 'transform' && <section>
           <span>UPLOAD WORKFLOW</span><h1>Reframe your footage.</h1>
           <p>Original video stays untouched. New export rendered with FFmpeg on Azure.</p>
