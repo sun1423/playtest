@@ -395,6 +395,114 @@ async def video(
     )
 
 
+@app.post("/api/project")
+async def create_project(
+    scenes: list[UploadFile] = File(...),
+    scene_settings: str = Form("[]"),
+    preset: str = Form("reel"),
+    framing: str = Form("fill"),
+    audio: str = Form("keep"),
+    music_volume: float = Form(0.35),
+    overlay_text: str = Form("", max_length=160),
+    overlay_position: str = Form("bottom"),
+    subtitle_file: UploadFile | None = File(None),
+    music_file: UploadFile | None = File(None),
+):
+    if not 1 <= len(scenes) <= 10:
+        raise HTTPException(400, "A project must contain 1 to 10 scenes")
+    if preset not in {"reel", "landscape", "square"} or framing not in {"fill", "fit"}:
+        raise HTTPException(400, "Invalid export settings")
+    if audio not in {"keep", "mute", "music"} or not 0 <= music_volume <= 1.5:
+        raise HTTPException(400, "Invalid audio settings")
+    if audio == "music" and not music_file:
+        raise HTTPException(400, "Choose background music")
+    if overlay_position not in {"top", "center", "bottom"}:
+        raise HTTPException(400, "Invalid title position")
+    try:
+        settings = json.loads(scene_settings)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Invalid scene settings")
+    if not isinstance(settings, list) or len(settings) != len(scenes):
+        raise HTTPException(400, "Scene settings do not match uploaded clips")
+    for item in settings:
+        if not isinstance(item, dict):
+            raise HTTPException(400, "Invalid scene settings")
+        start, end = float(item.get("trim_start", 0)), float(item.get("trim_end", 0))
+        if not 0 <= start <= 14400 or not 0 <= end <= 14400 or (end and end <= start):
+            raise HTTPException(400, "Invalid scene trim range")
+
+    folder = UP / str(uuid.uuid4())
+    folder.mkdir()
+    saved_scenes = []
+    total_size = 0
+    try:
+        for index, upload in enumerate(scenes):
+            extension = Path(upload.filename or "").suffix.lower()
+            if extension not in {".mp4", ".mov", ".mkv", ".webm"}:
+                raise HTTPException(415, "Unsupported scene video format")
+            target = folder / f"scene_{index + 1:02d}{extension}"
+            size = 0
+            with target.open("xb") as output_file:
+                while chunk := await upload.read(1024 * 1024):
+                    size += len(chunk)
+                    total_size += len(chunk)
+                    if size > MAX_UPLOAD or total_size > MAX_UPLOAD:
+                        raise HTTPException(413, "Project uploads exceed the 500 MB total limit")
+                    output_file.write(chunk)
+            saved_scenes.append({"path": str(target), **settings[index]})
+            await upload.close()
+
+        subtitle_path = ""
+        if subtitle_file:
+            if Path(subtitle_file.filename or "").suffix.lower() != ".srt":
+                raise HTTPException(415, "Subtitles must be an .srt file")
+            subtitle_path = folder / "captions.srt"
+            size = 0
+            with subtitle_path.open("xb") as output_file:
+                while chunk := await subtitle_file.read(64 * 1024):
+                    size += len(chunk)
+                    if size > 2 * 1024 * 1024:
+                        raise HTTPException(413, "Subtitle file exceeds 2 MB")
+                    output_file.write(chunk)
+            await subtitle_file.close()
+
+        music_path = ""
+        if music_file:
+            if Path(music_file.filename or "").suffix.lower() not in {".mp3", ".wav", ".m4a", ".aac", ".ogg"}:
+                raise HTTPException(415, "Unsupported background music format")
+            music_path = folder / ("background" + Path(music_file.filename).suffix.lower())
+            size = 0
+            with music_path.open("xb") as output_file:
+                while chunk := await music_file.read(64 * 1024):
+                    size += len(chunk)
+                    if size > 30 * 1024 * 1024:
+                        raise HTTPException(413, "Background music exceeds 30 MB")
+                    output_file.write(chunk)
+            await music_file.close()
+    except Exception:
+        shutil.rmtree(folder, ignore_errors=True)
+        for upload in scenes:
+            await upload.close()
+        if subtitle_file:
+            await subtitle_file.close()
+        if music_file:
+            await music_file.close()
+        raise
+
+    payload = {
+        "scenes": saved_scenes,
+        "preset": preset,
+        "framing": framing,
+        "audio": audio,
+        "music_volume": music_volume,
+        "music_path": str(music_path) if music_path else "",
+        "subtitle_path": str(subtitle_path) if subtitle_path else "",
+        "overlay_text": overlay_text.strip(),
+        "overlay_position": overlay_position,
+    }
+    return enqueue("video_transform", payload, saved_scenes[0]["path"])
+
+
 @app.post("/api/voices")
 async def voice(name: str = Form(...), file: UploadFile = File(...)):
     if Path(file.filename or "").suffix.lower() != ".wav":
@@ -465,6 +573,79 @@ def work(job):
     folder.mkdir(parents=True, exist_ok=True)
 
     if job["kind"] == "video_transform":
+        source_for_render = job["input_path"]
+        scene_items = payload.get("scenes", [])
+        if scene_items:
+            width, height = (
+                (1080, 1920) if payload["preset"] == "reel"
+                else (1920, 1080) if payload["preset"] == "landscape"
+                else (1080, 1080)
+            )
+            segment_dir = folder / "segments"
+            segment_dir.mkdir()
+            segment_paths = []
+            for index, scene in enumerate(scene_items):
+                source = Path(scene["path"]).resolve()
+                if UP.resolve() not in source.parents or not source.is_file():
+                    raise RuntimeError("A scene source is missing or outside the upload directory.")
+                probe = subprocess.run(
+                    ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(source)],
+                    check=True, capture_output=True, text=True, timeout=30,
+                )
+                metadata = json.loads(probe.stdout)
+                video_stream = next((item for item in metadata["streams"] if item["codec_type"] == "video"), None)
+                if not video_stream:
+                    raise RuntimeError(f"Scene {index + 1} has no video stream.")
+                duration = float(metadata["format"].get("duration", 0))
+                trim_start = float(scene.get("trim_start", 0))
+                trim_end = float(scene.get("trim_end", 0))
+                effective_end = trim_end if trim_end else duration
+                if duration <= 0 or trim_start >= duration or effective_end <= trim_start or effective_end > duration + 0.05:
+                    raise RuntimeError(f"Scene {index + 1} has an invalid trim range.")
+                segment_duration = effective_end - trim_start
+                if payload.get("framing", "fill") == "fit":
+                    scene_filter = (
+                        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black"
+                    )
+                else:
+                    scene_filter = (
+                        f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+                        f"crop={width}:{height}"
+                    )
+                scene_filter += ",fps=30,setsar=1,format=yuv420p"
+                segment = segment_dir / f"scene_{index + 1:02d}.mp4"
+                command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+                if trim_start > 0:
+                    command += ["-ss", str(trim_start)]
+                command += ["-i", str(source)]
+                has_audio = any(item["codec_type"] == "audio" for item in metadata["streams"])
+                if not has_audio:
+                    command += ["-f", "lavfi", "-t", str(segment_duration), "-i",
+                                "anullsrc=channel_layout=stereo:sample_rate=48000"]
+                command += ["-t", str(segment_duration), "-map", "0:v:0",
+                            "-map", "0:a:0" if has_audio else "1:a:0",
+                            "-vf", scene_filter, "-c:v", "libx264", "-preset", "veryfast",
+                            "-crf", "21", "-threads", "2", "-pix_fmt", "yuv420p",
+                            "-c:a", "aac", "-ar", "48000", "-ac", "2",
+                            "-movflags", "+faststart", str(segment)]
+                subprocess.run(command, check=True, timeout=7200)
+                segment_paths.append(segment)
+
+            concat_list = segment_dir / "concat.txt"
+            concat_list.write_text(
+                "".join("file '" + str(path).replace("'", "'\\''") + "'\\n" for path in segment_paths),
+                encoding="utf-8",
+            )
+            joined = folder / "joined.mp4"
+            subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                 "-f", "concat", "-safe", "0", "-i", str(concat_list),
+                 "-c", "copy", "-movflags", "+faststart", str(joined)],
+                check=True, timeout=7200,
+            )
+            source_for_render = str(joined)
+
         width, height = (
             (1080, 1920) if payload["preset"] == "reel"
             else (1920, 1080) if payload["preset"] == "landscape"
@@ -504,8 +685,8 @@ def work(job):
                 raise RuntimeError("Subtitle file is missing or outside the upload directory.")
             video_filter += f",subtitles=filename={subtitle_file}:fontsdir=/usr/share/fonts/truetype/noto"
         music_path = payload.get("music_path", "")
-        trim_start = float(payload.get("trim_start", 0))
-        trim_end = float(payload.get("trim_end", 0))
+        trim_start = 0 if scene_items else float(payload.get("trim_start", 0))
+        trim_end = 0 if scene_items else float(payload.get("trim_end", 0))
         input_args = []
         if trim_start > 0:
             input_args += ["-ss", str(trim_start)]
@@ -513,11 +694,11 @@ def work(job):
             music_file = Path(music_path).resolve()
             if UP.resolve() not in music_file.parents or not music_file.is_file():
                 raise RuntimeError("Background music is missing or outside the upload directory.")
-            input_args += ["-i", job["input_path"], "-stream_loop", "-1", "-i", str(music_file)]
+            input_args += ["-i", source_for_render, "-stream_loop", "-1", "-i", str(music_file)]
             map_args = ["-map", "0:v:0", "-map", "1:a:0", "-shortest", "-c:a", "aac",
                         "-af", f"volume={float(payload.get('music_volume', 0.35))}"]
         else:
-            input_args += ["-i", job["input_path"]]
+            input_args += ["-i", source_for_render]
             map_args = ["-map", "0:v:0", "-map", "0:a?"]
             map_args += ["-an"] if payload.get("audio", "keep") == "mute" else ["-c:a", "aac"]
         duration_args = ["-t", str(trim_end - trim_start)] if trim_end > 0 else []
