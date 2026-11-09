@@ -564,6 +564,102 @@ async def create_project(
     return enqueue("video_transform", payload, saved_scenes[0]["path"])
 
 
+@app.post("/api/storyboard/render")
+async def render_storyboard(
+    images: list[UploadFile] = File(...),
+    scene_data: str = Form("[]"),
+    preset: str = Form("reel"),
+    framing: str = Form("fill"),
+    transition_duration: float = Form(0.5),
+    music_file: UploadFile | None = File(None),
+    music_volume: float = Form(0.35),
+    overlay_text: str = Form("", max_length=160),
+    overlay_position: str = Form("bottom"),
+):
+    if not 2 <= len(images) <= 10:
+        raise HTTPException(400, "A visual storyboard needs 2 to 10 scene images")
+    if preset not in {"reel", "landscape", "square"} or framing not in {"fill", "fit"}:
+        raise HTTPException(400, "Invalid export settings")
+    if transition_duration not in {0.5, 1.0} or not 0 <= music_volume <= 1.5:
+        raise HTTPException(400, "Invalid transition or music settings")
+    if overlay_position not in {"top", "center", "bottom"}:
+        raise HTTPException(400, "Invalid title position")
+    if music_file and Path(music_file.filename or "").suffix.lower() not in {".mp3", ".wav", ".m4a", ".aac", ".ogg"}:
+        raise HTTPException(415, "Unsupported background music format")
+    try:
+        settings = json.loads(scene_data)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Invalid storyboard scene data")
+    if not isinstance(settings, list) or len(settings) != len(images):
+        raise HTTPException(400, "Scene settings do not match the images")
+    for item in settings:
+        if not isinstance(item, dict):
+            raise HTTPException(400, "Invalid scene settings")
+        if not 2 <= float(item.get("duration", 4)) <= 20:
+            raise HTTPException(400, "Each still image must stay on screen for 2 to 20 seconds")
+        if item.get("transition", "cut") not in {"cut", "fade"}:
+            raise HTTPException(400, "Invalid scene transition")
+
+    folder = UP / str(uuid.uuid4())
+    folder.mkdir()
+    saved = []
+    total_size = 0
+    try:
+        for index, upload in enumerate(images):
+            extension = Path(upload.filename or "").suffix.lower()
+            if extension not in {".jpg", ".jpeg", ".png", ".webp"}:
+                raise HTTPException(415, "Scene images must be JPG, PNG or WebP")
+            target = folder / f"scene_{index + 1:02d}{extension}"
+            size = 0
+            with target.open("xb") as output_file:
+                while chunk := await upload.read(256 * 1024):
+                    size += len(chunk)
+                    total_size += len(chunk)
+                    if size > 20 * 1024 * 1024 or total_size > 100 * 1024 * 1024:
+                        raise HTTPException(413, "Storyboard images exceed the 20 MB per-image or 100 MB total limit")
+                    output_file.write(chunk)
+            header = target.read_bytes()[:16]
+            valid_header = (
+                header.startswith(b"\xff\xd8\xff")
+                or header.startswith(b"\x89PNG\r\n\x1a\n")
+                or (header.startswith(b"RIFF") and header[8:12] == b"WEBP")
+            )
+            if not valid_header:
+                raise HTTPException(415, "An uploaded scene is not a valid JPG, PNG or WebP image")
+            saved.append({"image_path": str(target), "duration": float(settings[index].get("duration", 4)),
+                          "transition": settings[index].get("transition", "cut")})
+            await upload.close()
+
+        music_path = ""
+        if music_file:
+            music_path = folder / ("background" + Path(music_file.filename).suffix.lower())
+            size = 0
+            with music_path.open("xb") as output_file:
+                while chunk := await music_file.read(64 * 1024):
+                    size += len(chunk)
+                    if size > 30 * 1024 * 1024:
+                        raise HTTPException(413, "Background music exceeds 30 MB")
+                    output_file.write(chunk)
+            await music_file.close()
+    except Exception:
+        shutil.rmtree(folder, ignore_errors=True)
+        for upload in images:
+            await upload.close()
+        if music_file:
+            await music_file.close()
+        raise
+
+    payload = {
+        "scenes": saved, "preset": preset, "framing": framing,
+        "audio": "music" if music_path else "mute",
+        "transition_duration": transition_duration,
+        "music_volume": music_volume, "music_path": str(music_path) if music_path else "",
+        "subtitle_path": "", "overlay_text": overlay_text.strip(),
+        "overlay_position": overlay_position,
+    }
+    return enqueue("video_transform", payload, saved[0]["image_path"])
+
+
 @app.post("/api/voices")
 async def voice(name: str = Form(...), file: UploadFile = File(...)):
     if Path(file.filename or "").suffix.lower() != ".wav":
@@ -646,24 +742,31 @@ def work(job):
             segment_dir.mkdir()
             segment_paths = []
             for index, scene in enumerate(scene_items):
-                source = Path(scene["path"]).resolve()
+                image_source = bool(scene.get("image_path"))
+                source = Path(scene.get("image_path") if image_source else scene["path"]).resolve()
                 if UP.resolve() not in source.parents or not source.is_file():
                     raise RuntimeError("A scene source is missing or outside the upload directory.")
-                probe = subprocess.run(
-                    ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(source)],
-                    check=True, capture_output=True, text=True, timeout=30,
-                )
-                metadata = json.loads(probe.stdout)
-                video_stream = next((item for item in metadata["streams"] if item["codec_type"] == "video"), None)
-                if not video_stream:
-                    raise RuntimeError(f"Scene {index + 1} has no video stream.")
-                duration = float(metadata["format"].get("duration", 0))
-                trim_start = float(scene.get("trim_start", 0))
-                trim_end = float(scene.get("trim_end", 0))
-                effective_end = trim_end if trim_end else duration
-                if duration <= 0 or trim_start >= duration or effective_end <= trim_start or effective_end > duration + 0.05:
-                    raise RuntimeError(f"Scene {index + 1} has an invalid trim range.")
-                segment_duration = effective_end - trim_start
+                if image_source:
+                    segment_duration = float(scene.get("duration", 4))
+                    if not 2 <= segment_duration <= 20:
+                        raise RuntimeError(f"Scene {index + 1} has an invalid still-image duration.")
+                    trim_start = 0
+                else:
+                    probe = subprocess.run(
+                        ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(source)],
+                        check=True, capture_output=True, text=True, timeout=30,
+                    )
+                    metadata = json.loads(probe.stdout)
+                    video_stream = next((item for item in metadata["streams"] if item["codec_type"] == "video"), None)
+                    if not video_stream:
+                        raise RuntimeError(f"Scene {index + 1} has no video stream.")
+                    duration = float(metadata["format"].get("duration", 0))
+                    trim_start = float(scene.get("trim_start", 0))
+                    trim_end = float(scene.get("trim_end", 0))
+                    effective_end = trim_end if trim_end else duration
+                    if duration <= 0 or trim_start >= duration or effective_end <= trim_start or effective_end > duration + 0.05:
+                        raise RuntimeError(f"Scene {index + 1} has an invalid trim range.")
+                    segment_duration = effective_end - trim_start
                 if payload.get("framing", "fill") == "fit":
                     scene_filter = (
                         f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
@@ -684,6 +787,23 @@ def work(job):
                     scene_filter += f",fade=t=out:st={max(0, segment_duration-transition_seconds)}:d={transition_seconds}"
                 segment = segment_dir / f"scene_{index + 1:02d}.mp4"
                 command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+                if image_source:
+                    command += ["-loop", "1", "-framerate", "30", "-i", str(source)]
+                    image_filter = scene_filter + (
+                        f",zoompan=z='min(zoom+0.0005,1.08)':"
+                        f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+                        f"d=1:s={width}x{height}:fps=30"
+                    )
+                    command += ["-f", "lavfi", "-t", str(segment_duration), "-i",
+                                "anullsrc=channel_layout=stereo:sample_rate=48000",
+                                "-t", str(segment_duration), "-map", "0:v:0", "-map", "1:a:0",
+                                "-vf", image_filter, "-c:v", "libx264", "-preset", "veryfast",
+                                "-crf", "21", "-threads", "2", "-pix_fmt", "yuv420p",
+                                "-c:a", "aac", "-ar", "48000", "-ac", "2",
+                                "-movflags", "+faststart", str(segment)]
+                    subprocess.run(command, check=True, timeout=7200)
+                    segment_paths.append(segment)
+                    continue
                 if trim_start > 0:
                     command += ["-ss", str(trim_start)]
                 command += ["-i", str(source)]
