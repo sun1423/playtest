@@ -31,6 +31,16 @@ function App() {
   const [storyBusy, setStoryBusy] = useState(false);
   const [storyImageUrls, setStoryImageUrls] = useState({});
   const [storyRenderBusy, setStoryRenderBusy] = useState(false);
+  const [vaceStatus, setVaceStatus] = useState({ runner_configured: false, runner_online: false });
+  const [vaceFile, setVaceFile] = useState(null);
+  const [vacePrompt, setVacePrompt] = useState('');
+  const [vaceNarration, setVaceNarration] = useState('');
+  const [vaceLanguage, setVaceLanguage] = useState('hi');
+  const [vaceVoiceId, setVaceVoiceId] = useState('');
+  const [vaceMotionMode, setVaceMotionMode] = useState('flow');
+  const [vaceKeepSourceAudio, setVaceKeepSourceAudio] = useState(false);
+  const [vaceBusy, setVaceBusy] = useState(false);
+  const [vacePreviewUrl, setVacePreviewUrl] = useState('');
   const [voice, setVoice] = useState('');
   const [file, setFile] = useState(null);
   const [sceneFiles, setSceneFiles] = useState([]);
