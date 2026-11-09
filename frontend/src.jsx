@@ -17,6 +17,10 @@ function App() {
   const [lang, setLang] = useState('hi');
   const [voice, setVoice] = useState('');
   const [file, setFile] = useState(null);
+  const [previewUrl, setPreviewUrl] = useState('');
+  const [trimStart, setTrimStart] = useState('0');
+  const [trimEnd, setTrimEnd] = useState('0');
+  const [musicVolume, setMusicVolume] = useState(0.35);
   const [preset, setPreset] = useState('reel');
   const [framing, setFraming] = useState('fill');
   const [audioMode, setAudioMode] = useState('keep');
@@ -92,6 +96,15 @@ function App() {
 
   useEffect(() => { checkSession(); }, []);
   useEffect(() => {
+    if (!file) {
+      setPreviewUrl('');
+      return undefined;
+    }
+    const url = URL.createObjectURL(file);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+  useEffect(() => {
     if (!authenticated) return;
     refresh();
     const timer = setInterval(refresh, 5000);
@@ -121,6 +134,9 @@ function App() {
     form.append('preset', preset);
     form.append('framing', framing);
     form.append('audio', audioMode);
+    form.append('trim_start', trimStart || '0');
+    form.append('trim_end', trimEnd || '0');
+    form.append('music_volume', String(musicVolume));
     if (musicFile) form.append('music_file', musicFile);
     form.append('overlay_text', overlayText);
     form.append('overlay_position', overlayPosition);
@@ -224,18 +240,32 @@ function App() {
           <p>Original video stays untouched. New export rendered with FFmpeg on Azure.</p>
           <form onSubmit={upload}>
             <label className="drop"><Upload/><b>{file?.name || 'Choose a video file'}</b><small>MP4 / MOV / MKV / WebM</small><input type="file" accept="video/*" onChange={event => setFile(event.target.files[0])}/></label>
+            {previewUrl && <div className="video-preview">
+              <video src={previewUrl} controls playsInline preload="metadata"/>
+              {overlayText && <div className={"preview-title preview-" + overlayPosition}>{overlayText}</div>}
+              <small>Local preview · original file is not uploaded until you queue the export</small>
+            </div>}
+            <div className="row">
+              <label>TRIM START (SECONDS)<input type="number" min="0" max="14400" step="0.1" value={trimStart} onChange={event => setTrimStart(event.target.value)}/></label>
+              <label>TRIM END (SECONDS · 0 = FULL LENGTH)<input type="number" min="0" max="14400" step="0.1" value={trimEnd} onChange={event => setTrimEnd(event.target.value)}/></label>
+            </div>
             <div className="row">
               <label>EXPORT FORMAT<select value={preset} onChange={event => setPreset(event.target.value)}><option value="reel">Reels / Shorts · 9:16</option><option value="landscape">YouTube · 16:9</option><option value="square">Square · 1:1</option></select></label>
               <label>FRAMING<select value={framing} onChange={event => setFraming(event.target.value)}><option value="fill">Fill frame · crop edges</option><option value="fit">Fit whole video · black bars</option></select></label>
             </div>
             <label>AUDIO<select value={audioMode} onChange={event => setAudioMode(event.target.value)}><option value="keep">Keep original audio</option><option value="mute">Remove audio</option><option value="music">Replace with background music</option></select></label>
-            {audioMode === 'music' && <label className="drop"><Upload/><b>{musicFile?.name || 'Choose background music'}</b><small>MP3 / WAV / M4A / AAC / OGG · 30 MB max</small><input type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,audio/*" onChange={event => setMusicFile(event.target.files[0])}/></label>}
+            {audioMode === 'music' && <>
+              <label className="drop"><Upload/><b>{musicFile?.name || 'Choose background music'}</b><small>MP3 / WAV / M4A / AAC / OGG · 30 MB max</small><input type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,audio/*" onChange={event => setMusicFile(event.target.files[0])}/></label>
+              <label>MUSIC VOLUME · {Math.round(musicVolume * 100)}%
+                <input type="range" min="0" max="1.5" step="0.05" value={musicVolume} onChange={event => setMusicVolume(Number(event.target.value))}/>
+              </label>
+            </>}
             <label>TEXT OVERLAY (OPTIONAL)
               <input value={overlayText} maxLength={160} onChange={event => setOverlayText(event.target.value)} placeholder="Add a title or short message (160 characters max)"/>
             </label>
             <label>TEXT POSITION<select value={overlayPosition} onChange={event => setOverlayPosition(event.target.value)}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select></label>
             <label className="drop"><Upload/><b>{subtitleFile?.name || 'Optional SRT subtitles'}</b><small>UTF-8 SRT · Hindi and English · 2 MB max</small><input type="file" accept=".srt,application/x-subrip" onChange={event => setSubtitleFile(event.target.files[0])}/></label>
-            <button className="primary" disabled={!file || busy || (audioMode === 'music' && !musicFile)}>Queue video transform</button>
+            <button className="primary" disabled={!file || busy || (audioMode === 'music' && !musicFile) || (trimEnd !== '0' && Number(trimEnd) <= Number(trimStart))}>Queue video transform</button>
           </form>
         </section>}
         {tab === 'voice' && <section>
