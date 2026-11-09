@@ -403,6 +403,7 @@ async def create_project(
     framing: str = Form("fill"),
     audio: str = Form("keep"),
     music_volume: float = Form(0.35),
+    transition_duration: float = Form(0.5),
     overlay_text: str = Form("", max_length=160),
     overlay_position: str = Form("bottom"),
     subtitle_file: UploadFile | None = File(None),
@@ -424,12 +425,16 @@ async def create_project(
         raise HTTPException(400, "Invalid scene settings")
     if not isinstance(settings, list) or len(settings) != len(scenes):
         raise HTTPException(400, "Scene settings do not match uploaded clips")
-    for item in settings:
+    if transition_duration not in {0.5, 1.0}:
+        raise HTTPException(400, "Transition duration must be 0.5 or 1 second")
+    for index, item in enumerate(settings):
         if not isinstance(item, dict):
             raise HTTPException(400, "Invalid scene settings")
         start, end = float(item.get("trim_start", 0)), float(item.get("trim_end", 0))
         if not 0 <= start <= 14400 or not 0 <= end <= 14400 or (end and end <= start):
             raise HTTPException(400, "Invalid scene trim range")
+        if item.get("transition", "cut") not in {"cut", "fade"}:
+            raise HTTPException(400, "Invalid scene transition")
 
     folder = UP / str(uuid.uuid4())
     folder.mkdir()
@@ -494,6 +499,7 @@ async def create_project(
         "preset": preset,
         "framing": framing,
         "audio": audio,
+        "transition_duration": transition_duration,
         "music_volume": music_volume,
         "music_path": str(music_path) if music_path else "",
         "subtitle_path": str(subtitle_path) if subtitle_path else "",
@@ -614,6 +620,13 @@ def work(job):
                         f"crop={width}:{height}"
                     )
                 scene_filter += ",fps=30,setsar=1,format=yuv420p"
+                transition_seconds = float(payload.get("transition_duration", 0.5))
+                fade_in = index > 0 and scene.get("transition", "cut") == "fade"
+                fade_out = index < len(scene_items) - 1 and scene_items[index + 1].get("transition", "cut") == "fade"
+                if fade_in:
+                    scene_filter += f",fade=t=in:st=0:d={transition_seconds}"
+                if fade_out:
+                    scene_filter += f",fade=t=out:st={max(0, segment_duration-transition_seconds)}:d={transition_seconds}"
                 segment = segment_dir / f"scene_{index + 1:02d}.mp4"
                 command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
                 if trim_start > 0:
@@ -623,9 +636,17 @@ def work(job):
                 if not has_audio:
                     command += ["-f", "lavfi", "-t", str(segment_duration), "-i",
                                 "anullsrc=channel_layout=stereo:sample_rate=48000"]
+                audio_filter = []
+                if has_audio and fade_in:
+                    audio_filter += [f"afade=t=in:st=0:d={transition_seconds}"]
+                if has_audio and fade_out:
+                    audio_filter += [f"afade=t=out:st={max(0, segment_duration-transition_seconds)}:d={transition_seconds}"]
                 command += ["-t", str(segment_duration), "-map", "0:v:0",
                             "-map", "0:a:0" if has_audio else "1:a:0",
-                            "-vf", scene_filter, "-c:v", "libx264", "-preset", "veryfast",
+                            "-vf", scene_filter]
+                if audio_filter:
+                    command += ["-af", ",".join(audio_filter)]
+                command += ["-c:v", "libx264", "-preset", "veryfast",
                             "-crf", "21", "-threads", "2", "-pix_fmt", "yuv420p",
                             "-c:a", "aac", "-ar", "48000", "-ac", "2",
                             "-movflags", "+faststart", str(segment)]
