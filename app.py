@@ -663,8 +663,8 @@ def create_script(request: ScriptRequest):
         "For factual or educational subjects, do not invent statistics, studies, quotations, sources, "
         "or specific claims; use cautious wording when a detail is uncertain. "
         "Keep the hook and closing line separate from the main narration. "
-        f"VIDEO IDEA:\\n{topic}\\n"
-        + (f"KEY POINTS TO INCLUDE:\\n{key_points}\\n" if key_points else "")
+        f"VIDEO IDEA:\n{topic}\n"
+        + (f"KEY POINTS TO INCLUDE:\n{key_points}\n" if key_points else "")
     )
     result = ollama_chat(selected_model, {
         "model": selected_model,
@@ -689,10 +689,10 @@ def create_script(request: ScriptRequest):
         ):
             raise ValueError("Missing script fields")
         title = generated["title"].strip()[:160]
-        hook = generated["hook"].strip()[:1000]
-        narration = generated["narration"].strip()[:12000]
+        hook = generated["hook"].strip()[:600]
+        narration = generated["narration"].strip()[:10000]
         closing_line = generated["closing_line"].strip()[:800]
-        full_script = "\\n\\n".join((hook, narration, closing_line))
+        full_script = "\n\n".join((hook, narration, closing_line))
         word_count = len(full_script.split())
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         raise HTTPException(502, "The local model returned an incomplete script. Try again or select another model.") from exc
