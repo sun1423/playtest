@@ -20,6 +20,8 @@ function App() {
   const [preset, setPreset] = useState('reel');
   const [framing, setFraming] = useState('fill');
   const [audioMode, setAudioMode] = useState('keep');
+  const [overlayText, setOverlayText] = useState('');
+  const [overlayPosition, setOverlayPosition] = useState('bottom');
   const [name, setName] = useState('');
   const [wav, setWav] = useState(null);
   const [msg, setMsg] = useState('');
@@ -117,6 +119,8 @@ function App() {
     form.append('preset', preset);
     form.append('framing', framing);
     form.append('audio', audioMode);
+    form.append('overlay_text', overlayText);
+    form.append('overlay_position', overlayPosition);
     setBusy(true);
     try {
       await api('/api/video', { method: 'POST', body: form });
@@ -221,6 +225,10 @@ function App() {
               <label>FRAMING<select value={framing} onChange={event => setFraming(event.target.value)}><option value="fill">Fill frame · crop edges</option><option value="fit">Fit whole video · black bars</option></select></label>
             </div>
             <label>AUDIO<select value={audioMode} onChange={event => setAudioMode(event.target.value)}><option value="keep">Keep original audio</option><option value="mute">Remove audio</option></select></label>
+            <label>TEXT OVERLAY (OPTIONAL)
+              <input value={overlayText} maxLength={160} onChange={event => setOverlayText(event.target.value)} placeholder="Add a title or short message (160 characters max)"/>
+            </label>
+            <label>TEXT POSITION<select value={overlayPosition} onChange={event => setOverlayPosition(event.target.value)}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select></label>
             <button className="primary" disabled={!file || busy}>Queue video transform</button>
           </form>
         </section>}
