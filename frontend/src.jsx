@@ -17,7 +17,7 @@ function App() {
   const [lang, setLang] = useState('hi');
   const [storyScript, setStoryScript] = useState('');
   const [storyLanguage, setStoryLanguage] = useState('en');
-  const [storySceneLimit, setStorySceneLimit] = useState('8');
+  const [storySceneLimit, setStorySceneLimit] = useState('4');
   const [storyScenes, setStoryScenes] = useState([]);
   const [storyBusy, setStoryBusy] = useState(false);
   const [storyImageUrls, setStoryImageUrls] = useState({});
@@ -649,7 +649,7 @@ function App() {
         </section>}
         {tab === 'storyboard' && <section className="storyboard-workspace">
           <span>SCRIPT TO STORYBOARD</span><h1>Plan every scene.</h1>
-          <p>Paste a Hindi or English script. FRAME / AI will split it into editable scenes with narration and suggested visual directions. This first version uses local rules, not a cloud AI model.</p>
+          <p>Paste a Hindi or English script. Your selected local model creates editable scenes, narration and cinematic image prompts. Four scenes are recommended for faster CPU generation; larger storyboards take longer.</p>
           <form onSubmit={generateStoryboard}>
             <label>YOUR STORY / SCRIPT
               <textarea rows="9" maxLength="12000" value={storyScript} onChange={event => setStoryScript(event.target.value)} placeholder="Paste your story here. Use blank lines to indicate scene changes…" required/>
