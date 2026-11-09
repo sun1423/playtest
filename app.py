@@ -286,6 +286,27 @@ def health():
     }
 
 
+@app.get("/api/llm/health")
+def llm_health():
+    runtime = ollama_runtime_ready()
+    selected = active_model()
+    models = installed_models() if runtime else []
+    installed = any(item.get("name") == selected for item in models) if selected else False
+    pull = pull_state()
+    downloading = bool(pull and pull.get("running"))
+    ready = runtime and installed and not downloading
+    reason = (
+        "Model download in progress" if downloading else
+        "Ollama runtime unavailable" if not runtime else
+        "No active model selected" if not selected else
+        "Active model is not downloaded" if not installed else
+        "Ready"
+    )
+    return {"ready": ready, "runtime_ready": runtime, "active_model": selected if installed else "",
+            "status": "downloading" if downloading else ("ready" if ready else "not_ready"),
+            "reason": reason}
+
+
 @app.get("/api/llm")
 def llm_status():
     models = installed_models()
@@ -378,10 +399,10 @@ def llm_test(payload: ModelTestRequest):
     started = time.time()
     result = ollama_call("/api/chat", {
         "model": model,
-        "messages": [{"role": "user", "content": "Reply in Hindi and English with one short sentence in each language. Then output the exact word READY."}],
-        "stream": False,
+        "messages": [{"role": "user", "content": "Write exactly one natural Hindi sentence and one natural English sentence about sunrise. Do not explain."}],
+        "stream": False, "think": False,
         "keep_alive": "2m",
-        "options": {"num_ctx": 2048, "num_predict": 100, "num_thread": 2, "temperature": 0.2},
+        "options": {"num_ctx": 2048, "num_predict": 80, "num_thread": 2, "temperature": 0.2},
     }, timeout=180)
     return {
         "model": model,
@@ -621,9 +642,9 @@ def create_storyboard(request: StoryboardRequest):
         result = ollama_call("/api/chat", {
             "model": selected_model,
             "messages": [{"role": "user", "content": prompt}],
-            "format": "json", "stream": False, "keep_alive": "5m",
-            "options": {"num_ctx": 8192, "num_predict": 3000, "num_thread": 2, "temperature": 0.35},
-        }, timeout=240)
+            "format": "json", "stream": False, "think": False, "keep_alive": "2m",
+            "options": {"num_ctx": 4096, "num_predict": 1600, "num_thread": 2, "temperature": 0.2},
+        }, timeout=180)
         try:
             generated = json.loads(result.get("message", {}).get("content", "{}"))
             generated_scenes = generated.get("scenes", [])
