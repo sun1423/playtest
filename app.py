@@ -439,7 +439,7 @@ def work(job):
                 "bottom": "h-text_h-h*0.08",
             }[payload.get("overlay_position", "bottom")]
             drawtext = (
-                "drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+                "drawtext=fontfile=/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf"
                 f":textfile={text_file}:fontcolor=white:fontsize=48"
                 ":borderw=2:bordercolor=black:box=1:boxcolor=black@0.55"
                 f":boxborderw=16:x=(w-text_w)/2:y={position}"
