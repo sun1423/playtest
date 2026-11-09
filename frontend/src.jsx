@@ -137,7 +137,7 @@ function App() {
     form.append('trim_start', trimStart || '0');
     form.append('trim_end', trimEnd || '0');
     form.append('music_volume', String(musicVolume));
-    if (musicFile) form.append('music_file', musicFile);
+    if (audioMode === 'music' && musicFile) form.append('music_file', musicFile);
     form.append('overlay_text', overlayText);
     form.append('overlay_position', overlayPosition);
     if (subtitleFile) form.append('subtitle_file', subtitleFile);
