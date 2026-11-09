@@ -304,17 +304,19 @@ async def save_saved_project(
     project_data: str = Form(...),
     assets: list[UploadFile] = File(default=[]),
 ):
-    if kind != "storyboard":
+    if kind not in {"storyboard", "timeline"}:
         raise HTTPException(400, "Unsupported saved project type")
     try:
         data = json.loads(project_data)
     except (TypeError, ValueError):
         raise HTTPException(400, "Invalid project data")
     scenes = data.get("scenes") if isinstance(data, dict) else None
-    if not isinstance(scenes, list) or not 2 <= len(scenes) <= 10:
-        raise HTTPException(400, "A saved storyboard must contain 2 to 10 scenes")
+    minimum = 2 if kind == "storyboard" else 1
+    if not isinstance(scenes, list) or not minimum <= len(scenes) <= 10:
+        raise HTTPException(400, "A saved project must contain 1 to 10 scenes")
     if len(assets) > 12:
         raise HTTPException(400, "Too many project assets")
+    max_total = (120 if kind == "storyboard" else 500) * 1024 * 1024
     project_id = str(uuid.uuid4())
     folder = PROJECTS / project_id
     folder.mkdir()
@@ -324,14 +326,16 @@ async def save_saved_project(
         for index, upload in enumerate(assets):
             extension = Path(upload.filename or "").suffix.lower()
             allowed = {".jpg", ".jpeg", ".png", ".webp", ".mp3", ".wav", ".m4a", ".aac", ".ogg"}
+            if kind == "timeline":
+                allowed |= {".mp4", ".mov", ".mkv", ".webm", ".srt"}
             if extension not in allowed:
                 raise HTTPException(415, "Unsupported saved project asset")
             target = folder / f"asset_{index + 1:02d}{extension}"
             with target.open("xb") as output_file:
                 while chunk := await upload.read(256 * 1024):
                     total_size += len(chunk)
-                    if total_size > 120 * 1024 * 1024:
-                        raise HTTPException(413, "Saved project assets exceed 120 MB")
+                    if total_size > max_total:
+                        raise HTTPException(413, f"Saved project assets exceed {max_total // (1024 * 1024)} MB")
                     output_file.write(chunk)
             saved_assets.append({"filename": target.name, "original_name": Path(upload.filename or target.name).name})
             await upload.close()
