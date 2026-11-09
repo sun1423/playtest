@@ -643,6 +643,8 @@ def create_storyboard(request: StoryboardRequest):
             return "Atmospheric cinematic establishing shot"
         return "Medium cinematic shot illustrating the main action"
 
+    # The source narration is partitioned deterministically. The LLM is only
+    # responsible for creative metadata, never rewriting or shortening the script.
     scenes = []
     for index, group in enumerate(groups, 1):
         narration = " ".join(group)
@@ -654,59 +656,68 @@ def create_storyboard(request: StoryboardRequest):
             "image_prompt": f"Cinematic realistic visual for this scene: {narration}. No text, no captions, coherent visual style.",
             "shot_type": "cinematic",
         })
+
     selected_model = active_model()
     if selected_model:
+        scene_briefs = [
+            {"scene_number": index, "story": " ".join(group)}
+            for index, group in enumerate(groups, 1)
+        ]
         prompt = (
-            "Create a concise storyboard. Return ONLY JSON: {\"scenes\":[{\"title\":\"...\","
-            "\"narration\":\"...\",\"visual_direction\":\"...\",\"image_prompt\":\"...\","
-            "\"shot_type\":\"...\"}]}. Preserve every story event and original language; split the "
-            "source narration naturally without inventing facts or repeating it. Keep the same characters "
-            "and locations consistent. Each visual_direction must be at most 12 words and each image_prompt "
-            "at most 20 words. Use vivid, specific cinematic descriptions.\n"
-            f"Language: {request.language}\nCreate 2 to {request.max_scenes} scenes.\nSCRIPT:\n{script}"
+            "Create cinematic storyboard metadata for these already-separated scenes. Return ONLY JSON: "
+            "{\"scenes\":[{\"title\":\"...\",\"visual_direction\":\"...\","
+            "\"image_prompt\":\"...\",\"shot_type\":\"...\"}]}. Return exactly one object per "
+            "input scene, in the same order. Do NOT return narration and do NOT change, summarize, "
+            "translate, or omit any story detail. Titles must be short and accurate. Visual directions "
+            "must be at most 12 words. Image prompts must be at most 20 words, vivid, filmable and specific. "
+            "Keep character appearance, clothing, props and locations consistent across scenes. "
+            "Do not add facts or text inside the image.\n"
+            f"Language: {request.language}\nSCENE INPUTS:\n"
+            f"{json.dumps(scene_briefs, ensure_ascii=False)}"
         )
         result = ollama_chat(selected_model, {
             "model": selected_model,
             "messages": [{"role": "user", "content": prompt}],
             "format": "json", "stream": False, "think": False, "keep_alive": "2m",
             "options": {
-                "num_ctx": 3072, "num_predict": min(1600, max(600, request.max_scenes * 220)),
+                "num_ctx": 3072, "num_predict": min(1100, max(400, count * 140)),
                 "num_thread": 2, "temperature": 0.2,
             },
         }, timeout=180)
         try:
             generated = json.loads(result.get("message", {}).get("content", "{}"))
             generated_scenes = generated.get("scenes", [])
-            if not isinstance(generated_scenes, list) or not 2 <= len(generated_scenes) <= request.max_scenes:
+            if not isinstance(generated_scenes, list) or len(generated_scenes) != count:
                 raise ValueError("Invalid scene count")
             clean_scenes = []
-            for index, item in enumerate(generated_scenes, 1):
-                if not isinstance(item, dict):
-                    raise ValueError("Invalid scene structure")
+            required_fields = ("title", "visual_direction", "image_prompt", "shot_type")
+            for index, (item, base_scene) in enumerate(zip(generated_scenes, scenes), 1):
+                if not isinstance(item, dict) or any(
+                    not isinstance(item.get(field), str) or not item[field].strip()
+                    for field in required_fields
+                ):
+                    raise ValueError("A scene is missing required storyboard metadata")
                 clean_scenes.append({
                     "scene_number": index,
-                    "title": str(item.get("title", f"Scene {index}"))[:120],
-                    "narration": str(item.get("narration", ""))[:6000],
-                    "visual_direction": str(item.get("visual_direction", ""))[:1000],
-                    "image_prompt": str(item.get("image_prompt", ""))[:2000],
-                    "shot_type": str(item.get("shot_type", "cinematic"))[:80],
+                    "title": item["title"].strip()[:120],
+                    "narration": base_scene["narration"],
+                    "visual_direction": item["visual_direction"].strip()[:1000],
+                    "image_prompt": item["image_prompt"].strip()[:2000],
+                    "shot_type": item["shot_type"].strip()[:80],
                 })
-            required_fields = ("title", "narration", "visual_direction", "image_prompt", "shot_type")
-            if any(not all(scene[field].strip() for field in required_fields) for scene in clean_scenes):
-                raise ValueError("A scene is missing required storyboard content")
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
-            raise HTTPException(502, "The selected local model returned invalid storyboard JSON. Try the model test or another model.") from exc
+            raise HTTPException(502, "The selected local model returned invalid scene metadata. Try another model or the rule-based fallback.") from exc
         return {
             "language": request.language, "scene_count": len(clean_scenes),
             "total_words": len(script.split()), "scenes": clean_scenes,
-            "notice": f"Storyboard generated locally using {selected_model}. No cloud AI was used."
+            "notice": f"Scene metadata generated locally using {selected_model}; original narration preserved exactly."
         }
     return {
         "language": request.language,
         "scene_count": len(scenes),
         "total_words": len(script.split()),
         "scenes": scenes,
-        "notice": "Rule-based storyboard draft. Select and activate a downloaded local model to enable AI storyboarding."
+        "notice": "Rule-based storyboard draft. Select and activate a downloaded local model to enable AI scene metadata."
     }
 
 
