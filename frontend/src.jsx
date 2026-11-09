@@ -17,6 +17,11 @@ function App() {
   const [lang, setLang] = useState('hi');
   const [voice, setVoice] = useState('');
   const [file, setFile] = useState(null);
+  const [sceneFiles, setSceneFiles] = useState([]);
+  const [activeScene, setActiveScene] = useState(0);
+  const [scenePreviewUrl, setScenePreviewUrl] = useState('');
+  const [projectBusy, setProjectBusy] = useState(false);
+
   const [previewUrl, setPreviewUrl] = useState('');
   const [trimStart, setTrimStart] = useState('0');
   const [trimEnd, setTrimEnd] = useState('0');
@@ -96,6 +101,16 @@ function App() {
 
   useEffect(() => { checkSession(); }, []);
   useEffect(() => {
+    const selected = sceneFiles[activeScene]?.file;
+    if (!selected) {
+      setScenePreviewUrl('');
+      return undefined;
+    }
+    const url = URL.createObjectURL(selected);
+    setScenePreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [sceneFiles, activeScene]);
+  useEffect(() => {
     if (!file) {
       setPreviewUrl('');
       return undefined;
@@ -150,6 +165,65 @@ function App() {
     refresh();
   }
 
+  function addScenes(event) {
+    const incoming = Array.from(event.target.files || []);
+    setSceneFiles(current => [...current, ...incoming].slice(0, 10).map((scene, index) =>
+      scene.file ? scene : { id: `${Date.now()}-${index}-${scene.name}`, file: scene, trimStart: '0', trimEnd: '0' }
+    ));
+    event.target.value = '';
+  }
+
+  function updateScene(id, changes) {
+    setSceneFiles(current => current.map(scene => scene.id === id ? { ...scene, ...changes } : scene));
+  }
+
+  function moveScene(index, direction) {
+    setSceneFiles(current => {
+      const next = [...current];
+      const target = index + direction;
+      if (target < 0 || target >= next.length) return current;
+      [next[index], next[target]] = [next[target], next[index]];
+      setActiveScene(target);
+      return next;
+    });
+  }
+
+  function removeScene(id) {
+    setSceneFiles(current => current.filter(scene => scene.id !== id));
+    setActiveScene(0);
+  }
+
+  async function renderTimeline(event) {
+    event.preventDefault();
+    if (!sceneFiles.length) return;
+    const form = new FormData();
+    sceneFiles.forEach(scene => form.append('scenes', scene.file));
+    form.append('scene_settings', JSON.stringify(sceneFiles.map(scene => ({
+      trim_start: Number(scene.trimStart || 0),
+      trim_end: Number(scene.trimEnd || 0)
+    }))));
+    form.append('preset', preset);
+    form.append('framing', framing);
+    form.append('audio', audioMode);
+    form.append('music_volume', String(musicVolume));
+    form.append('overlay_text', overlayText);
+    form.append('overlay_position', overlayPosition);
+    if (audioMode === 'music' && musicFile) form.append('music_file', musicFile);
+    if (subtitleFile) form.append('subtitle_file', subtitleFile);
+    setProjectBusy(true);
+    try {
+      await api('/api/project', { method: 'POST', body: form });
+      setMsg(`Project with ${sceneFiles.length} scenes queued on Azure.`);
+      setSceneFiles([]);
+      setActiveScene(0);
+      refresh();
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      setProjectBusy(false);
+    }
+  }
+
   async function deleteMedia(url, description) {
     if (!window.confirm(`Permanently delete ${description}? This cannot be undone.`)) return;
     try {
@@ -176,6 +250,7 @@ function App() {
   const nav = [
     ['create', 'Create video', WandSparkles],
     ['transform', 'Transform', Film],
+    ['timeline', 'Timeline', Film],
     ['voice', 'Voice studio', Mic2],
     ['projects', 'Projects', FolderOpen]
   ];
@@ -267,6 +342,47 @@ function App() {
             <label className="drop"><Upload/><b>{subtitleFile?.name || 'Optional SRT subtitles'}</b><small>UTF-8 SRT · Hindi and English · 2 MB max</small><input type="file" accept=".srt,application/x-subrip" onChange={event => setSubtitleFile(event.target.files[0])}/></label>
             <button className="primary" disabled={!file || busy || (audioMode === 'music' && !musicFile) || (trimEnd !== '0' && Number(trimEnd) <= Number(trimStart))}>Queue video transform</button>
           </form>
+        </section>}
+        {tab === 'timeline' && <section className="timeline-workspace">
+          <span>MULTI-SCENE EDITOR</span><h1>Build your story.</h1>
+          <p>Add up to 10 clips, arrange their order, set an individual trim range and render them as one video. Each scene is normalised before joining.</p>
+          <label className="drop"><Upload/><b>Add video scenes</b><small>MP4 / MOV / MKV / WebM · up to 10 scenes · 500 MB total</small><input type="file" accept="video/*" multiple onChange={addScenes}/></label>
+          {sceneFiles.length > 0 && <>
+            <div className="timeline-summary">{sceneFiles.length} / 10 scenes · drag order with the arrows</div>
+            {scenePreviewUrl && <div className="video-preview"><video src={scenePreviewUrl} controls playsInline preload="metadata"/><small>Selected scene preview · local browser playback</small></div>}
+            <div className="scene-list">
+              {sceneFiles.map((scene, index) => <article className={"scene-card " + (activeScene === index ? "selected" : "")} key={scene.id} onClick={() => setActiveScene(index)}>
+                <div className="scene-heading">
+                  <button type="button" className="scene-select"><b>{String(index + 1).padStart(2, '0')} · {scene.file.name}</b></button>
+                  <div className="scene-actions">
+                    <button type="button" title="Move scene up" disabled={index === 0} onClick={event => {event.stopPropagation();moveScene(index,-1);}}>↑</button>
+                    <button type="button" title="Move scene down" disabled={index === sceneFiles.length - 1} onClick={event => {event.stopPropagation();moveScene(index,1);}}>↓</button>
+                    <button type="button" className="danger" onClick={event => {event.stopPropagation();removeScene(scene.id);}}> <Trash2 size={14}/> Remove</button>
+                  </div>
+                </div>
+                <div className="row scene-trim">
+                  <label>START (SECONDS)<input type="number" min="0" max="14400" step="0.1" value={scene.trimStart} onChange={event => updateScene(scene.id,{trimStart:event.target.value})}/></label>
+                  <label>END (0 = FULL CLIP)<input type="number" min="0" max="14400" step="0.1" value={scene.trimEnd} onChange={event => updateScene(scene.id,{trimEnd:event.target.value})}/></label>
+                </div>
+                {Number(scene.trimEnd) > 0 && Number(scene.trimEnd) <= Number(scene.trimStart) && <small className="validation-error">End must be greater than start.</small>}
+              </article>)}
+            </div>
+            <form onSubmit={renderTimeline}>
+              <div className="row">
+                <label>EXPORT FORMAT<select value={preset} onChange={event => setPreset(event.target.value)}><option value="reel">Reels / Shorts · 9:16</option><option value="landscape">YouTube · 16:9</option><option value="square">Square · 1:1</option></select></label>
+                <label>FRAMING<select value={framing} onChange={event => setFraming(event.target.value)}><option value="fill">Fill · crop edges</option><option value="fit">Fit · black bars</option></select></label>
+              </div>
+              <label>AUDIO<select value={audioMode} onChange={event => setAudioMode(event.target.value)}><option value="keep">Keep scene audio</option><option value="mute">Mute all audio</option><option value="music">Replace with background music</option></select></label>
+              {audioMode === 'music' && <>
+                <label className="drop"><Upload/><b>{musicFile?.name || 'Choose background music'}</b><small>MP3 / WAV / M4A / AAC / OGG · 30 MB max</small><input type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,audio/*" onChange={event => setMusicFile(event.target.files[0])}/></label>
+                <label>MUSIC VOLUME · {Math.round(musicVolume * 100)}%<input type="range" min="0" max="1.5" step="0.05" value={musicVolume} onChange={event => setMusicVolume(Number(event.target.value))}/></label>
+              </>}
+              <label>PROJECT TITLE (OPTIONAL)<input value={overlayText} maxLength={160} onChange={event => setOverlayText(event.target.value)} placeholder="Add a title to the finished video"/></label>
+              <label>TITLE POSITION<select value={overlayPosition} onChange={event => setOverlayPosition(event.target.value)}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select></label>
+              <label className="drop"><Upload/><b>{subtitleFile?.name || 'Optional SRT subtitles'}</b><small>UTF-8 · Hindi and English · 2 MB max</small><input type="file" accept=".srt" onChange={event => setSubtitleFile(event.target.files[0])}/></label>
+              <button className="primary" disabled={projectBusy || sceneFiles.some(scene => Number(scene.trimEnd) > 0 && Number(scene.trimEnd) <= Number(scene.trimStart)) || (audioMode === 'music' && !musicFile)}>Render {sceneFiles.length} scenes as one video</button>
+            </form>
+          </>}
         </section>}
         {tab === 'voice' && <section>
           <span>VOICE LIBRARY</span><h1>Your voice profiles.</h1>
