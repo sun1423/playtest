@@ -263,7 +263,7 @@ class ModelTestRequest(BaseModel):
 class StoryboardRequest(BaseModel):
     script: str = Field(min_length=20, max_length=12000)
     language: str = Field(default="en", pattern="^(hi|en)$")
-    max_scenes: int = Field(default=8, ge=2, le=10)
+    max_scenes: int = Field(default=4, ge=2, le=10)
 
 
 @app.on_event("startup")
@@ -632,18 +632,22 @@ def create_storyboard(request: StoryboardRequest):
     selected_model = active_model()
     if selected_model:
         prompt = (
-            "Create a production-ready storyboard from the script below. Return ONLY valid JSON with "
-            "one object containing a scenes array. Each scene must have title, narration, visual_direction, "
-            "image_prompt, and shot_type. Preserve the original story and language, distribute narration "
-            "across 2 to the requested maximum scenes, keep visual prompts specific and cinematic, and "
-            "maintain character/location continuity. Do not add facts.\n"
-            f"Language: {request.language}\nMaximum scenes: {request.max_scenes}\nSCRIPT:\n{script}"
+            "Create a concise storyboard. Return ONLY JSON: {\"scenes\":[{\"title\":\"...\","
+            "\"narration\":\"...\",\"visual_direction\":\"...\",\"image_prompt\":\"...\","
+            "\"shot_type\":\"...\"}]}. Preserve every story event and original language; split the "
+            "source narration naturally without inventing facts or repeating it. Keep the same characters "
+            "and locations consistent. Each visual_direction must be at most 12 words and each image_prompt "
+            "at most 20 words. Use vivid, specific cinematic descriptions.\n"
+            f"Language: {request.language}\nCreate 2 to {request.max_scenes} scenes.\nSCRIPT:\n{script}"
         )
         result = ollama_call("/api/chat", {
             "model": selected_model,
             "messages": [{"role": "user", "content": prompt}],
             "format": "json", "stream": False, "think": False, "keep_alive": "2m",
-            "options": {"num_ctx": 4096, "num_predict": 1600, "num_thread": 2, "temperature": 0.2},
+            "options": {
+                "num_ctx": 3072, "num_predict": min(1600, max(600, request.max_scenes * 220)),
+                "num_thread": 2, "temperature": 0.2,
+            },
         }, timeout=180)
         try:
             generated = json.loads(result.get("message", {}).get("content", "{}"))
