@@ -15,6 +15,11 @@ function App() {
   const [voices, setVoices] = useState([]);
   const [text, setText] = useState('');
   const [lang, setLang] = useState('hi');
+  const [storyScript, setStoryScript] = useState('');
+  const [storyLanguage, setStoryLanguage] = useState('en');
+  const [storySceneLimit, setStorySceneLimit] = useState('8');
+  const [storyScenes, setStoryScenes] = useState([]);
+  const [storyBusy, setStoryBusy] = useState(false);
   const [voice, setVoice] = useState('');
   const [file, setFile] = useState(null);
   const [sceneFiles, setSceneFiles] = useState([]);
@@ -227,6 +232,40 @@ function App() {
     }
   }
 
+  async function generateStoryboard(event) {
+    event.preventDefault();
+    setStoryBusy(true);
+    try {
+      const result = await api('/api/storyboard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ script: storyScript, language: storyLanguage, max_scenes: Number(storySceneLimit) })
+      });
+      setStoryScenes(result.scenes);
+      setMsg(`Storyboard drafted: ${result.scene_count} scenes, ${result.total_words} words.`);
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      setStoryBusy(false);
+    }
+  }
+
+  function updateStoryboardScene(index, changes) {
+    setStoryScenes(current => current.map((scene, i) => i === index ? { ...scene, ...changes } : scene));
+  }
+
+  async function copyStoryboard() {
+    const content = storyScenes.map(scene =>
+      `SCENE ${scene.scene_number}: ${scene.title}\nNARRATION: ${scene.narration}\nVISUAL: ${scene.visual_direction}\nIMAGE PROMPT: ${scene.image_prompt}`
+    ).join('\n\n');
+    try {
+      await navigator.clipboard.writeText(content);
+      setMsg('Storyboard copied to clipboard.');
+    } catch {
+      setMsg('Clipboard access unavailable. Select and copy the storyboard text manually.');
+    }
+  }
+
   async function deleteMedia(url, description) {
     if (!window.confirm(`Permanently delete ${description}? This cannot be undone.`)) return;
     try {
@@ -252,6 +291,7 @@ function App() {
 
   const nav = [
     ['create', 'Create video', WandSparkles],
+    ['storyboard', 'Storyboard', Film],
     ['transform', 'Transform', Film],
     ['timeline', 'Timeline', Film],
     ['voice', 'Voice studio', Mic2],
@@ -312,6 +352,33 @@ function App() {
             <button className="primary" disabled={busy || !text.trim()}><Play size={16}/> Generate narration</button>
           </form>
           <div className="note">● Single neural worker　● CPU inference　● Azure jobs</div>
+        </section>}
+        {tab === 'storyboard' && <section className="storyboard-workspace">
+          <span>SCRIPT TO STORYBOARD</span><h1>Plan every scene.</h1>
+          <p>Paste a Hindi or English script. FRAME / AI will split it into editable scenes with narration and suggested visual directions. This first version uses local rules, not a cloud AI model.</p>
+          <form onSubmit={generateStoryboard}>
+            <label>YOUR STORY / SCRIPT
+              <textarea rows="9" maxLength="12000" value={storyScript} onChange={event => setStoryScript(event.target.value)} placeholder="Paste your story here. Use blank lines to indicate scene changes…" required/>
+            </label>
+            <div className="row">
+              <label>LANGUAGE<select value={storyLanguage} onChange={event => setStoryLanguage(event.target.value)}><option value="en">English</option><option value="hi">Hindi</option></select></label>
+              <label>MAX SCENES<select value={storySceneLimit} onChange={event => setStorySceneLimit(event.target.value)}>{[2,3,4,5,6,7,8,9,10].map(n => <option key={n} value={n}>{n} scenes</option>)}</select></label>
+            </div>
+            <button className="primary" disabled={storyBusy || storyScript.trim().length < 20}>{storyBusy ? 'Building storyboard…' : 'Create storyboard draft'}</button>
+          </form>
+          {storyScenes.length > 0 && <>
+            <div className="storyboard-toolbar"><b>{storyScenes.length} editable scenes</b><button type="button" onClick={copyStoryboard}>Copy storyboard</button></div>
+            <div className="storyboard-scenes">
+              {storyScenes.map((scene,index) => <article className="story-scene" key={scene.scene_number}>
+                <div className="story-scene-head"><b>SCENE {String(scene.scene_number).padStart(2,'0')}</b><small>{scene.narration.trim().split(/\s+/).filter(Boolean).length} narration words</small></div>
+                <label>SCENE TITLE<input value={scene.title} onChange={event => updateStoryboardScene(index,{title:event.target.value})}/></label>
+                <label>NARRATION<textarea rows="3" value={scene.narration} onChange={event => updateStoryboardScene(index,{narration:event.target.value})}/></label>
+                <label>VISUAL DIRECTION<textarea rows="2" value={scene.visual_direction} onChange={event => updateStoryboardScene(index,{visual_direction:event.target.value})}/></label>
+                <label>IMAGE PROMPT<textarea rows="3" value={scene.image_prompt} onChange={event => updateStoryboardScene(index,{image_prompt:event.target.value})}/></label>
+              </article>)}
+            </div>
+            <p className="storyboard-note">These are editable production notes. No images or video clips are generated at this stage.</p>
+          </>}
         </section>}
         {tab === 'transform' && <section>
           <span>UPLOAD WORKFLOW</span><h1>Reframe your footage.</h1>
