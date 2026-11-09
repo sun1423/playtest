@@ -22,6 +22,7 @@ function App() {
   const [audioMode, setAudioMode] = useState('keep');
   const [overlayText, setOverlayText] = useState('');
   const [overlayPosition, setOverlayPosition] = useState('bottom');
+  const [subtitleFile, setSubtitleFile] = useState(null);
   const [name, setName] = useState('');
   const [wav, setWav] = useState(null);
   const [msg, setMsg] = useState('');
@@ -121,6 +122,7 @@ function App() {
     form.append('audio', audioMode);
     form.append('overlay_text', overlayText);
     form.append('overlay_position', overlayPosition);
+    if (subtitleFile) form.append('subtitle_file', subtitleFile);
     setBusy(true);
     try {
       await api('/api/video', { method: 'POST', body: form });
@@ -229,6 +231,7 @@ function App() {
               <input value={overlayText} maxLength={160} onChange={event => setOverlayText(event.target.value)} placeholder="Add a title or short message (160 characters max)"/>
             </label>
             <label>TEXT POSITION<select value={overlayPosition} onChange={event => setOverlayPosition(event.target.value)}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select></label>
+            <label className="drop"><Upload/><b>{subtitleFile?.name || 'Optional SRT subtitles'}</b><small>UTF-8 SRT · Hindi and English · 2 MB max</small><input type="file" accept=".srt,application/x-subrip" onChange={event => setSubtitleFile(event.target.files[0])}/></label>
             <button className="primary" disabled={!file || busy}>Queue video transform</button>
           </form>
         </section>}
