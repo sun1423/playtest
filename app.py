@@ -617,8 +617,8 @@ def delete_saved_project(project_id: str):
 
 @app.post("/api/storyboard")
 def create_storyboard(request: StoryboardRequest):
-    script = request.script.strip()
-    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", script) if part.strip()]
+    script = " ".join(request.script.split())
+    paragraphs = [script] if script else []
     sentences = []
     for paragraph in paragraphs:
         parts = re.split(r"(?<=[.!?।])\s+", paragraph)
