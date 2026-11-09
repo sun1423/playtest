@@ -719,7 +719,7 @@ function App() {
             <button className="primary" disabled={writerBusy || writerTopic.trim().length < 8}>{writerBusy ? 'Writing with local AI…' : 'Generate script'}</button>
           </form>
           {writerResult && <div className="writer-result">
-            <div className="writer-result-heading"><h2>{writerResult.title}</h2><small>{writerResult.word_count} words · estimated {writerResult.estimated_duration_seconds}s · {writerResult.model}</small></div>
+            <div className="writer-result-heading"><h2>{writerResult.title}</h2><small>{writerDraft.trim().split(/\s+/).filter(Boolean).length} words · target {writerResult.target_duration_seconds}s · {writerResult.model}</small></div>
             <label>EDIT YOUR NARRATION
               <textarea rows="14" maxLength="14000" value={writerDraft} onChange={event => setWriterDraft(event.target.value)}/>
             </label>
