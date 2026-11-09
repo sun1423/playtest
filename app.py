@@ -668,6 +668,8 @@ def create_storyboard(request: StoryboardRequest):
             "properties": {
                 "scenes": {
                     "type": "array",
+                    "minItems": count,
+                    "maxItems": count,
                     "items": {
                         "type": "object",
                         "properties": {
