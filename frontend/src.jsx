@@ -17,6 +17,15 @@ function App() {
   const [lang, setLang] = useState('hi');
   const [storyScript, setStoryScript] = useState('');
   const [storyLanguage, setStoryLanguage] = useState('en');
+  const [writerTopic, setWriterTopic] = useState('');
+  const [writerLanguage, setWriterLanguage] = useState('en');
+  const [writerDuration, setWriterDuration] = useState('60');
+  const [writerTone, setWriterTone] = useState('engaging');
+  const [writerAudience, setWriterAudience] = useState('general audience');
+  const [writerKeyPoints, setWriterKeyPoints] = useState('');
+  const [writerDraft, setWriterDraft] = useState('');
+  const [writerResult, setWriterResult] = useState(null);
+  const [writerBusy, setWriterBusy] = useState(false);
   const [storySceneLimit, setStorySceneLimit] = useState('4');
   const [storyScenes, setStoryScenes] = useState([]);
   const [storyBusy, setStoryBusy] = useState(false);
@@ -329,6 +338,47 @@ function App() {
     }
   }
 
+  async function generateWrittenScript(event) {
+    event.preventDefault();
+    setWriterBusy(true);
+    setWriterResult(null);
+    setWriterDraft('');
+    try {
+      const result = await api('/api/script', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          topic: writerTopic, language: writerLanguage, duration_seconds: Number(writerDuration),
+          tone: writerTone, audience: writerAudience, key_points: writerKeyPoints
+        })
+      });
+      setWriterResult(result);
+      setWriterDraft(result.full_script);
+      setMsg(`Script drafted locally: ${result.word_count} words.`);
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      setWriterBusy(false);
+    }
+  }
+
+  async function copyWriterScript() {
+    try {
+      await navigator.clipboard.writeText(writerDraft);
+      setMsg('Script copied to clipboard.');
+    } catch {
+      setMsg('Clipboard access unavailable. Select and copy the script manually.');
+    }
+  }
+
+  function useWriterScript() {
+    if (!writerDraft.trim()) return;
+    setStoryScript(writerDraft.trim());
+    setStoryLanguage(writerLanguage);
+    setTab('storyboard');
+    setMsg('Script transferred to Storyboard. Choose your scene count and create the visual plan.');
+  }
+
   function updateStoryboardScene(index, changes) {
     setStoryScenes(current => current.map((scene, i) => i === index ? { ...scene, ...changes } : scene));
   }
@@ -579,6 +629,7 @@ function App() {
 
   const nav = [
     ['create', 'Create video', WandSparkles],
+    ['writer', 'Script Writer', WandSparkles],
     ['storyboard', 'Storyboard', Film],
     ['transform', 'Transform', Film],
     ['timeline', 'Timeline', Film],
@@ -646,6 +697,38 @@ function App() {
             <button className="primary" disabled={busy || !text.trim()}><Play size={16}/> Generate narration</button>
           </form>
           <div className="note">● Single neural worker　● CPU inference　● Azure jobs</div>
+        </section>}
+        {tab === 'writer' && <section className="script-writer-workspace">
+          <span>PRIVATE LOCAL SCRIPT WRITER</span><h1>Start with an idea.</h1>
+          <p>Turn a topic into a narration-ready Hindi or English video script. Drafting uses your selected local Ollama model; no cloud LLM is called.</p>
+          <form onSubmit={generateWrittenScript}>
+            <label>VIDEO IDEA / TOPIC
+              <textarea rows="4" maxLength="1200" value={writerTopic} onChange={event => setWriterTopic(event.target.value)} placeholder="Describe what the video should explain or tell…" required/>
+            </label>
+            <div className="row">
+              <label>LANGUAGE<select value={writerLanguage} onChange={event => setWriterLanguage(event.target.value)}><option value="en">English</option><option value="hi">Hindi</option></select></label>
+              <label>TARGET DURATION<select value={writerDuration} onChange={event => setWriterDuration(event.target.value)}><option value="30">30 seconds</option><option value="60">1 minute</option><option value="90">90 seconds</option><option value="120">2 minutes</option><option value="180">3 minutes</option></select></label>
+            </div>
+            <div className="row">
+              <label>TONE<select value={writerTone} onChange={event => setWriterTone(event.target.value)}><option value="engaging">Engaging</option><option value="documentary">Documentary</option><option value="emotional">Emotional</option><option value="conversational">Conversational</option><option value="dramatic">Dramatic</option></select></label>
+              <label>AUDIENCE<input maxLength="160" value={writerAudience} onChange={event => setWriterAudience(event.target.value)} placeholder="General audience"/></label>
+            </div>
+            <label>KEY POINTS (OPTIONAL)
+              <textarea rows="3" maxLength="1200" value={writerKeyPoints} onChange={event => setWriterKeyPoints(event.target.value)} placeholder="Important facts or points the script must include…"/>
+            </label>
+            <button className="primary" disabled={writerBusy || writerTopic.trim().length < 8}>{writerBusy ? 'Writing with local AI…' : 'Generate script'}</button>
+          </form>
+          {writerResult && <div className="writer-result">
+            <div className="writer-result-heading"><h2>{writerResult.title}</h2><small>{writerResult.word_count} words · estimated {writerResult.estimated_duration_seconds}s · {writerResult.model}</small></div>
+            <label>EDIT YOUR NARRATION
+              <textarea rows="14" maxLength="14000" value={writerDraft} onChange={event => setWriterDraft(event.target.value)}/>
+            </label>
+            <div className="writer-actions">
+              <button type="button" className="primary" disabled={!writerDraft.trim()} onClick={useWriterScript}>Use in storyboard</button>
+              <button type="button" disabled={!writerDraft.trim()} onClick={copyWriterScript}>Copy script</button>
+            </div>
+            <p className="storyboard-note">{writerResult.notice}</p>
+          </div>}
         </section>}
         {tab === 'storyboard' && <section className="storyboard-workspace">
           <span>SCRIPT TO STORYBOARD</span><h1>Plan every scene.</h1>
