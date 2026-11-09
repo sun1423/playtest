@@ -9,6 +9,7 @@ import secrets
 import subprocess
 import importlib.util
 import shutil
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime, timezone
@@ -180,6 +181,12 @@ class TTS(BaseModel):
     voice_id: str = ""
 
 
+class StoryboardRequest(BaseModel):
+    script: str = Field(min_length=20, max_length=12000)
+    language: str = Field(default="en", pattern="^(hi|en)$")
+    max_scenes: int = Field(default=8, ge=2, le=10)
+
+
 @app.on_event("startup")
 def startup():
     if not SESSION_SECRET or not ADMIN_PASSWORD_HASH:
@@ -274,6 +281,54 @@ def jobs():
         item["payload"] = json.loads(item["payload"])
         result.append(item)
     return result
+
+
+@app.post("/api/storyboard")
+def create_storyboard(request: StoryboardRequest):
+    script = request.script.strip()
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", script) if part.strip()]
+    sentences = []
+    for paragraph in paragraphs:
+        parts = re.split(r"(?<=[.!?।])\s+", paragraph)
+        sentences.extend(part.strip() for part in parts if part.strip())
+    if len(sentences) < 2:
+        raise HTTPException(400, "Add at least two sentences or separate scene ideas with blank lines.")
+
+    count = min(request.max_scenes, len(sentences))
+    groups = [[] for _ in range(count)]
+    for index, sentence in enumerate(sentences):
+        groups[min(count - 1, index * count // len(sentences))].append(sentence)
+
+    def shot_for(text):
+        value = text.lower()
+        if any(word in value for word in ("यात्रा", "सफर", "travel", "road", "journey", "चल", "दौड़")):
+            return "Wide moving shot showing the journey or movement"
+        if any(word in value for word in ("चेहरा", "आँख", "भावना", "डर", "खुशी", "face", "emotion", "fear", "smile")):
+            return "Close-up focused on the character's expression"
+        if any(word in value for word in ("शहर", "गाँव", "जंगल", "समुद्र", "पहाड़", "city", "village", "forest", "ocean", "mountain")):
+            return "Establishing wide shot of the location"
+        if any(word in value for word in ("समय", "सुबह", "रात", "दिन", "आसमान", "sunrise", "night", "morning", "sky")):
+            return "Atmospheric cinematic establishing shot"
+        return "Medium cinematic shot illustrating the main action"
+
+    scenes = []
+    for index, group in enumerate(groups, 1):
+        narration = " ".join(group)
+        scenes.append({
+            "scene_number": index,
+            "title": f"Scene {index}",
+            "narration": narration,
+            "visual_direction": shot_for(narration),
+            "image_prompt": f"Cinematic realistic visual for this scene: {narration}. No text, no captions, coherent visual style.",
+            "shot_type": "cinematic",
+        })
+    return {
+        "language": request.language,
+        "scene_count": len(scenes),
+        "total_words": len(script.split()),
+        "scenes": scenes,
+        "notice": "Structured storyboard draft generated from your script using local rules. Visual directions are editable suggestions, not AI-generated images."
+    }
 
 
 @app.post("/api/tts")
