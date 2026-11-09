@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""Remote GPU worker for AI Video Studio VACE + custom-voice jobs.
+
+Run this on a temporary GPU session (for example, Kaggle) with the
+VACE repository/model and Chatterbox Multilingual V3 installed.
+Only the runner token is allowed to access the protected runner endpoints.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+from urllib.parse import urljoin
+
+import requests
+
+API_BASE = os.getenv("STUDIO_API_URL", "").rstrip("/")
+RUNNER_TOKEN = os.getenv("STUDIO_VACE_RUNNER_TOKEN", "")
+VACE_ROOT = Path(os.getenv("VACE_ROOT", "/kaggle/working/VACE")).resolve()
+VACE_CHECKPOINT_DIR = Path(
+    os.getenv("VACE_CHECKPOINT_DIR", str(VACE_ROOT / "models" / "Wan2.1-VACE-1.3B"))
+).resolve()
+WORK_ROOT = Path(os.getenv("VACE_WORK_ROOT", "/kaggle/working/studio-vace-jobs"))
+POLL_SECONDS = int(os.getenv("VACE_POLL_SECONDS", "15"))
+CLIP_SECONDS = 5.0625
+FRAME_COUNT = 81
+
+
+def load_kaggle_secrets() -> None:
+    global API_BASE, RUNNER_TOKEN
+    try:
+        from kaggle_secrets import UserSecretsClient
+        secrets = UserSecretsClient()
+        API_BASE = API_BASE or secrets.get_secret("STUDIO_API_URL").rstrip("/")
+        RUNNER_TOKEN = RUNNER_TOKEN or secrets.get_secret("STUDIO_VACE_RUNNER_TOKEN")
+    except Exception:
+        pass
+
+
+def session() -> requests.Session:
+    client = requests.Session()
+    client.headers.update({"Authorization": "Bearer " + RUNNER_TOKEN})
+    return client
+
+
+def api_url(path: str) -> str:
+    return urljoin(API_BASE + "/", path.lstrip("/"))
+
+
+def post_progress(client: requests.Session, job_id: str, stage: str, progress: int) -> None:
+    response = client.post(
+        api_url(f"/api/vace/runner/jobs/{job_id}/progress"),
+        json={"stage": stage, "progress": progress},
+        timeout=30,
+    )
+    response.raise_for_status()
+
+
+def download_file(client: requests.Session, path: str, destination: Path) -> None:
+    with client.get(api_url(path), stream=True, timeout=(30, 300)) as response:
+        response.raise_for_status()
+        with destination.open("wb") as output:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    output.write(chunk)
+
+
+def run_command(command: list[str], cwd: Path, log_path: Path, client: requests.Session,
+                job_id: str, stage: str, start_progress: int, end_progress: int) -> None:
+    started = time.monotonic()
+    with log_path.open("w", encoding="utf-8") as log:
+        process = subprocess.Popen(
+            command, cwd=str(cwd), stdout=log, stderr=subprocess.STDOUT,
+            text=True, env=os.environ.copy(),
+        )
+        last_ping = 0.0
+        while process.poll() is None:
+            now = time.monotonic()
+            if now - last_ping >= 20:
+                elapsed = now - started
+                progress = min(end_progress, start_progress + int(elapsed // 30))
+                post_progress(client, job_id, stage, progress)
+                last_ping = now
+            time.sleep(5)
+    if process.returncode != 0:
+        tail = log_path.read_text(encoding="utf-8", errors="replace")[-5000:]
+        raise RuntimeError(f"{stage} failed (exit {process.returncode}):\n{tail}")
+
+
+def probe_duration(path: Path) -> float:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+        capture_output=True, text=True, check=True, timeout=30,
+    )
+    return float(result.stdout.strip())
+
+
+def has_audio(path: Path) -> bool:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a",
+         "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True, check=True, timeout=30,
+    )
+    return bool(result.stdout.strip())
+
+
+def generate_custom_voice(text: str, language: str, reference_wav: Path, destination: Path) -> None:
+    import torch
+    import torchaudio
+    from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = ChatterboxMultilingualTTS.from_pretrained(device=device, t3_model="v3")
+    with torch.inference_mode():
+        audio = model.generate(
+            text,
+            language_id=language,
+            audio_prompt_path=str(reference_wav),
+        )
+    torchaudio.save(str(destination), audio.detach().cpu(), model.sr)
+    del model, audio
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def mux_narration(vace_video: Path, narration_wav: Path, source_video: Path,
+                  keep_source_audio: bool, destination: Path) -> None:
+    audio_duration = probe_duration(narration_wav)
+    video_duration = probe_duration(vace_video)
+    pad_duration = max(0.0, audio_duration - video_duration) + 0.25
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+               "-i", str(vace_video), "-i", str(narration_wav)]
+    mix_filter = "[1:a:0]volume=1.0[voice]"
+    audio_map = "[voice]"
+    if keep_source_audio and has_audio(source_video):
+        command += ["-i", str(source_video)]
+        mix_filter += ";[2:a:0]volume=0.16[original];[voice][original]amix=inputs=2:duration=first:dropout_transition=2[mix]"
+        audio_map = "[mix]"
+    command += [
+        "-filter_complex", mix_filter,
+        "-map", "0:v:0", "-map", audio_map,
+        "-vf", "tpad=stop_mode=clone:stop_duration=" + f"{pad_duration:.3f}",
+        "-t", f"{audio_duration:.3f}",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-threads", "2",
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
+        "-movflags", "+faststart", str(destination),
+    ]
+    subprocess.run(command, check=True, timeout=1800, capture_output=True, text=True)
+
+
+def process_job(client: requests.Session, job: dict) -> None:
+    job_id = job["id"]
+    job_dir = WORK_ROOT / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    source = job_dir / "source_video"
+    reference = job_dir / "voice_reference.wav"
+    normalized = job_dir / "normalized.mp4"
+    output_dir = job_dir / "vace_output"
+    output_dir.mkdir(exist_ok=True)
+    narration_wav = job_dir / "custom_narration.wav"
+    final_video = job_dir / "final_video.mp4"
+
+    try:
+        post_progress(client, job_id, "Downloading source and custom voice", 8)
+        download_file(client, job["input_url"], source)
+        download_file(client, job["voice_url"], reference)
+
+        post_progress(client, job_id, "Preparing 480p VACE input", 12)
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+             "-i", str(source), "-t", f"{CLIP_SECONDS:.4f}",
+             "-vf", "fps=16,scale=832:480:force_original_aspect_ratio=decrease,"
+                    "pad=832:480:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p",
+             "-an", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
+             "-threads", "2", str(normalized)],
+            check=True, timeout=300, capture_output=True, text=True,
+        )
+
+        post_progress(client, job_id, "Running Wan2.1 VACE video editing", 20)
+        command = [
+            os.getenv("VACE_PYTHON", "python"), "vace/vace_pipeline.py",
+            "--base", "wan", "--task", job.get("motion_mode", "flow"),
+            "--video", str(normalized), "--prompt", job["prompt"],
+            "--ckpt_dir", str(VACE_CHECKPOINT_DIR),
+            "--size", "480p", "--frame_num", str(FRAME_COUNT),
+            "--save_dir", str(output_dir), "--offload_model", "True",
+        ]
+        run_command(
+            command, VACE_ROOT, job_dir / "vace.log", client, job_id,
+            "VACE video generation", 22, 70,
+        )
+        candidates = sorted(output_dir.glob("*.mp4"), key=lambda p: p.stat().st_size, reverse=True)
+        if not candidates:
+            raise RuntimeError("VACE finished without producing an MP4 file.")
+
+        post_progress(client, job_id, "Generating your custom voice narration", 76)
+        generate_custom_voice(
+            job["narration"], job["language"], reference, narration_wav
+        )
+
+        post_progress(client, job_id, "Combining video and custom voice", 88)
+        mux_narration(
+            candidates[0], narration_wav, source,
+            bool(job.get("keep_source_audio")), final_video,
+        )
+
+        post_progress(client, job_id, "Uploading finished video to Studio", 94)
+        with final_video.open("rb") as video_file:
+            response = client.post(
+                api_url(f"/api/vace/runner/jobs/{job_id}/complete"),
+                files={"file": ("final_video.mp4", video_file, "video/mp4")},
+                timeout=(30, 900),
+            )
+        response.raise_for_status()
+        print(f"Completed VACE job {job_id}")
+    except Exception as exc:
+        try:
+            client.post(
+                api_url(f"/api/vace/runner/jobs/{job_id}/fail"),
+                json={"error": str(exc)[:2000]},
+                timeout=30,
+            ).raise_for_status()
+        except Exception as report_error:
+            print(f"Could not report VACE failure: {report_error}")
+        raise
+    finally:
+        shutil.rmtree(job_dir, ignore_errors=True)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="AI Video Studio remote VACE GPU runner")
+    parser.add_argument("--once", action="store_true", help="Check for at most one job, then exit.")
+    parser.add_argument("--poll-seconds", type=int, default=POLL_SECONDS)
+    args = parser.parse_args()
+
+    load_kaggle_secrets()
+    if not API_BASE.startswith("https://") and not API_BASE.startswith("http://"):
+        raise SystemExit("Set STUDIO_API_URL to the public base URL of your AI Video Studio.")
+    if not RUNNER_TOKEN:
+        raise SystemExit("Set STUDIO_VACE_RUNNER_TOKEN as an environment variable or Kaggle secret.")
+    if not (VACE_ROOT / "vace" / "vace_pipeline.py").is_file():
+        raise SystemExit(f"VACE source not found at {VACE_ROOT}. Follow KAGGLE_VACE_SETUP.md.")
+    if not VACE_CHECKPOINT_DIR.is_dir():
+        raise SystemExit(f"VACE checkpoint directory not found: {VACE_CHECKPOINT_DIR}")
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        raise SystemExit("FFmpeg and ffprobe must be installed in the GPU runtime.")
+
+    WORK_ROOT.mkdir(parents=True, exist_ok=True)
+    client = session()
+    print("VACE remote runner connected. Model: Wan2.1-VACE-1.3B; custom voice: Chatterbox V3.")
+    while True:
+        response = client.post(api_url("/api/vace/runner/next"), timeout=30)
+        response.raise_for_status()
+        job = response.json().get("job")
+        if job:
+            try:
+                process_job(client, job)
+            except Exception as exc:
+                print(f"Job {job.get('id')} failed: {exc}")
+        elif args.once:
+            print("No queued VACE jobs.")
+            return
+        if args.once:
+            return
+        time.sleep(max(5, args.poll_seconds))
+
+
+if __name__ == "__main__":
+    main()
