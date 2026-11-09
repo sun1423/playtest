@@ -294,6 +294,57 @@ function App() {
     }
   }
 
+  function renumberStoryboard(scenes) {
+    return scenes.map((scene, index) => ({ ...scene, scene_number: index + 1 }));
+  }
+
+  function moveStoryboardScene(index, direction) {
+    setStoryScenes(current => {
+      const next = [...current];
+      const target = index + direction;
+      if (target < 0 || target >= next.length) return current;
+      [next[index], next[target]] = [next[target], next[index]];
+      return renumberStoryboard(next);
+    });
+  }
+
+  function removeStoryboardScene(index) {
+    setStoryScenes(current => renumberStoryboard(current.filter((_, i) => i !== index)));
+  }
+
+  function duplicateStoryboardScene(index) {
+    setStoryScenes(current => {
+      if (current.length >= 10) {
+        setMsg('A storyboard can contain at most 10 scenes.');
+        return current;
+      }
+      const next = [...current];
+      const copy = { ...current[index], title: current[index].title + ' (copy)' };
+      next.splice(index + 1, 0, copy);
+      return renumberStoryboard(next);
+    });
+  }
+
+  function addStoryboardScene() {
+    setStoryScenes(current => {
+      if (current.length >= 10) {
+        setMsg('A storyboard can contain at most 10 scenes.');
+        return current;
+      }
+      return renumberStoryboard([...current, {
+        scene_number: current.length + 1,
+        title: 'New scene',
+        narration: '',
+        visual_direction: 'Medium cinematic shot illustrating the main action',
+        image_prompt: 'Cinematic realistic visual. No text, no captions, coherent visual style.',
+        shot_type: 'cinematic',
+        duration: '4',
+        transition: 'cut',
+        imageFile: null
+      }]);
+    });
+  }
+
   async function copyStoryboard() {
     const content = storyScenes.map(scene =>
       `SCENE ${scene.scene_number}: ${scene.title}\nNARRATION: ${scene.narration}\nVISUAL: ${scene.visual_direction}\nIMAGE PROMPT: ${scene.image_prompt}`
@@ -407,10 +458,19 @@ function App() {
             <button className="primary" disabled={storyBusy || storyScript.trim().length < 20}>{storyBusy ? 'Building storyboard…' : 'Create storyboard draft'}</button>
           </form>
           {storyScenes.length > 0 && <>
-            <div className="storyboard-toolbar"><b>{storyScenes.length} editable scenes</b><button type="button" onClick={copyStoryboard}>Copy storyboard</button></div>
+            <div className="storyboard-toolbar"><b>{storyScenes.length} / 10 editable scenes</b><div className="storyboard-toolbar-actions"><button type="button" disabled={storyScenes.length >= 10} onClick={addStoryboardScene}>+ Add scene</button><button type="button" onClick={copyStoryboard}>Copy storyboard</button></div></div>
             <div className="storyboard-scenes">
               {storyScenes.map((scene,index) => <article className="story-scene" key={scene.scene_number}>
-                <div className="story-scene-head"><b>SCENE {String(scene.scene_number).padStart(2,'0')}</b><small>{scene.narration.trim().split(/\s+/).filter(Boolean).length} narration words</small></div>
+                <div className="story-scene-head">
+                  <b>SCENE {String(scene.scene_number).padStart(2,'0')}</b>
+                  <small>{scene.narration.trim().split(/\s+/).filter(Boolean).length} narration words</small>
+                </div>
+                <div className="story-scene-actions">
+                  <button type="button" disabled={index === 0} onClick={() => moveStoryboardScene(index,-1)} aria-label="Move scene up">↑ Move up</button>
+                  <button type="button" disabled={index === storyScenes.length - 1} onClick={() => moveStoryboardScene(index,1)} aria-label="Move scene down">↓ Move down</button>
+                  <button type="button" disabled={storyScenes.length >= 10} onClick={() => duplicateStoryboardScene(index)}>Duplicate</button>
+                  <button type="button" className="danger" disabled={storyScenes.length <= 2} onClick={() => removeStoryboardScene(index)}> <Trash2 size={13}/> Remove</button>
+                </div>
                 <label>SCENE TITLE<input value={scene.title} onChange={event => updateStoryboardScene(index,{title:event.target.value})}/></label>
                 <label>NARRATION<textarea rows="3" value={scene.narration} onChange={event => updateStoryboardScene(index,{narration:event.target.value})}/></label>
                 <label>VISUAL DIRECTION<textarea rows="2" value={scene.visual_direction} onChange={event => updateStoryboardScene(index,{visual_direction:event.target.value})}/></label>
