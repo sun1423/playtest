@@ -298,6 +298,8 @@ async def video(
     preset: str = Form("reel"),
     framing: str = Form("fill"),
     audio: str = Form("keep"),
+    overlay_text: str = Form("", max_length=160),
+    overlay_position: str = Form("bottom"),
 ):
     if preset not in {"reel", "landscape", "square"}:
         raise HTTPException(400, "Invalid preset")
@@ -305,6 +307,9 @@ async def video(
         raise HTTPException(400, "Invalid framing mode")
     if audio not in {"keep", "mute"}:
         raise HTTPException(400, "Invalid audio mode")
+    if overlay_position not in {"top", "center", "bottom"}:
+        raise HTTPException(400, "Invalid overlay position")
+    overlay_text = overlay_text.strip()
     extension = Path(file.filename or "").suffix.lower()
     if extension not in {".mp4", ".mov", ".mkv", ".webm"}:
         raise HTTPException(415, "Unsupported video")
@@ -327,7 +332,13 @@ async def video(
         await file.close()
     return enqueue(
         "video_transform",
-        {"preset": preset, "framing": framing, "audio": audio},
+        {
+            "preset": preset,
+            "framing": framing,
+            "audio": audio,
+            "overlay_text": overlay_text,
+            "overlay_position": overlay_position,
+        },
         str(target),
     )
 
@@ -418,6 +429,22 @@ def work(job):
                 f"scale={width}:{height}:force_original_aspect_ratio=increase,"
                 f"crop={width}:{height},setsar=1"
             )
+        overlay_text = payload.get("overlay_text", "").strip()
+        if overlay_text:
+            text_file = folder / "overlay.txt"
+            text_file.write_text(overlay_text, encoding="utf-8")
+            position = {
+                "top": "h*0.08",
+                "center": "(h-text_h)/2",
+                "bottom": "h-text_h-h*0.08",
+            }[payload.get("overlay_position", "bottom")]
+            drawtext = (
+                "drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+                f":textfile={text_file}:fontcolor=white:fontsize=48"
+                ":borderw=2:bordercolor=black:box=1:boxcolor=black@0.55"
+                f":boxborderw=16:x=(w-text_w)/2:y={position}"
+            )
+            video_filter += "," + drawtext
         audio_args = ["-an"] if payload.get("audio", "keep") == "mute" else ["-c:a", "aac"]
         update(job_id, stage="FFmpeg rendering", progress=20)
         subprocess.run(
@@ -457,6 +484,7 @@ def work(job):
     else:
         raise RuntimeError("Unsupported job type")
 
+    (folder / "overlay.txt").unlink(missing_ok=True)
     update(job_id, status="completed", stage="Completed", progress=100, output_path=str(destination))
 
 
