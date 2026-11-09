@@ -23,6 +23,7 @@ DB = ROOT / "studio.sqlite3"
 UP = ROOT / "uploads"
 OUT = ROOT / "outputs"
 VOICES = ROOT / "voices"
+PROJECTS = ROOT / "projects"
 MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
 MAX_VOICE = int(os.getenv("MAX_VOICE_MB", "30")) * 1024 * 1024
 ENABLE_TTS = os.getenv("ENABLE_TTS", "0") == "1"
@@ -34,7 +35,7 @@ LOGIN_ATTEMPTS = {}
 LOGIN_WINDOW = 15 * 60
 MAX_LOGIN_ATTEMPTS = 8
 
-for path in (ROOT, UP, OUT, VOICES):
+for path in (ROOT, UP, OUT, VOICES, PROJECTS):
     path.mkdir(parents=True, exist_ok=True)
 
 
@@ -66,6 +67,10 @@ def init():
                 output_path TEXT, error TEXT, created_at TEXT, updated_at TEXT
             )"""
         )
+        conn.execute("""CREATE TABLE IF NOT EXISTS saved_projects(
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL,
+            data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        )""")
 
 
 def password_matches(password):
@@ -281,6 +286,104 @@ def jobs():
         item["payload"] = json.loads(item["payload"])
         result.append(item)
     return result
+
+
+@app.get("/api/saved-projects")
+def list_saved_projects():
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT id,name,kind,created_at,updated_at FROM saved_projects ORDER BY updated_at DESC"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+@app.post("/api/saved-projects")
+async def save_saved_project(
+    name: str = Form(..., min_length=1, max_length=100),
+    kind: str = Form(...),
+    project_data: str = Form(...),
+    assets: list[UploadFile] = File(default=[]),
+):
+    if kind != "storyboard":
+        raise HTTPException(400, "Unsupported saved project type")
+    try:
+        data = json.loads(project_data)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Invalid project data")
+    scenes = data.get("scenes") if isinstance(data, dict) else None
+    if not isinstance(scenes, list) or not 2 <= len(scenes) <= 10:
+        raise HTTPException(400, "A saved storyboard must contain 2 to 10 scenes")
+    if len(assets) > 12:
+        raise HTTPException(400, "Too many project assets")
+    project_id = str(uuid.uuid4())
+    folder = PROJECTS / project_id
+    folder.mkdir()
+    saved_assets = []
+    total_size = 0
+    try:
+        for index, upload in enumerate(assets):
+            extension = Path(upload.filename or "").suffix.lower()
+            allowed = {".jpg", ".jpeg", ".png", ".webp", ".mp3", ".wav", ".m4a", ".aac", ".ogg"}
+            if extension not in allowed:
+                raise HTTPException(415, "Unsupported saved project asset")
+            target = folder / f"asset_{index + 1:02d}{extension}"
+            with target.open("xb") as output_file:
+                while chunk := await upload.read(256 * 1024):
+                    total_size += len(chunk)
+                    if total_size > 120 * 1024 * 1024:
+                        raise HTTPException(413, "Saved project assets exceed 120 MB")
+                    output_file.write(chunk)
+            saved_assets.append({"filename": target.name, "original_name": Path(upload.filename or target.name).name})
+            await upload.close()
+        data["assets"] = saved_assets
+        now = stamp()
+        with db() as conn:
+            conn.execute(
+                "INSERT INTO saved_projects(id,name,kind,data,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                (project_id, name.strip(), kind, json.dumps(data), now, now),
+            )
+    except Exception:
+        shutil.rmtree(folder, ignore_errors=True)
+        for upload in assets:
+            await upload.close()
+        raise
+    return {"id": project_id, "name": name.strip(), "kind": kind, "created_at": now}
+
+
+@app.get("/api/saved-projects/{project_id}")
+def get_saved_project(project_id: str):
+    with db() as conn:
+        row = conn.execute("SELECT * FROM saved_projects WHERE id=?", (project_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Saved project not found")
+    data = json.loads(row["data"])
+    for index, asset in enumerate(data.get("assets", [])):
+        asset["url"] = f"/api/saved-projects/{project_id}/assets/{asset['filename']}"
+    return {"id": row["id"], "name": row["name"], "kind": row["kind"], "data": data}
+
+
+@app.get("/api/saved-projects/{project_id}/assets/{filename}")
+def get_saved_project_asset(project_id: str, filename: str):
+    if not re.fullmatch(r"asset_\d{2}\.[a-z0-9]+", filename):
+        raise HTTPException(400, "Invalid asset name")
+    with db() as conn:
+        exists = conn.execute("SELECT 1 FROM saved_projects WHERE id=?", (project_id,)).fetchone()
+    path = (PROJECTS / project_id / filename).resolve()
+    if not exists or PROJECTS.resolve() not in path.parents or not path.is_file():
+        raise HTTPException(404, "Project asset not found")
+    return FileResponse(path, filename=filename)
+
+
+@app.delete("/api/saved-projects/{project_id}")
+def delete_saved_project(project_id: str):
+    with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT id FROM saved_projects WHERE id=?", (project_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Saved project not found")
+        conn.execute("DELETE FROM saved_projects WHERE id=?", (project_id,))
+    shutil.rmtree((PROJECTS / project_id).resolve(), ignore_errors=True)
+    return {"deleted": True, "project_id": project_id}
 
 
 @app.post("/api/storyboard")
