@@ -10,6 +10,8 @@ import subprocess
 import importlib.util
 import shutil
 import re
+import urllib.request
+import urllib.error
 from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime, timezone
@@ -24,6 +26,10 @@ UP = ROOT / "uploads"
 OUT = ROOT / "outputs"
 VOICES = ROOT / "voices"
 PROJECTS = ROOT / "projects"
+LLM_LOGS = ROOT / "logs"
+LLM_CONFIG = ROOT / "llm_config.json"
+LLM_PULL_STATE = ROOT / "llm_pull.json"
+OLLAMA_API = "http://127.0.0.1:11434"
 MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
 MAX_VOICE = int(os.getenv("MAX_VOICE_MB", "30")) * 1024 * 1024
 ENABLE_TTS = os.getenv("ENABLE_TTS", "0") == "1"
@@ -35,7 +41,7 @@ LOGIN_ATTEMPTS = {}
 LOGIN_WINDOW = 15 * 60
 MAX_LOGIN_ATTEMPTS = 8
 
-for path in (ROOT, UP, OUT, VOICES, PROJECTS):
+for path in (ROOT, UP, OUT, VOICES, PROJECTS, LLM_LOGS):
     path.mkdir(parents=True, exist_ok=True)
 
 
@@ -103,6 +109,64 @@ def valid_session(token):
         return hmac.compare_digest(signature, expected)
     except (ValueError, TypeError):
         return False
+
+
+def valid_model_name(model):
+    return bool(
+        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,100}(?::[A-Za-z0-9._-]{1,64})?", model)
+        and ".." not in model and "//" not in model and not model.endswith("/")
+    )
+
+
+def ollama_call(path, payload=None, timeout=15):
+    data = json.dumps(payload).encode() if payload is not None else None
+    request = urllib.request.Request(
+        OLLAMA_API + path, data=data,
+        headers={"Content-Type": "application/json"} if data is not None else {},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode())
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise HTTPException(503, "Local Ollama runtime is unavailable or did not respond.") from exc
+
+
+def installed_models():
+    try:
+        return ollama_call("/api/tags", timeout=5).get("models", [])
+    except HTTPException:
+        return []
+
+
+def active_model():
+    try:
+        return json.loads(LLM_CONFIG.read_text()).get("active_model", "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def set_active_model(model):
+    LLM_CONFIG.write_text(json.dumps({"active_model": model}, indent=2))
+
+
+def pull_state():
+    try:
+        state = json.loads(LLM_PULL_STATE.read_text())
+        pid = int(state.get("pid", 0))
+        running = False
+        if pid > 0:
+            try:
+                os.kill(pid, 0)
+                stat = Path(f"/proc/{pid}/stat").read_text().split()
+                running = len(stat) > 2 and stat[2] != "Z"
+            except (OSError, ValueError):
+                pass
+        state["running"] = running
+        state["log"] = Path(state.get("log_path", "")).read_text(errors="replace")[-2500:] if state.get("log_path") and Path(state["log_path"]).is_file() else ""
+        state["status"] = "downloading" if running else ("finished" if state.get("return_code") == 0 else "stopped")
+        return state
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def tts_runtime_ready():
@@ -186,6 +250,14 @@ class TTS(BaseModel):
     voice_id: str = ""
 
 
+class ModelNameRequest(BaseModel):
+    model: str = Field(min_length=1, max_length=128)
+
+
+class ModelTestRequest(BaseModel):
+    model: str = Field(min_length=1, max_length=128)
+
+
 class StoryboardRequest(BaseModel):
     script: str = Field(min_length=20, max_length=12000)
     language: str = Field(default="en", pattern="^(hi|en)$")
@@ -209,6 +281,111 @@ def health():
         "tts_ready": tts_runtime_ready(),
         "video_transform_ready": True,
         "authentication": True,
+    }
+
+
+@app.get("/api/llm")
+def llm_status():
+    models = installed_models()
+    names = [item.get("name", "") for item in models]
+    selected = active_model()
+    if selected not in names:
+        selected = ""
+    return {
+        "runtime_ready": bool(shutil.which("ollama")) and bool(models or ollama_runtime_ready()),
+        "active_model": selected,
+        "models": models,
+        "pull": pull_state(),
+        "catalog": [
+            {"name": "Qwen3.5 4B · Q4_K_M", "model": "qwen3.5:4b-q4_K_M", "size": "about 3.4 GB", "recommended": True},
+            {"name": "Qwen3.5 2B · Q4_K_M", "model": "qwen3.5:2b-q4_K_M", "size": "about 1.9 GB", "recommended": False},
+        ],
+    }
+
+
+def ollama_runtime_ready():
+    try:
+        ollama_call("/api/version", timeout=2)
+        return True
+    except HTTPException:
+        return False
+
+
+@app.post("/api/llm/pull")
+def llm_pull(payload: ModelNameRequest):
+    model = payload.model.strip()
+    if not valid_model_name(model):
+        raise HTTPException(400, "Invalid model name. Use an Ollama library model and tag.")
+    state = pull_state()
+    if state and state.get("running"):
+        raise HTTPException(409, f"Another model download is already running: {state.get('model')}")
+    if not shutil.which("ollama") or not ollama_runtime_ready():
+        raise HTTPException(503, "Local Ollama runtime is not installed or running.")
+    if model in [item.get("name") for item in installed_models()]:
+        raise HTTPException(409, "This model is already downloaded.")
+    log_path = LLM_LOGS / f"ollama-pull-{int(time.time())}.log"
+    log_file = log_path.open("w")
+    try:
+        process = subprocess.Popen(
+            ["ollama", "pull", model], stdout=log_file, stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL, start_new_session=True,
+        )
+    finally:
+        log_file.close()
+    LLM_PULL_STATE.write_text(json.dumps({
+        "pid": process.pid, "model": model, "log_path": str(log_path),
+        "started_at": stamp(), "return_code": None,
+    }))
+    return {"started": True, "model": model, "pid": process.pid}
+
+
+@app.post("/api/llm/active")
+def llm_set_active(payload: ModelNameRequest):
+    model = payload.model.strip()
+    if model not in [item.get("name") for item in installed_models()]:
+        raise HTTPException(404, "Download this model before activating it.")
+    set_active_model(model)
+    return {"active_model": model}
+
+
+@app.delete("/api/llm/models")
+def llm_delete_model(payload: ModelNameRequest):
+    model = payload.model.strip()
+    if not valid_model_name(model):
+        raise HTTPException(400, "Invalid model name.")
+    if model not in [item.get("name") for item in installed_models()]:
+        raise HTTPException(404, "Model not found.")
+    if active_model() == model:
+        set_active_model("")
+    try:
+        result = subprocess.run(
+            ["ollama", "rm", model], capture_output=True, text=True, timeout=180, check=False
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(504, "Model removal timed out.") from exc
+    if result.returncode:
+        raise HTTPException(502, result.stderr[-500:] or "Model removal failed.")
+    return {"deleted": model}
+
+
+@app.post("/api/llm/test")
+def llm_test(payload: ModelTestRequest):
+    model = payload.model.strip()
+    if model not in [item.get("name") for item in installed_models()]:
+        raise HTTPException(404, "Download this model before testing it.")
+    started = time.time()
+    result = ollama_call("/api/chat", {
+        "model": model,
+        "messages": [{"role": "user", "content": "Reply in Hindi and English with one short sentence in each language. Then output the exact word READY."}],
+        "stream": False,
+        "keep_alive": "2m",
+        "options": {"num_ctx": 2048, "num_predict": 100, "num_thread": 2, "temperature": 0.2},
+    }, timeout=180)
+    return {
+        "model": model,
+        "response": result.get("message", {}).get("content", ""),
+        "seconds": round(time.time() - started, 2),
+        "tokens_per_second": result.get("eval_count", 0) / max(result.get("eval_duration", 1) / 1e9, 0.001),
     }
 
 
@@ -429,12 +606,54 @@ def create_storyboard(request: StoryboardRequest):
             "image_prompt": f"Cinematic realistic visual for this scene: {narration}. No text, no captions, coherent visual style.",
             "shot_type": "cinematic",
         })
+    selected_model = active_model()
+    if selected_model:
+        prompt = (
+            "Create a production-ready storyboard from the script below. Return ONLY valid JSON with "
+            "one object containing a scenes array. Each scene must have title, narration, visual_direction, "
+            "image_prompt, and shot_type. Preserve the original story and language, distribute narration "
+            "across 2 to the requested maximum scenes, keep visual prompts specific and cinematic, and "
+            "maintain character/location continuity. Do not add facts.\n"
+            f"Language: {request.language}\nMaximum scenes: {request.max_scenes}\nSCRIPT:\n{script}"
+        )
+        result = ollama_call("/api/chat", {
+            "model": selected_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "format": "json", "stream": False, "keep_alive": "5m",
+            "options": {"num_ctx": 8192, "num_predict": 3000, "num_thread": 2, "temperature": 0.35},
+        }, timeout=240)
+        try:
+            generated = json.loads(result.get("message", {}).get("content", "{}"))
+            generated_scenes = generated.get("scenes", [])
+            if not isinstance(generated_scenes, list) or not 2 <= len(generated_scenes) <= request.max_scenes:
+                raise ValueError("Invalid scene count")
+            clean_scenes = []
+            for index, item in enumerate(generated_scenes, 1):
+                if not isinstance(item, dict):
+                    raise ValueError("Invalid scene structure")
+                clean_scenes.append({
+                    "scene_number": index,
+                    "title": str(item.get("title", f"Scene {index}"))[:120],
+                    "narration": str(item.get("narration", ""))[:6000],
+                    "visual_direction": str(item.get("visual_direction", ""))[:1000],
+                    "image_prompt": str(item.get("image_prompt", ""))[:2000],
+                    "shot_type": str(item.get("shot_type", "cinematic"))[:80],
+                })
+            if any(not scene["narration"].strip() for scene in clean_scenes):
+                raise ValueError("A scene has empty narration")
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise HTTPException(502, "The selected local model returned invalid storyboard JSON. Try the model test or another model.") from exc
+        return {
+            "language": request.language, "scene_count": len(clean_scenes),
+            "total_words": len(script.split()), "scenes": clean_scenes,
+            "notice": f"Storyboard generated locally using {selected_model}. No cloud AI was used."
+        }
     return {
         "language": request.language,
         "scene_count": len(scenes),
         "total_words": len(script.split()),
         "scenes": scenes,
-        "notice": "Structured storyboard draft generated from your script using local rules. Visual directions are editable suggestions, not AI-generated images."
+        "notice": "Rule-based storyboard draft. Select and activate a downloaded local model to enable AI storyboarding."
     }
 
 
