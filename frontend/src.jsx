@@ -28,6 +28,9 @@ function App() {
   const [activeScene, setActiveScene] = useState(0);
   const [scenePreviewUrl, setScenePreviewUrl] = useState('');
   const [projectBusy, setProjectBusy] = useState(false);
+  const [savedProjects, setSavedProjects] = useState([]);
+  const [savedProjectName, setSavedProjectName] = useState('');
+  const [savingProject, setSavingProject] = useState(false);
 
   const [previewUrl, setPreviewUrl] = useState('');
   const [trimStart, setTrimStart] = useState('0');
@@ -95,11 +98,12 @@ function App() {
 
   async function refresh() {
     try {
-      const [jobList, voiceList] = await Promise.all([
-        api('/api/jobs'), api('/api/voices')
+      const [jobList, voiceList, savedList] = await Promise.all([
+        api('/api/jobs'), api('/api/voices'), api('/api/saved-projects')
       ]);
       setJobs(jobList);
       setVoices(voiceList);
+      setSavedProjects(savedList);
       setStatus('Azure connected');
     } catch (error) {
       setStatus(error.message === 'Authentication required' ? 'Session expired' : 'Server offline');
@@ -294,6 +298,80 @@ function App() {
     }
   }
 
+
+  async function saveStoryboardProject() {
+    if (storyScenes.length < 2) return;
+    const form = new FormData();
+    const scenes = storyScenes.map(scene => {
+      const item = { ...scene };
+      delete item.imageFile;
+      if (scene.imageFile) {
+        item.image_asset_index = Number(form.getAll('assets').length);
+        form.append('assets', scene.imageFile, scene.imageFile.name);
+      } else {
+        item.image_asset_index = null;
+      }
+      return item;
+    });
+    let musicAssetIndex = null;
+    if (musicFile) {
+      musicAssetIndex = form.getAll('assets').length;
+      form.append('assets', musicFile, musicFile.name);
+    }
+    form.append('name', savedProjectName.trim() || storyScenes[0]?.title || 'Untitled storyboard');
+    form.append('kind', 'storyboard');
+    form.append('project_data', JSON.stringify({
+      script: storyScript, language: storyLanguage, scene_limit: storySceneLimit,
+      scenes, music_asset_index: musicAssetIndex,
+      preset, framing, transitionDuration, musicVolume, overlayText, overlayPosition
+    }));
+    setSavingProject(true);
+    try {
+      await api('/api/saved-projects', { method: 'POST', body: form });
+      setMsg('Storyboard saved. You can reopen it from Projects.');
+      setSavedProjectName('');
+      refresh();
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      setSavingProject(false);
+    }
+  }
+
+  async function openSavedProject(projectId) {
+    try {
+      const result = await api('/api/saved-projects/' + encodeURIComponent(projectId));
+      if (result.kind !== 'storyboard') throw Error('Unsupported saved project type');
+      const data = result.data;
+      const assets = data.assets || [];
+      const loadAsset = async index => {
+        if (index == null || !assets[index]) return null;
+        const response = await fetch(assets[index].url);
+        if (!response.ok) throw Error('Could not load a saved media asset');
+        const blob = await response.blob();
+        return new File([blob], assets[index].original_name || assets[index].filename, { type: blob.type });
+      };
+      const scenes = await Promise.all((data.scenes || []).map(async scene => ({
+        ...scene, imageFile: await loadAsset(scene.image_asset_index)
+      })));
+      setStoryScenes(scenes);
+      setStoryScript(data.script || '');
+      setStoryLanguage(data.language || 'en');
+      setStorySceneLimit(String(data.scene_limit || scenes.length));
+      setMusicFile(await loadAsset(data.music_asset_index));
+      setPreset(data.preset || 'reel');
+      setFraming(data.framing || 'fill');
+      setTransitionDuration(String(data.transitionDuration || '0.5'));
+      setMusicVolume(Number(data.musicVolume ?? 0.35));
+      setOverlayText(data.overlayText || '');
+      setOverlayPosition(data.overlayPosition || 'bottom');
+      setTab('storyboard');
+      setMsg('Saved storyboard reopened: ' + result.name);
+    } catch (error) {
+      setMsg(error.message);
+    }
+  }
+
   function renumberStoryboard(scenes) {
     return scenes.map((scene, index) => ({ ...scene, scene_number: index + 1 }));
   }
@@ -459,6 +537,7 @@ function App() {
           </form>
           {storyScenes.length > 0 && <>
             <div className="storyboard-toolbar"><b>{storyScenes.length} / 10 editable scenes</b><div className="storyboard-toolbar-actions"><button type="button" disabled={storyScenes.length >= 10} onClick={addStoryboardScene}>+ Add scene</button><button type="button" onClick={copyStoryboard}>Copy storyboard</button></div></div>
+            <div className="saved-project-form"><input aria-label="Saved project name" value={savedProjectName} onChange={event => setSavedProjectName(event.target.value)} placeholder="Project name (optional)" maxLength={100}/><button type="button" className="primary" disabled={savingProject} onClick={saveStoryboardProject}>{savingProject ? 'Saving…' : 'Save project'}</button></div>
             <div className="storyboard-scenes">
               {storyScenes.map((scene,index) => <article className="story-scene" key={scene.scene_number}>
                 <div className="story-scene-head">
@@ -596,7 +675,13 @@ function App() {
           )}
         </section>}
         {tab === 'projects' && <section>
-          <span>JOB QUEUE</span>
+          <span>SAVED PROJECTS</span>
+          <h2>Reopen your work</h2>
+          {savedProjects.length === 0 ? <p>No saved projects yet. Save a storyboard to keep its scenes and uploaded images.</p> : savedProjects.map(project => <article className="saved-project-row" key={project.id}>
+            <div><b>{project.name}</b><small>{project.kind} · Updated {new Date(project.updated_at).toLocaleString()}</small></div>
+            <div className="saved-project-actions"><button type="button" onClick={() => openSavedProject(project.id)}>Open</button><button type="button" className="danger" onClick={() => deleteMedia('/api/saved-projects/' + project.id, 'saved project ' + project.name)}><Trash2 size={14}/> Delete</button></div>
+          </article>)}
+          <h2>Render queue</h2>
           {jobs.length === 0 ? <p>No jobs yet.</p> : jobs.map(job =>
             <article key={job.id}>
               <b>{job.kind.replaceAll('_', ' ')}</b><small>{job.stage} · {job.status}</small>
