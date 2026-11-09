@@ -298,11 +298,20 @@ async def video(
     overlay_position: str = Form("bottom"),
     subtitle_file: UploadFile | None = File(None),
     music_file: UploadFile | None = File(None),
+    trim_start: float = Form(0),
+    trim_end: float = Form(0),
+    music_volume: float = Form(0.35),
 ):
     if preset not in {"reel", "landscape", "square"}:
         raise HTTPException(400, "Invalid preset")
     if framing not in {"fill", "fit"}:
         raise HTTPException(400, "Invalid framing mode")
+    if not 0 <= trim_start <= 14400 or not 0 <= trim_end <= 14400:
+        raise HTTPException(400, "Trim values must be between 0 and 4 hours")
+    if trim_end and trim_end <= trim_start:
+        raise HTTPException(400, "Trim end must be greater than trim start")
+    if not 0 <= music_volume <= 1.5:
+        raise HTTPException(400, "Music volume must be between 0 and 1.5")
     if audio not in {"keep", "mute", "music"}:
         raise HTTPException(400, "Invalid audio mode")
     if audio == "music" and not music_file:
@@ -378,6 +387,9 @@ async def video(
             "overlay_position": overlay_position,
             "subtitle_path": str(subtitle_path) if subtitle_path else "",
             "music_path": str(music_path) if music_path else "",
+            "trim_start": trim_start,
+            "trim_end": trim_end,
+            "music_volume": music_volume,
         },
         str(target),
     )
@@ -492,21 +504,28 @@ def work(job):
                 raise RuntimeError("Subtitle file is missing or outside the upload directory.")
             video_filter += f",subtitles=filename={subtitle_file}:fontsdir=/usr/share/fonts/truetype/noto"
         music_path = payload.get("music_path", "")
+        trim_start = float(payload.get("trim_start", 0))
+        trim_end = float(payload.get("trim_end", 0))
+        input_args = []
+        if trim_start > 0:
+            input_args += ["-ss", str(trim_start)]
         if music_path:
             music_file = Path(music_path).resolve()
             if UP.resolve() not in music_file.parents or not music_file.is_file():
                 raise RuntimeError("Background music is missing or outside the upload directory.")
-            input_args = ["-i", job["input_path"], "-stream_loop", "-1", "-i", str(music_file)]
-            map_args = ["-map", "0:v:0", "-map", "1:a:0", "-shortest", "-c:a", "aac"]
+            input_args += ["-i", job["input_path"], "-stream_loop", "-1", "-i", str(music_file)]
+            map_args = ["-map", "0:v:0", "-map", "1:a:0", "-shortest", "-c:a", "aac",
+                        "-af", f"volume={float(payload.get('music_volume', 0.35))}"]
         else:
-            input_args = ["-i", job["input_path"]]
+            input_args += ["-i", job["input_path"]]
             map_args = ["-map", "0:v:0", "-map", "0:a?"]
             map_args += ["-an"] if payload.get("audio", "keep") == "mute" else ["-c:a", "aac"]
+        duration_args = ["-t", str(trim_end - trim_start)] if trim_end > 0 else []
         update(job_id, stage="FFmpeg rendering", progress=20)
         subprocess.run(
             [
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
-                "-y", *input_args, *map_args,
+                "-y", *input_args, *map_args, *duration_args,
                 "-vf", video_filter, "-filter_threads", "1",
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
                 "-threads", "2", "-movflags", "+faststart",
