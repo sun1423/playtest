@@ -35,6 +35,8 @@ OLLAMA_INFERENCE_LOCK = threading.Lock()
 MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
 MAX_VOICE = int(os.getenv("MAX_VOICE_MB", "30")) * 1024 * 1024
 ENABLE_TTS = os.getenv("ENABLE_TTS", "0") == "1"
+VACE_RUNNER_TOKEN = os.getenv("VACE_RUNNER_TOKEN", "")
+VACE_RUNNER_LAST_SEEN = 0.0
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "0") == "1"
@@ -253,9 +255,17 @@ def cleanup_failed_output(job_id):
 app = FastAPI(title="AI Video Studio")
 
 
+def valid_vace_runner_request(request: Request):
+    authorization = request.headers.get("authorization", "")
+    supplied = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+    return bool(VACE_RUNNER_TOKEN and supplied and hmac.compare_digest(supplied, VACE_RUNNER_TOKEN))
+
+
 @app.middleware("http")
 async def require_login(request: Request, call_next):
     if request.url.path in {"/api/auth/login", "/api/auth/session", "/api/health"}:
+        return await call_next(request)
+    if request.url.path.startswith("/api/vace/runner/") and valid_vace_runner_request(request):
         return await call_next(request)
     token = request.cookies.get("studio_session", "")
     if not SESSION_SECRET or not ADMIN_PASSWORD_HASH or not valid_session(token):
@@ -271,6 +281,15 @@ class TTS(BaseModel):
     text: str = Field(min_length=1, max_length=12000)
     language: str = "hi"
     voice_id: str = ""
+
+
+class VaceRunnerProgress(BaseModel):
+    stage: str = Field(min_length=1, max_length=100)
+    progress: int = Field(ge=1, le=95)
+
+
+class VaceRunnerFailure(BaseModel):
+    error: str = Field(min_length=1, max_length=2000)
 
 
 class ModelNameRequest(BaseModel):
@@ -313,6 +332,18 @@ def health():
         "tts_ready": tts_runtime_ready(),
         "video_transform_ready": True,
         "authentication": True,
+    }
+
+
+@app.get("/api/vace/status")
+def vace_status():
+    return {
+        "runner_configured": bool(VACE_RUNNER_TOKEN),
+        "runner_online": bool(VACE_RUNNER_TOKEN and time.time() - VACE_RUNNER_LAST_SEEN < 90),
+        "video_model": "Wan2.1-VACE-1.3B",
+        "voice_model": "Chatterbox Multilingual V3",
+        "clip_seconds": 5.06,
+        "voice_profiles_available": len(list(VOICES.glob("*.wav"))),
     }
 
 
@@ -1013,6 +1044,184 @@ async def video(
     )
 
 
+@app.post("/api/vace/video")
+async def create_vace_video(
+    file: UploadFile = File(...),
+    prompt: str = Form(..., min_length=8, max_length=1200),
+    narration: str = Form(..., min_length=1, max_length=12000),
+    language: str = Form("hi"),
+    voice_id: str = Form(..., min_length=1, max_length=48),
+    motion_mode: str = Form("flow"),
+    keep_source_audio: bool = Form(False),
+):
+    if not VACE_RUNNER_TOKEN:
+        raise HTTPException(503, "The free GPU runner is not configured yet. Configure VACE_RUNNER_TOKEN before queueing AI video jobs.")
+    if language not in {"hi", "en"}:
+        raise HTTPException(400, "Voice language must be Hindi or English.")
+    if motion_mode not in {"flow", "depth"}:
+        raise HTTPException(400, "Invalid VACE motion-preservation mode.")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,48}", voice_id):
+        raise HTTPException(400, "Invalid voice profile.")
+    voice_path = (VOICES / (voice_id + ".wav")).resolve()
+    if VOICES.resolve() not in voice_path.parents or not voice_path.is_file():
+        raise HTTPException(400, "Choose an existing WAV voice profile from Voice Studio.")
+    extension = Path(file.filename or "").suffix.lower()
+    if extension not in {".mp4", ".mov", ".mkv", ".webm"}:
+        raise HTTPException(415, "Unsupported video. Use MP4, MOV, MKV or WebM.")
+    folder = UP / str(uuid.uuid4())
+    folder.mkdir()
+    target = folder / ("source" + extension)
+    size = 0
+    try:
+        with target.open("xb") as output_file:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > MAX_UPLOAD:
+                    raise HTTPException(413, "Upload too large.")
+                output_file.write(chunk)
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(target)],
+            capture_output=True, text=True, timeout=20, check=True,
+        )
+        duration = float(probe.stdout.strip())
+        if not 0 < duration <= 120:
+            raise HTTPException(413, "Source video must be between 0 and 120 seconds.")
+    except HTTPException:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise HTTPException(415, "The uploaded file is not a readable video.") from exc
+    finally:
+        await file.close()
+    payload = {
+        "prompt": prompt.strip(),
+        "narration": narration.strip(),
+        "language": language,
+        "voice_id": voice_id,
+        "motion_mode": motion_mode,
+        "keep_source_audio": keep_source_audio,
+        "source_duration": duration,
+    }
+    return enqueue("video_v2v", payload, str(target))
+
+
+@app.post("/api/vace/runner/next")
+def vace_runner_next():
+    global VACE_RUNNER_LAST_SEEN
+    VACE_RUNNER_LAST_SEEN = time.time()
+    with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT id FROM jobs WHERE kind='video_v2v' AND status='queued' ORDER BY created_at LIMIT 1"
+        ).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE jobs SET status='running',stage='Claimed by free GPU runner',progress=5,updated_at=? WHERE id=? AND status='queued'",
+                (stamp(), row["id"]),
+            )
+    if not row:
+        return {"job": None}
+    job = getjob(row["id"])
+    return {
+        "job": {
+            "id": job["id"],
+            "prompt": job["payload"]["prompt"],
+            "narration": job["payload"]["narration"],
+            "language": job["payload"]["language"],
+            "voice_id": job["payload"]["voice_id"],
+            "motion_mode": job["payload"]["motion_mode"],
+            "keep_source_audio": job["payload"]["keep_source_audio"],
+            "input_url": "/api/vace/runner/jobs/" + job["id"] + "/input",
+            "voice_url": "/api/vace/runner/jobs/" + job["id"] + "/voice",
+        }
+    }
+
+
+def vace_runner_job(job_id):
+    job = getjob(job_id)
+    if not job or job["kind"] != "video_v2v" or job["status"] != "running":
+        raise HTTPException(404, "Active VACE job not found.")
+    return job
+
+
+@app.get("/api/vace/runner/jobs/{job_id}/input")
+def vace_runner_input(job_id: str):
+    job = vace_runner_job(job_id)
+    path = Path(job["input_path"]).resolve()
+    if UP.resolve() not in path.parents or not path.is_file():
+        raise HTTPException(404, "Source video not found.")
+    return FileResponse(path, filename="source" + path.suffix)
+
+
+@app.get("/api/vace/runner/jobs/{job_id}/voice")
+def vace_runner_voice(job_id: str):
+    job = vace_runner_job(job_id)
+    voice_id = job["payload"]["voice_id"]
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,48}", voice_id):
+        raise HTTPException(400, "Invalid voice profile.")
+    path = (VOICES / (voice_id + ".wav")).resolve()
+    if VOICES.resolve() not in path.parents or not path.is_file():
+        raise HTTPException(404, "Voice profile not found.")
+    return FileResponse(path, filename="voice_reference.wav")
+
+
+@app.post("/api/vace/runner/jobs/{job_id}/progress")
+def vace_runner_progress(job_id: str, payload: VaceRunnerProgress):
+    global VACE_RUNNER_LAST_SEEN
+    vace_runner_job(job_id)
+    VACE_RUNNER_LAST_SEEN = time.time()
+    update(job_id, stage=payload.stage, progress=payload.progress)
+    return {"updated": True}
+
+
+@app.post("/api/vace/runner/jobs/{job_id}/complete")
+async def vace_runner_complete(job_id: str, file: UploadFile = File(...)):
+    global VACE_RUNNER_LAST_SEEN
+    job = vace_runner_job(job_id)
+    if Path(file.filename or "").suffix.lower() != ".mp4":
+        raise HTTPException(415, "Runner output must be an MP4.")
+    folder = OUT / job_id
+    folder.mkdir(parents=True, exist_ok=True)
+    temporary = folder / "video.uploading"
+    destination = folder / "video.mp4"
+    size = 0
+    try:
+        with temporary.open("xb") as output_file:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > MAX_UPLOAD:
+                    raise HTTPException(413, "Generated video exceeds the upload limit.")
+                output_file.write(chunk)
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type",
+             "-of", "csv=p=0", str(temporary)],
+            capture_output=True, text=True, timeout=20, check=True,
+        )
+        stream_types = set(probe.stdout.splitlines())
+        if "video" not in stream_types or "audio" not in stream_types:
+            raise HTTPException(415, "Generated MP4 must contain both video and custom narration audio.")
+        temporary.replace(destination)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    finally:
+        await file.close()
+    VACE_RUNNER_LAST_SEEN = time.time()
+    update(job_id, status="completed", stage="Completed", progress=100, output_path=str(destination), error=None)
+    cleanup_upload(job.get("input_path"))
+    return {"completed": True, "job_id": job_id}
+
+
+@app.post("/api/vace/runner/jobs/{job_id}/fail")
+def vace_runner_fail(job_id: str, payload: VaceRunnerFailure):
+    job = vace_runner_job(job_id)
+    update(job_id, status="failed", stage="GPU runner failed", error=payload.error[:2000])
+    cleanup_upload(job.get("input_path"))
+    return {"failed": True, "job_id": job_id}
+
+
 @app.post("/api/project")
 async def create_project(
     scenes: list[UploadFile] = File(...),
@@ -1506,14 +1715,14 @@ def worker():
     init()
     with db() as conn:
         conn.execute(
-            "UPDATE jobs SET status='queued',stage='Recovered after worker restart',updated_at=? WHERE status='running'",
+            "UPDATE jobs SET status='queued',stage='Recovered after worker restart',updated_at=? WHERE status='running' AND kind!='video_v2v'",
             (stamp(),),
         )
     while True:
         with db() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT id FROM jobs WHERE status='queued' ORDER BY created_at LIMIT 1"
+                "SELECT id FROM jobs WHERE status='queued' AND kind!='video_v2v' ORDER BY created_at LIMIT 1"
             ).fetchone()
             if row:
                 conn.execute(
