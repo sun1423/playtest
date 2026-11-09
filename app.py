@@ -7,6 +7,7 @@ import hmac
 import hashlib
 import secrets
 import subprocess
+import threading
 import importlib.util
 import shutil
 import re
@@ -30,6 +31,7 @@ LLM_LOGS = ROOT / "logs"
 LLM_CONFIG = ROOT / "llm_config.json"
 LLM_PULL_STATE = ROOT / "llm_pull.json"
 OLLAMA_API = "http://127.0.0.1:11434"
+OLLAMA_INFERENCE_LOCK = threading.Lock()
 MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
 MAX_VOICE = int(os.getenv("MAX_VOICE_MB", "30")) * 1024 * 1024
 ENABLE_TTS = os.getenv("ENABLE_TTS", "0") == "1"
@@ -129,6 +131,25 @@ def ollama_call(path, payload=None, timeout=15):
             return json.loads(response.read().decode())
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise HTTPException(503, "Local Ollama runtime is unavailable or did not respond.") from exc
+
+
+def stop_other_ollama_models(selected=""):
+    try:
+        result = subprocess.run(["ollama", "ps"], capture_output=True, text=True, timeout=8, check=True)
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise HTTPException(503, "Could not inspect local model memory usage.") from exc
+    for line in result.stdout.splitlines()[1:]:
+        name = line.split()[0] if line.split() else ""
+        if name and name != selected:
+            stopped = subprocess.run(["ollama", "stop", name], capture_output=True, text=True, timeout=20)
+            if stopped.returncode:
+                raise HTTPException(503, f"Could not unload inactive model {name}.")
+
+
+def ollama_chat(model, payload, timeout=180):
+    with OLLAMA_INFERENCE_LOCK:
+        stop_other_ollama_models(model)
+        return ollama_call("/api/chat", payload, timeout=timeout)
 
 
 def installed_models():
@@ -367,7 +388,9 @@ def llm_set_active(payload: ModelNameRequest):
     model = payload.model.strip()
     if model not in [item.get("name") for item in installed_models()]:
         raise HTTPException(404, "Download this model before activating it.")
-    set_active_model(model)
+    with OLLAMA_INFERENCE_LOCK:
+        stop_other_ollama_models()
+        set_active_model(model)
     return {"active_model": model}
 
 
@@ -381,9 +404,11 @@ def llm_delete_model(payload: ModelNameRequest):
     if active_model() == model:
         set_active_model("")
     try:
-        result = subprocess.run(
-            ["ollama", "rm", model], capture_output=True, text=True, timeout=180, check=False
-        )
+        with OLLAMA_INFERENCE_LOCK:
+            stop_other_ollama_models()
+            result = subprocess.run(
+                ["ollama", "rm", model], capture_output=True, text=True, timeout=180, check=False
+            )
     except subprocess.TimeoutExpired as exc:
         raise HTTPException(504, "Model removal timed out.") from exc
     if result.returncode:
@@ -397,7 +422,7 @@ def llm_test(payload: ModelTestRequest):
     if model not in [item.get("name") for item in installed_models()]:
         raise HTTPException(404, "Download this model before testing it.")
     started = time.time()
-    result = ollama_call("/api/chat", {
+    result = ollama_chat(model, {
         "model": model,
         "messages": [{"role": "user", "content": "Write exactly one natural Hindi sentence and one natural English sentence about sunrise. Do not explain."}],
         "stream": False, "think": False,
@@ -640,7 +665,7 @@ def create_storyboard(request: StoryboardRequest):
             "at most 20 words. Use vivid, specific cinematic descriptions.\n"
             f"Language: {request.language}\nCreate 2 to {request.max_scenes} scenes.\nSCRIPT:\n{script}"
         )
-        result = ollama_call("/api/chat", {
+        result = ollama_chat(selected_model, {
             "model": selected_model,
             "messages": [{"role": "user", "content": prompt}],
             "format": "json", "stream": False, "think": False, "keep_alive": "2m",
