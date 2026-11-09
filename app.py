@@ -697,7 +697,60 @@ def create_script(request: ScriptRequest):
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         raise HTTPException(502, "The local model returned an incomplete script. Try again or select another model.") from exc
 
+    target_min = max(12, round(target_words * 0.85))
+    target_max = max(target_min, round(target_words * 1.15))
+    if not target_min <= word_count <= target_max:
+        revision_prompt = (
+            f"Rewrite this video script to fit a strict duration target of {request.duration_seconds} seconds. "
+            f"The combined hook, narration and closing line MUST contain {target_min} to {target_max} words "
+            f"(aim for {target_words}). Write entirely in {language_name}. Preserve the core meaning and "
+            "all required key points, but remove repetition and unnecessary wording. Do not add facts. "
+            "Keep the hook, narration and closing line in their separate JSON fields. "
+            f"CURRENT DRAFT JSON:\n{json.dumps(generated, ensure_ascii=False)}"
+        )
+        try:
+            revised = ollama_chat(selected_model, {
+                "model": selected_model,
+                "messages": [{"role": "user", "content": revision_prompt}],
+                "format": output_schema,
+                "stream": False,
+                "think": False,
+                "keep_alive": "2m",
+                "options": {
+                    "num_ctx": 4096,
+                    "num_predict": min(1600, max(300, target_words * 3)),
+                    "num_thread": 2,
+                    "temperature": 0.15,
+                },
+            }, timeout=180)
+            candidate = json.loads(revised.get("message", {}).get("content", "{}"))
+            fields = ("title", "hook", "narration", "closing_line")
+            if isinstance(candidate, dict) and all(
+                isinstance(candidate.get(field), str) and candidate[field].strip()
+                for field in fields
+            ):
+                candidate_title = candidate["title"].strip()[:160]
+                candidate_hook = candidate["hook"].strip()[:600]
+                candidate_narration = candidate["narration"].strip()[:10000]
+                candidate_closing = candidate["closing_line"].strip()[:800]
+                candidate_script = "\n\n".join((candidate_hook, candidate_narration, candidate_closing))
+                candidate_count = len(candidate_script.split())
+                if abs(candidate_count - target_words) < abs(word_count - target_words):
+                    title, hook, narration, closing_line = (
+                        candidate_title, candidate_hook, candidate_narration, candidate_closing
+                    )
+                    full_script, word_count = candidate_script, candidate_count
+        except (HTTPException, ValueError, TypeError, json.JSONDecodeError):
+            pass
+
     estimated_seconds = round(word_count / words_per_second)
+    notice = f"Draft created locally with {selected_model}. Review factual claims before publishing."
+    if not target_min <= word_count <= target_max:
+        notice += (
+            f" The model could not meet the requested duration: this draft is estimated at "
+            f"{estimated_seconds} seconds versus the {request.duration_seconds}-second target. "
+            "Edit the narration before continuing."
+        )
     return {
         "title": title,
         "hook": hook,
@@ -709,7 +762,7 @@ def create_script(request: ScriptRequest):
         "estimated_duration_seconds": estimated_seconds,
         "language": request.language,
         "model": selected_model,
-        "notice": f"Draft created locally with {selected_model}. Review factual claims before publishing.",
+        "notice": notice,
     }
 
 
