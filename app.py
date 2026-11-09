@@ -691,8 +691,9 @@ def create_storyboard(request: StoryboardRequest):
                     "image_prompt": str(item.get("image_prompt", ""))[:2000],
                     "shot_type": str(item.get("shot_type", "cinematic"))[:80],
                 })
-            if any(not scene["narration"].strip() for scene in clean_scenes):
-                raise ValueError("A scene has empty narration")
+            required_fields = ("title", "narration", "visual_direction", "image_prompt", "shot_type")
+            if any(not all(scene[field].strip() for field in required_fields) for scene in clean_scenes):
+                raise ValueError("A scene is missing required storyboard content")
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             raise HTTPException(502, "The selected local model returned invalid storyboard JSON. Try the model test or another model.") from exc
         return {
