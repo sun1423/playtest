@@ -287,6 +287,15 @@ class StoryboardRequest(BaseModel):
     max_scenes: int = Field(default=4, ge=2, le=10)
 
 
+class ScriptRequest(BaseModel):
+    topic: str = Field(min_length=8, max_length=1200)
+    language: str = Field(default="en", pattern="^(hi|en)$")
+    duration_seconds: int = Field(default=60, ge=15, le=180)
+    tone: str = Field(default="engaging", pattern="^(engaging|documentary|emotional|conversational|dramatic)$")
+    audience: str = Field(default="general audience", max_length=160)
+    key_points: str = Field(default="", max_length=1200)
+
+
 @app.on_event("startup")
 def startup():
     if not SESSION_SECRET or not ADMIN_PASSWORD_HASH:
@@ -613,6 +622,95 @@ def delete_saved_project(project_id: str):
         conn.execute("DELETE FROM saved_projects WHERE id=?", (project_id,))
     shutil.rmtree((PROJECTS / project_id).resolve(), ignore_errors=True)
     return {"deleted": True, "project_id": project_id}
+
+
+@app.post("/api/script")
+def create_script(request: ScriptRequest):
+    topic = request.topic.strip()
+    audience = request.audience.strip() or "general audience"
+    key_points = request.key_points.strip()
+    if len(topic) < 8:
+        raise HTTPException(400, "Describe the video idea in at least 8 characters.")
+
+    selected_model = active_model()
+    if not selected_model:
+        raise HTTPException(409, "Activate a downloaded local model in Local AI Models first.")
+    if not any(item.get("name") == selected_model for item in installed_models()):
+        raise HTTPException(503, "The selected local model is not currently downloaded in Ollama.")
+
+    language_name = "Hindi" if request.language == "hi" else "English"
+    words_per_second = 1.8 if request.language == "hi" else 2.1
+    target_words = round(request.duration_seconds * words_per_second)
+    output_schema = {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "hook": {"type": "string"},
+            "narration": {"type": "string"},
+            "closing_line": {"type": "string"},
+        },
+        "required": ["title", "hook", "narration", "closing_line"],
+        "additionalProperties": False,
+    }
+    prompt = (
+        "Write a production-ready spoken video script from the user's idea. "
+        f"Write entirely in {language_name}. Target about {target_words} spoken words "
+        f"for a {request.duration_seconds}-second video; keep sentences natural and easy to narrate. "
+        f"Tone: {request.tone}. Intended audience: {audience}. "
+        "Return a compelling but truthful opening hook, a coherent narration with a clear beginning, "
+        "middle and ending, and one concise closing line. Do not add scene numbers, camera directions, "
+        "markdown headings, sound effects or stage directions to the narration. Do not pad or repeat ideas. "
+        "For factual or educational subjects, do not invent statistics, studies, quotations, sources, "
+        "or specific claims; use cautious wording when a detail is uncertain. "
+        "Keep the hook and closing line separate from the main narration. "
+        f"VIDEO IDEA:\\n{topic}\\n"
+        + (f"KEY POINTS TO INCLUDE:\\n{key_points}\\n" if key_points else "")
+    )
+    result = ollama_chat(selected_model, {
+        "model": selected_model,
+        "messages": [{"role": "user", "content": prompt}],
+        "format": output_schema,
+        "stream": False,
+        "think": False,
+        "keep_alive": "2m",
+        "options": {
+            "num_ctx": 4096,
+            "num_predict": min(1800, max(500, target_words * 3)),
+            "num_thread": 2,
+            "temperature": 0.35,
+        },
+    }, timeout=180)
+    try:
+        generated = json.loads(result.get("message", {}).get("content", "{}"))
+        fields = ("title", "hook", "narration", "closing_line")
+        if not isinstance(generated, dict) or any(
+            not isinstance(generated.get(field), str) or not generated[field].strip()
+            for field in fields
+        ):
+            raise ValueError("Missing script fields")
+        title = generated["title"].strip()[:160]
+        hook = generated["hook"].strip()[:1000]
+        narration = generated["narration"].strip()[:12000]
+        closing_line = generated["closing_line"].strip()[:800]
+        full_script = "\\n\\n".join((hook, narration, closing_line))
+        word_count = len(full_script.split())
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(502, "The local model returned an incomplete script. Try again or select another model.") from exc
+
+    estimated_seconds = round(word_count / words_per_second)
+    return {
+        "title": title,
+        "hook": hook,
+        "narration": narration,
+        "closing_line": closing_line,
+        "full_script": full_script,
+        "word_count": word_count,
+        "target_duration_seconds": request.duration_seconds,
+        "estimated_duration_seconds": estimated_seconds,
+        "language": request.language,
+        "model": selected_model,
+        "notice": f"Draft created locally with {selected_model}. Review factual claims before publishing.",
+    }
 
 
 @app.post("/api/storyboard")
