@@ -634,7 +634,7 @@ def work(job):
 
             concat_list = segment_dir / "concat.txt"
             concat_list.write_text(
-                "".join("file '" + str(path).replace("'", "'\\''") + "'\\n" for path in segment_paths),
+                "".join("file '" + str(path).replace("'", "'\\''") + "\n" for path in segment_paths),
                 encoding="utf-8",
             )
             joined = folder / "joined.mp4"
