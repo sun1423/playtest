@@ -162,7 +162,21 @@ function App() {
   }
 
   useEffect(() => { checkSession(); }, []);
-  useEffect(() => { if (authenticated) refreshLlm(); }, [authenticated]);
+  useEffect(() => {
+    if (!authenticated) return;
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const result = await api('/api/llm/health');
+        if (!cancelled) setLlmInfo(previous => ({ ...previous, ...result }));
+      } catch {
+        if (!cancelled) setLlmInfo(previous => ({ ...previous, ready: false, status: 'not_ready', reason: 'Status check failed' }));
+      }
+    };
+    check();
+    const timer = setInterval(check, 10000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [authenticated]);
   useEffect(() => {
     const selected = sceneFiles[activeScene]?.file;
     if (!selected) {
@@ -610,7 +624,12 @@ function App() {
       <main>
         <header>
           <div><small>AI VIDEO STUDIO</small><h1>{nav.find(item => item[0] === tab)[1]}</h1></div>
-          <button onClick={refresh}><RefreshCw/></button>
+          <div className="header-actions">
+            <button type="button" className={llmInfo.ready ? 'llm-indicator ready' : 'llm-indicator offline'} title={llmInfo.reason || 'Checking local model'} onClick={() => setTab('models')}>
+              <span className="llm-indicator-dot" />{llmInfo.ready ? 'LLM READY' : llmInfo.status === 'downloading' ? 'LLM DOWNLOADING' : 'LLM NOT READY'}
+            </button>
+            <button onClick={refresh}><RefreshCw/></button>
+          </div>
         </header>
         {msg && <p className="msg">{msg}</p>}
         {tab === 'create' && <section>
