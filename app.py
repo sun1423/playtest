@@ -8,6 +8,7 @@ import hashlib
 import secrets
 import subprocess
 import importlib.util
+import shutil
 from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime, timezone
@@ -136,6 +137,28 @@ def update(job_id, **values):
             f"UPDATE jobs SET {assignments} WHERE id=?",
             (*values.values(), job_id),
         )
+
+
+def cleanup_upload(input_path):
+    if not input_path:
+        return
+    source = Path(input_path).resolve()
+    upload_root = UP.resolve()
+    if upload_root not in source.parents:
+        return
+    source.unlink(missing_ok=True)
+    try:
+        source.parent.rmdir()
+    except OSError:
+        pass
+
+
+def cleanup_failed_output(job_id):
+    folder = (OUT / job_id).resolve()
+    output_root = OUT.resolve()
+    if output_root not in folder.parents:
+        return
+    shutil.rmtree(folder, ignore_errors=True)
 
 
 app = FastAPI(title="AI Video Studio")
@@ -324,6 +347,8 @@ def work(job):
     job_id = job["id"]
     payload = job["payload"]
     folder = OUT / job_id
+    # A recovered job may have a partial export from before the worker stopped.
+    cleanup_failed_output(job_id)
     folder.mkdir(parents=True, exist_ok=True)
 
     if job["kind"] == "video_transform":
@@ -340,11 +365,12 @@ def work(job):
         update(job_id, stage="FFmpeg rendering", progress=20)
         subprocess.run(
             [
-                "ffmpeg", "-y", "-i", job["input_path"],
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+                "-y", "-i", job["input_path"],
                 "-map", "0:v:0", "-map", "0:a?",
-                "-vf", video_filter, "-c:v", "libx264",
-                "-preset", "veryfast", "-crf", "21",
-                "-c:a", "aac", "-movflags", "+faststart",
+                "-vf", video_filter, "-filter_threads", "1",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
+                "-threads", "2", "-c:a", "aac", "-movflags", "+faststart",
                 str(destination),
             ],
             check=True,
@@ -402,7 +428,11 @@ def worker():
         try:
             work(job)
         except Exception as error:
+            cleanup_failed_output(job["id"])
             update(job["id"], status="failed", stage="Failed", error=str(error)[:2000])
+        finally:
+            # Keep the source only while queued/running so a crashed worker can recover it.
+            cleanup_upload(job.get("input_path"))
 
 
 if __name__ == "__main__":
