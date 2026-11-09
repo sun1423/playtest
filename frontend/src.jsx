@@ -338,10 +338,46 @@ function App() {
     }
   }
 
+  async function saveTimelineProject() {
+    if (!sceneFiles.length) return;
+    const form = new FormData();
+    const scenes = sceneFiles.map(scene => {
+      const assetIndex = form.getAll('assets').length;
+      form.append('assets', scene.file, scene.file.name);
+      return { asset_index: assetIndex, trimStart: scene.trimStart, trimEnd: scene.trimEnd, transition: scene.transition };
+    });
+    let musicAssetIndex = null;
+    if (musicFile) {
+      musicAssetIndex = form.getAll('assets').length;
+      form.append('assets', musicFile, musicFile.name);
+    }
+    let subtitleAssetIndex = null;
+    if (subtitleFile) {
+      subtitleAssetIndex = form.getAll('assets').length;
+      form.append('assets', subtitleFile, subtitleFile.name);
+    }
+    form.append('name', savedProjectName.trim() || 'Untitled timeline');
+    form.append('kind', 'timeline');
+    form.append('project_data', JSON.stringify({
+      scenes, music_asset_index: musicAssetIndex, subtitle_asset_index: subtitleAssetIndex,
+      preset, framing, audioMode, musicVolume, transitionDuration, overlayText, overlayPosition
+    }));
+    setSavingProject(true);
+    try {
+      await api('/api/saved-projects', { method: 'POST', body: form });
+      setMsg('Timeline saved. You can reopen it from Projects.');
+      setSavedProjectName('');
+      refresh();
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      setSavingProject(false);
+    }
+  }
+
   async function openSavedProject(projectId) {
     try {
       const result = await api('/api/saved-projects/' + encodeURIComponent(projectId));
-      if (result.kind !== 'storyboard') throw Error('Unsupported saved project type');
       const data = result.data;
       const assets = data.assets || [];
       const loadAsset = async index => {
@@ -351,22 +387,40 @@ function App() {
         const blob = await response.blob();
         return new File([blob], assets[index].original_name || assets[index].filename, { type: blob.type });
       };
-      const scenes = await Promise.all((data.scenes || []).map(async scene => ({
-        ...scene, imageFile: await loadAsset(scene.image_asset_index)
-      })));
-      setStoryScenes(scenes);
-      setStoryScript(data.script || '');
-      setStoryLanguage(data.language || 'en');
-      setStorySceneLimit(String(data.scene_limit || scenes.length));
-      setMusicFile(await loadAsset(data.music_asset_index));
+      if (result.kind === 'storyboard') {
+        const scenes = await Promise.all((data.scenes || []).map(async scene => ({
+          ...scene, imageFile: await loadAsset(scene.image_asset_index)
+        })));
+        setStoryScenes(scenes);
+        setStoryScript(data.script || '');
+        setStoryLanguage(data.language || 'en');
+        setStorySceneLimit(String(data.scene_limit || scenes.length));
+        setMusicFile(await loadAsset(data.music_asset_index));
+        setTab('storyboard');
+      } else if (result.kind === 'timeline') {
+        const scenes = await Promise.all((data.scenes || []).map(async (scene, index) => ({
+          id: 'saved-' + projectId + '-' + index,
+          file: await loadAsset(scene.asset_index),
+          trimStart: String(scene.trimStart ?? '0'),
+          trimEnd: String(scene.trimEnd ?? '0'),
+          transition: scene.transition || 'cut'
+        })));
+        setSceneFiles(scenes);
+        setActiveScene(0);
+        setMusicFile(await loadAsset(data.music_asset_index));
+        setSubtitleFile(await loadAsset(data.subtitle_asset_index));
+        setAudioMode(data.audioMode || 'keep');
+        setTab('timeline');
+      } else {
+        throw Error('Unsupported saved project type');
+      }
       setPreset(data.preset || 'reel');
       setFraming(data.framing || 'fill');
       setTransitionDuration(String(data.transitionDuration || '0.5'));
       setMusicVolume(Number(data.musicVolume ?? 0.35));
       setOverlayText(data.overlayText || '');
       setOverlayPosition(data.overlayPosition || 'bottom');
-      setTab('storyboard');
-      setMsg('Saved storyboard reopened: ' + result.name);
+      setMsg('Saved ' + result.kind + ' reopened: ' + result.name);
     } catch (error) {
       setMsg(error.message);
     }
@@ -638,6 +692,7 @@ function App() {
                 {Number(scene.trimEnd) > 0 && Number(scene.trimEnd) <= Number(scene.trimStart) && <small className="validation-error">End must be greater than start.</small>}
               </article>)}
             </div>
+            <div className="saved-project-form"><input aria-label="Saved timeline name" value={savedProjectName} onChange={event => setSavedProjectName(event.target.value)} placeholder="Project name (optional)" maxLength={100}/><button type="button" className="primary" disabled={savingProject} onClick={saveTimelineProject}>{savingProject ? 'Saving…' : 'Save timeline'}</button></div>
             <form onSubmit={renderTimeline}>
               <label>FADE DURATION<select value={transitionDuration} onChange={event => setTransitionDuration(event.target.value)}><option value="0.5">0.5 seconds</option><option value="1">1 second</option></select></label>
               <div className="row">
