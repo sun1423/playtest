@@ -18,6 +18,8 @@ function App() {
   const [voice, setVoice] = useState('');
   const [file, setFile] = useState(null);
   const [preset, setPreset] = useState('reel');
+  const [framing, setFraming] = useState('fill');
+  const [audioMode, setAudioMode] = useState('keep');
   const [name, setName] = useState('');
   const [wav, setWav] = useState(null);
   const [msg, setMsg] = useState('');
@@ -113,6 +115,8 @@ function App() {
     const form = new FormData();
     form.append('file', file);
     form.append('preset', preset);
+    form.append('framing', framing);
+    form.append('audio', audioMode);
     setBusy(true);
     try {
       await api('/api/video', { method: 'POST', body: form });
@@ -201,7 +205,11 @@ function App() {
           <p>Original video stays untouched. New export rendered with FFmpeg on Azure.</p>
           <form onSubmit={upload}>
             <label className="drop"><Upload/><b>{file?.name || 'Choose a video file'}</b><small>MP4 / MOV / MKV / WebM</small><input type="file" accept="video/*" onChange={event => setFile(event.target.files[0])}/></label>
-            <label>EXPORT<select value={preset} onChange={event => setPreset(event.target.value)}><option value="reel">Reels / Shorts · 9:16</option><option value="landscape">YouTube · 16:9</option><option value="square">Square · 1:1</option></select></label>
+            <div className="row">
+              <label>EXPORT FORMAT<select value={preset} onChange={event => setPreset(event.target.value)}><option value="reel">Reels / Shorts · 9:16</option><option value="landscape">YouTube · 16:9</option><option value="square">Square · 1:1</option></select></label>
+              <label>FRAMING<select value={framing} onChange={event => setFraming(event.target.value)}><option value="fill">Fill frame · crop edges</option><option value="fit">Fit whole video · black bars</option></select></label>
+            </div>
+            <label>AUDIO<select value={audioMode} onChange={event => setAudioMode(event.target.value)}><option value="keep">Keep original audio</option><option value="mute">Remove audio</option></select></label>
             <button className="primary" disabled={!file || busy}>Queue video transform</button>
           </form>
         </section>}
