@@ -3,14 +3,17 @@ import sqlite3
 import json
 import uuid
 import time
+import hmac
+import hashlib
+import secrets
 import subprocess
 import importlib.util
 from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 ROOT = Path(os.getenv("STUDIO_ROOT", "/srv/ai-video-studio"))
@@ -21,6 +24,13 @@ VOICES = ROOT / "voices"
 MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
 MAX_VOICE = int(os.getenv("MAX_VOICE_MB", "30")) * 1024 * 1024
 ENABLE_TTS = os.getenv("ENABLE_TTS", "0") == "1"
+ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
+SESSION_SECRET = os.getenv("SESSION_SECRET", "")
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "0") == "1"
+SESSION_SECONDS = 12 * 60 * 60
+LOGIN_ATTEMPTS = {}
+LOGIN_WINDOW = 15 * 60
+MAX_LOGIN_ATTEMPTS = 8
 
 for path in (ROOT, UP, OUT, VOICES):
     path.mkdir(parents=True, exist_ok=True)
@@ -54,6 +64,38 @@ def init():
                 output_path TEXT, error TEXT, created_at TEXT, updated_at TEXT
             )"""
         )
+
+
+def password_matches(password):
+    try:
+        salt, expected = ADMIN_PASSWORD_HASH.split("$", 1)
+        actual = hashlib.pbkdf2_hmac(
+            "sha256", password.encode(), bytes.fromhex(salt), 310000
+        ).hex()
+        return hmac.compare_digest(actual, expected)
+    except (ValueError, TypeError):
+        return False
+
+
+def make_session():
+    expires = str(int(time.time()) + SESSION_SECONDS)
+    signature = hmac.new(
+        SESSION_SECRET.encode(), expires.encode(), hashlib.sha256
+    ).hexdigest()
+    return expires + "." + signature
+
+
+def valid_session(token):
+    try:
+        expires, signature = token.split(".", 1)
+        if int(expires) < int(time.time()):
+            return False
+        expected = hmac.new(
+            SESSION_SECRET.encode(), expires.encode(), hashlib.sha256
+        ).hexdigest()
+        return hmac.compare_digest(signature, expected)
+    except (ValueError, TypeError):
+        return False
 
 
 def tts_runtime_ready():
@@ -99,6 +141,20 @@ def update(job_id, **values):
 app = FastAPI(title="AI Video Studio")
 
 
+@app.middleware("http")
+async def require_login(request: Request, call_next):
+    if request.url.path in {"/api/auth/login", "/api/auth/session", "/api/health"}:
+        return await call_next(request)
+    token = request.cookies.get("studio_session", "")
+    if not SESSION_SECRET or not ADMIN_PASSWORD_HASH or not valid_session(token):
+        return JSONResponse({"detail": "Authentication required"}, status_code=401)
+    return await call_next(request)
+
+
+class LoginRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=256)
+
+
 class TTS(BaseModel):
     text: str = Field(min_length=1, max_length=12000)
     language: str = "hi"
@@ -107,6 +163,8 @@ class TTS(BaseModel):
 
 @app.on_event("startup")
 def startup():
+    if not SESSION_SECRET or not ADMIN_PASSWORD_HASH:
+        raise RuntimeError("Authentication secrets are not configured.")
     init()
 
 
@@ -119,7 +177,48 @@ def health():
         "worker": "separate process",
         "tts_ready": tts_runtime_ready(),
         "video_transform_ready": True,
+        "authentication": True,
     }
+
+
+@app.get("/api/auth/session")
+def auth_session(request: Request):
+    if valid_session(request.cookies.get("studio_session", "")):
+        return {"authenticated": True}
+    return JSONResponse({"authenticated": False}, status_code=401)
+
+
+@app.post("/api/auth/login")
+def login(payload: LoginRequest, request: Request):
+    now = time.time()
+    client = request.client.host if request.client else "unknown"
+    attempts, started = LOGIN_ATTEMPTS.get(client, (0, now))
+    if now - started > LOGIN_WINDOW:
+        attempts, started = 0, now
+    if attempts >= MAX_LOGIN_ATTEMPTS:
+        raise HTTPException(429, "Too many login attempts. Try again in 15 minutes.")
+    if not password_matches(payload.password):
+        LOGIN_ATTEMPTS[client] = (attempts + 1, started)
+        raise HTTPException(401, "Incorrect password.")
+    LOGIN_ATTEMPTS.pop(client, None)
+    response = JSONResponse({"authenticated": True})
+    response.set_cookie(
+        "studio_session",
+        make_session(),
+        max_age=SESSION_SECONDS,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="strict",
+        path="/api",
+    )
+    return response
+
+
+@app.post("/api/auth/logout")
+def logout():
+    response = JSONResponse({"authenticated": False})
+    response.delete_cookie("studio_session", path="/api", httponly=True, samesite="strict")
+    return response
 
 
 @app.get("/api/jobs")
