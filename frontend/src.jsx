@@ -1,1 +1,235 @@
-import React,{useEffect,useState} from 'react';import{createRoot}from'react-dom/client';import{Clapperboard,Film,Mic2,FolderOpen,Upload,Play,RefreshCw,Download,WandSparkles}from'lucide-react';import'./style.css';function App(){const[tab,S]=useState('create'),[jobs,J]=useState([]),[voices,V]=useState([]),[text,T]=useState(''),[lang,L]=useState('hi'),[voice,Q]=useState(''),[file,F]=useState(null),[preset,P]=useState('reel'),[name,N]=useState(''),[wav,W]=useState(null),[msg,M]=useState(''),[status,H]=useState('Connecting…'),[busy,B]=useState(false);async function api(url,opt){let r=await fetch(url,opt);let d=await r.json();if(!r.ok)throw Error(d.detail||'Request failed');return d}async function refresh(){try{J(await api('/api/jobs'));V(await api('/api/voices'));H('Azure connected')}catch{H('Server offline')}}useEffect(()=>{refresh();let t=setInterval(refresh,5000);return()=>clearInterval(t)},[]);async function run(e){e.preventDefault();B(true);try{await api('/api/tts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,language:lang,voice_id:voice})});T('');M('Narration queued on Azure')}catch(x){M(x.message)}B(false);refresh()}async function upload(e){e.preventDefault();let f=new FormData();f.append('file',file);f.append('preset',preset);B(true);try{await api('/api/video',{method:'POST',body:f});M('Video queued on Azure')}catch(x){M(x.message)}B(false);refresh()}async function addVoice(e){e.preventDefault();let f=new FormData();f.append('name',name);f.append('file',wav);try{await api('/api/voices',{method:'POST',body:f});M('Voice reference saved');refresh()}catch(x){M(x.message)}}let nav=[['create','Create video',WandSparkles],['transform','Transform',Film],['voice','Voice studio',Mic2],['projects','Projects',FolderOpen]];return <div className="shell"><aside><h2><Clapperboard/> FRAME / AI</h2><small>YOUR VIDEO WORKSPACE</small>{nav.map(([id,label,Icon])=><button className={tab===id?'active':''} onClick={()=>S(id)}><Icon size={17}/>{label}</button>)}<p className="server">● {status}<br/><small>Server-side processing</small></p></aside><main><header><div><small>AI VIDEO STUDIO</small><h1>{nav.find(x=>x[0]===tab)[1]}</h1></div><button onClick={refresh}><RefreshCw/></button></header>{msg&&<p className="msg">{msg}</p>}{tab==='create'&&<section><span>AI VIDEO WORKFLOW</span><h1>Make your next story<br/><i>worth watching.</i></h1><p>Generate Hindi or English narration on Azure. Prompt-to-video scenes will be enabled after CPU image generation is benchmarked.</p><form onSubmit={run}><label>NARRATION TEXT</label><textarea value={text} onChange={e=>T(e.target.value)} rows="7" placeholder="Write your Hindi or English narration…" required/><div className="row"><label>LANGUAGE<select value={lang} onChange={e=>L(e.target.value)}><option value="hi">Hindi</option><option value="en">English</option></select></label><label>VOICE PROFILE<select value={voice} onChange={e=>Q(e.target.value)}><option value="">Default</option>{voices.map(v=><option value={v.voice_id}>{v.voice_id}</option>)}</select></label></div><button className="primary" disabled={busy||!text.trim()}><Play size={16}/> Generate narration</button></form><div className="note">● Single neural worker　● CPU inference　● Azure jobs</div></section>}{tab==='transform'&&<section><span>UPLOAD WORKFLOW</span><h1>Reframe your footage.</h1><p>Original video stays untouched. New export rendered with FFmpeg on Azure.</p><form onSubmit={upload}><label className="drop"><Upload/><b>{file?.name||'Choose a video file'}</b><small>MP4 / MOV / MKV / WebM</small><input type="file" accept="video/*" onChange={e=>F(e.target.files[0])}/></label><label>EXPORT<select value={preset} onChange={e=>P(e.target.value)}><option value="reel">Reels / Shorts · 9:16</option><option value="landscape">YouTube · 16:9</option><option value="square">Square · 1:1</option></select></label><button className="primary" disabled={!file||busy}>Queue video transform</button></form></section>}{tab==='voice'&&<section><span>VOICE LIBRARY</span><h1>Your voice profiles.</h1><p>Upload a clean WAV reference for Chatterbox voice conditioning.</p><form onSubmit={addVoice}><label>PROFILE NAME<input value={name} onChange={e=>N(e.target.value)} required/></label><label className="drop"><Mic2/><b>{wav?.name||'Choose reference WAV'}</b><input type="file" accept=".wav" onChange={e=>W(e.target.files[0])}/></label><button className="primary" disabled={!wav||!name}>Save voice reference</button></form>{voices.map(v=><p>🎙 {v.voice_id}</p>)}</section>}{tab==='projects'&&<section><span>JOB QUEUE</span>{jobs.length===0?<p>No jobs yet.</p>:jobs.map(j=><article><b>{j.kind.replaceAll('_',' ')}</b><small>{j.stage} · {j.status}</small><progress value={j.progress} max="100"/>{j.status==='completed'&&<a href={'/api/jobs/'+j.id+'/output'}><Download size={16}/> Download</a>}{j.error&&<p>{j.error}</p>}</article>)}</section>}<footer>AZURE SERVER EXECUTION · ONE NEURAL JOB AT A TIME</footer></main></div>}createRoot(document.getElementById('root')).render(<App/>);
+import React, { useEffect, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import {
+  Clapperboard, Film, Mic2, FolderOpen, Upload, Play, RefreshCw,
+  Download, WandSparkles, LogOut, LockKeyhole
+} from 'lucide-react';
+import './style.css';
+
+function App() {
+  const [authenticated, setAuthenticated] = useState(false);
+  const [checking, setChecking] = useState(true);
+  const [password, setPassword] = useState('');
+  const [tab, setTab] = useState('create');
+  const [jobs, setJobs] = useState([]);
+  const [voices, setVoices] = useState([]);
+  const [text, setText] = useState('');
+  const [lang, setLang] = useState('hi');
+  const [voice, setVoice] = useState('');
+  const [file, setFile] = useState(null);
+  const [preset, setPreset] = useState('reel');
+  const [name, setName] = useState('');
+  const [wav, setWav] = useState(null);
+  const [msg, setMsg] = useState('');
+  const [status, setStatus] = useState('Connecting…');
+  const [busy, setBusy] = useState(false);
+
+  async function api(url, options) {
+    const response = await fetch(url, options);
+    const data = await response.json();
+    if (!response.ok) throw Error(data.detail || 'Request failed');
+    return data;
+  }
+
+  async function checkSession() {
+    try {
+      await api('/api/auth/session');
+      setAuthenticated(true);
+    } catch {
+      setAuthenticated(false);
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  async function login(event) {
+    event.preventDefault();
+    setBusy(true);
+    setMsg('');
+    try {
+      await api('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password })
+      });
+      setPassword('');
+      setAuthenticated(true);
+      setMsg('Signed in securely.');
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function logout() {
+    try { await api('/api/auth/logout', { method: 'POST' }); } catch {}
+    setAuthenticated(false);
+    setJobs([]);
+    setVoices([]);
+    setMsg('You have been signed out.');
+  }
+
+  async function refresh() {
+    try {
+      const [jobList, voiceList] = await Promise.all([
+        api('/api/jobs'), api('/api/voices')
+      ]);
+      setJobs(jobList);
+      setVoices(voiceList);
+      setStatus('Azure connected');
+    } catch (error) {
+      setStatus(error.message === 'Authentication required' ? 'Session expired' : 'Server offline');
+      if (error.message === 'Authentication required') setAuthenticated(false);
+    }
+  }
+
+  useEffect(() => { checkSession(); }, []);
+  useEffect(() => {
+    if (!authenticated) return;
+    refresh();
+    const timer = setInterval(refresh, 5000);
+    return () => clearInterval(timer);
+  }, [authenticated]);
+
+  async function run(event) {
+    event.preventDefault();
+    setBusy(true);
+    try {
+      await api('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, language: lang, voice_id: voice })
+      });
+      setText('');
+      setMsg('Narration queued on Azure');
+    } catch (error) { setMsg(error.message); }
+    setBusy(false);
+    refresh();
+  }
+
+  async function upload(event) {
+    event.preventDefault();
+    const form = new FormData();
+    form.append('file', file);
+    form.append('preset', preset);
+    setBusy(true);
+    try {
+      await api('/api/video', { method: 'POST', body: form });
+      setMsg('Video queued on Azure');
+    } catch (error) { setMsg(error.message); }
+    setBusy(false);
+    refresh();
+  }
+
+  async function addVoice(event) {
+    event.preventDefault();
+    const form = new FormData();
+    form.append('name', name);
+    form.append('file', wav);
+    try {
+      await api('/api/voices', { method: 'POST', body: form });
+      setMsg('Voice reference saved');
+      refresh();
+    } catch (error) { setMsg(error.message); }
+  }
+
+  const nav = [
+    ['create', 'Create video', WandSparkles],
+    ['transform', 'Transform', Film],
+    ['voice', 'Voice studio', Mic2],
+    ['projects', 'Projects', FolderOpen]
+  ];
+
+  if (checking) return <div className="auth-shell"><section><p>Checking secure session…</p></section></div>;
+
+  if (!authenticated) return (
+    <div className="auth-shell">
+      <section className="auth-card">
+        <h2><Clapperboard/> FRAME / AI</h2>
+        <span>PRIVATE VIDEO WORKSPACE</span>
+        <h1><LockKeyhole/> Sign in</h1>
+        <p>This studio is private. Enter your administrator password to continue.</p>
+        {msg && <p className="msg">{msg}</p>}
+        <form onSubmit={login}>
+          <label>ADMINISTRATOR PASSWORD
+            <input type="password" value={password} onChange={event => setPassword(event.target.value)}
+              autoComplete="current-password" required autoFocus />
+          </label>
+          <button className="primary" disabled={busy || !password}>Sign in securely</button>
+        </form>
+      </section>
+    </div>
+  );
+
+  return (
+    <div className="shell">
+      <aside>
+        <h2><Clapperboard/> FRAME / AI</h2>
+        <small>YOUR VIDEO WORKSPACE</small>
+        {nav.map(([id, label, Icon]) =>
+          <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}>
+            <Icon size={17}/>{label}
+          </button>
+        )}
+        <button onClick={logout}><LogOut size={17}/>Sign out</button>
+        <p className="server">● {status}<br/><small>Server-side processing</small></p>
+      </aside>
+      <main>
+        <header>
+          <div><small>AI VIDEO STUDIO</small><h1>{nav.find(item => item[0] === tab)[1]}</h1></div>
+          <button onClick={refresh}><RefreshCw/></button>
+        </header>
+        {msg && <p className="msg">{msg}</p>}
+        {tab === 'create' && <section>
+          <span>AI VIDEO WORKFLOW</span>
+          <h1>Make your next story<br/><i>worth watching.</i></h1>
+          <p>Generate Hindi or English narration on Azure. Prompt-to-video scenes will be enabled after CPU image generation is benchmarked.</p>
+          <form onSubmit={run}>
+            <label>NARRATION TEXT</label>
+            <textarea value={text} onChange={event => setText(event.target.value)} rows="7" placeholder="Write your Hindi or English narration…" required/>
+            <div className="row">
+              <label>LANGUAGE<select value={lang} onChange={event => setLang(event.target.value)}><option value="hi">Hindi</option><option value="en">English</option></select></label>
+              <label>VOICE PROFILE<select value={voice} onChange={event => setVoice(event.target.value)}><option value="">Default</option>{voices.map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}</select></label>
+            </div>
+            <button className="primary" disabled={busy || !text.trim()}><Play size={16}/> Generate narration</button>
+          </form>
+          <div className="note">● Single neural worker　● CPU inference　● Azure jobs</div>
+        </section>}
+        {tab === 'transform' && <section>
+          <span>UPLOAD WORKFLOW</span><h1>Reframe your footage.</h1>
+          <p>Original video stays untouched. New export rendered with FFmpeg on Azure.</p>
+          <form onSubmit={upload}>
+            <label className="drop"><Upload/><b>{file?.name || 'Choose a video file'}</b><small>MP4 / MOV / MKV / WebM</small><input type="file" accept="video/*" onChange={event => setFile(event.target.files[0])}/></label>
+            <label>EXPORT<select value={preset} onChange={event => setPreset(event.target.value)}><option value="reel">Reels / Shorts · 9:16</option><option value="landscape">YouTube · 16:9</option><option value="square">Square · 1:1</option></select></label>
+            <button className="primary" disabled={!file || busy}>Queue video transform</button>
+          </form>
+        </section>}
+        {tab === 'voice' && <section>
+          <span>VOICE LIBRARY</span><h1>Your voice profiles.</h1>
+          <p>Upload a clean WAV reference for Chatterbox voice conditioning.</p>
+          <form onSubmit={addVoice}>
+            <label>PROFILE NAME<input value={name} onChange={event => setName(event.target.value)} required/></label>
+            <label className="drop"><Mic2/><b>{wav?.name || 'Choose reference WAV'}</b><input type="file" accept=".wav" onChange={event => setWav(event.target.files[0])}/></label>
+            <button className="primary" disabled={!wav || !name}>Save voice reference</button>
+          </form>
+          {voices.map(item => <p key={item.voice_id}>🎙 {item.voice_id}</p>)}
+        </section>}
+        {tab === 'projects' && <section>
+          <span>JOB QUEUE</span>
+          {jobs.length === 0 ? <p>No jobs yet.</p> : jobs.map(job =>
+            <article key={job.id}>
+              <b>{job.kind.replaceAll('_', ' ')}</b><small>{job.stage} · {job.status}</small>
+              <progress value={job.progress} max="100"/>
+              {job.status === 'completed' && <a href={'/api/jobs/' + job.id + '/output'}><Download size={16}/> Download</a>}
+              {job.error && <p>{job.error}</p>}
+            </article>
+          )}
+        </section>}
+        <footer>AZURE SERVER EXECUTION · ONE NEURAL JOB AT A TIME</footer>
+      </main>
+    </div>
+  );
+}
+
+createRoot(document.getElementById('root')).render(<App/>);
