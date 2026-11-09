@@ -1027,7 +1027,7 @@ function App() {
             </article>
           )}
         </section>}
-        <footer>AZURE SERVER EXECUTION · ONE NEURAL JOB AT A TIME</footer>
+        <footer>AZURE JOB QUEUE · OPTIONAL GPU RUNNER · HINDI/ENGLISH CUSTOM VOICE</footer>
       </main>
     </div>
   );
