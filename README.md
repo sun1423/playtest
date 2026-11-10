@@ -6,3 +6,6 @@ Voice Studio prepares an up-to-20-second WAV reference, transcribes it locally i
 
 
 CPU Hindi video dubbing and lip-sync is available on the feature branch. It uses the saved Pocket TTS voice profile and ONNX Wav2Lip CPU inference; setup, hardware benchmark, limitations and weight-license notes are in [docs/CPU_VIDEO_DUB.md](docs/CPU_VIDEO_DUB.md). This is mouth re-animation of the real source footage, not full facial-expression generation.
+
+
+The CPU video-dub workflow uses saved Pocket TTS Hindi profiles, Wav2Lip ONNX lip-sync, and optional full-frame ONNX styles (AnimeGANv2 512px or faster 224px painterly presets). See [docs/CPU_VIDEO_DUB.md](docs/CPU_VIDEO_DUB.md) for setup and measured CPU performance.
