@@ -2552,7 +2552,8 @@ def work(job):
         ]
         update(job_id, stage="Replacing faces on CPU", progress=15)
         result = subprocess.run(
-            command, capture_output=True, text=True, timeout=7200, check=False
+            command, capture_output=True, text=True, timeout=7200, check=False,
+            cwd=str(FACEFUSION_ROOT),
         )
         if result.returncode or not raw_output.is_file():
             detail = (result.stderr or result.stdout or "FaceFusion did not produce an output video.")[-1800:]
