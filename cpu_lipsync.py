@@ -105,10 +105,7 @@ def _run(command: list[str], timeout: int = 600) -> subprocess.CompletedProcess:
 
 def media_stream_duration(data: dict, stream: dict | None) -> float:
     """Prefer the requested stream's duration over the container's longest stream."""
-    candidates = (
-        (stream or {}).get("duration"),
-        (data.get("format") or {}).get("duration"),
-    )
+    candidates = ((stream or {}).get("duration"),)
     for candidate in candidates:
         try:
             duration = float(candidate)
