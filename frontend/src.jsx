@@ -6,6 +6,13 @@ import {
 } from 'lucide-react';
 import './style.css';
 
+function formatTrimTime(value) {
+  const seconds = Math.max(0, Number(value) || 0);
+  const minutes = Math.floor(seconds / 60);
+  const remainder = (seconds % 60).toFixed(1).padStart(4, '0');
+  return String(minutes).padStart(2, '0') + ':' + remainder;
+}
+
 function App() {
   const [authenticated, setAuthenticated] = useState(false);
   const [checking, setChecking] = useState(true);
@@ -61,6 +68,7 @@ function App() {
   const [editingTransformId, setEditingTransformId] = useState('');
   const [trimStart, setTrimStart] = useState('0');
   const [trimEnd, setTrimEnd] = useState('0');
+  const [trimDuration, setTrimDuration] = useState(0);
   const [musicVolume, setMusicVolume] = useState(0.35);
   const [transitionDuration, setTransitionDuration] = useState('0.5');
   const [preset, setPreset] = useState('reel');
@@ -362,6 +370,7 @@ function App() {
     setFile(null);
     setTrimStart(String(options.trim_start ?? 0));
     setTrimEnd(String(options.trim_end ?? 0));
+    setTrimDuration(0);
     setPreset(options.preset || 'reel');
     setFraming(options.framing || 'fill');
     setAudioMode(options.audio || 'keep');
@@ -376,11 +385,24 @@ function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
+  function handleTrimDurationLoaded(event) {
+    const duration = Number(event.currentTarget.duration);
+    if (!Number.isFinite(duration) || duration <= 0) return;
+    setTrimDuration(duration);
+    const safeStart = Math.min(Math.max(0, Number(trimStart) || 0), Math.max(0, duration - 0.1));
+    if (safeStart !== Number(trimStart)) setTrimStart(safeStart.toFixed(1));
+    const currentEnd = Number(trimEnd) || 0;
+    if (currentEnd > 0 && (currentEnd <= safeStart || currentEnd > duration)) setTrimEnd('0');
+  }
+
   function cancelTransformEdit() {
     setEditingTransformId('');
     setFile(null);
     setMusicFile(null);
     setSubtitleFile(null);
+    setTrimDuration(0);
+    setTrimStart('0');
+    setTrimEnd('0');
     setMsg('Edit cancelled. Original saved transformation remains unchanged.');
   }
 
@@ -906,6 +928,10 @@ function App() {
     job.kind === 'video_transform' && !(job.payload?.scenes?.length)
   );
   const editingTransformJob = jobs.find(job => job.id === editingTransformId);
+  const trimEndValue = Number(trimEnd) > 0 ? Math.min(Number(trimEnd), trimDuration) : trimDuration;
+  const trimStartValue = Math.min(Math.max(0, Number(trimStart) || 0), Math.max(0, trimEndValue - 0.1));
+  const trimStartMax = trimDuration > 0 ? Math.max(0, trimEndValue - 0.1) : 0;
+  const trimEndMin = trimDuration > 0 ? Math.min(trimDuration, trimStartValue + 0.1) : 0;
   const nav = [
     ['create', 'Create video', WandSparkles],
     ['writer', 'Script Writer', WandSparkles],
@@ -1159,22 +1185,49 @@ function App() {
             <b>Editing a saved transformation</b>
             <small>{jobs.find(job => job.id === editingTransformId)?.payload?.source_filename || 'Original source video'} · original file and saved assets will be reused unless replaced below.</small>
             <div className="video-preview">
-              <video src={'/api/jobs/' + editingTransformId + '/source'} controls playsInline preload="metadata"/>
-              <small>Saved original source · choose a replacement above to use a different clip</small>
+              {!file && <video src={'/api/jobs/' + editingTransformId + '/source'} controls playsInline preload="metadata" onLoadedMetadata={handleTrimDurationLoaded}/>}
+              <small>{file ? 'Replacement selected below' : 'Saved original source · choose a replacement above to use a different clip'}</small>
             </div>
             <button type="button" onClick={cancelTransformEdit}>Cancel editing</button>
           </div>}
           <form onSubmit={upload}>
-            <label className="drop"><Upload/><b>{file?.name || (editingTransformId ? 'Keep saved original video or choose a replacement' : 'Choose a video file')}</b><small>MP4 / MOV / MKV / WebM · max 500 MB</small><input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={event => setFile(event.target.files?.[0] || null)}/></label>
+            <label className="drop"><Upload/><b>{file?.name || (editingTransformId ? 'Keep saved original video or choose a replacement' : 'Choose a video file')}</b><small>MP4 / MOV / MKV / WebM · max 500 MB</small><input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={event => {
+              const selectedFile = event.target.files?.[0] || null;
+              setFile(selectedFile);
+              setTrimDuration(0);
+              setTrimStart('0');
+              setTrimEnd('0');
+            }}/></label>
             {previewUrl && <div className="video-preview">
-              <video src={previewUrl} controls playsInline preload="metadata"/>
+              <video src={previewUrl} controls playsInline preload="metadata" onLoadedMetadata={handleTrimDurationLoaded}/>
               {overlayText && <div className={"preview-title preview-" + overlayPosition}>{overlayText}</div>}
               <small>Selected source preview · the upload is stored separately from previous exports</small>
             </div>}
-            {editingTransformId && <small className="transform-source-note">No replacement file selected: the saved original will be used.</small>}
-            <div className="row">
-              <label>TRIM START (SECONDS)<input type="number" min="0" max="14400" step="0.1" value={trimStart} onChange={event => setTrimStart(event.target.value)}/></label>
-              <label>TRIM END (SECONDS · 0 = FULL LENGTH)<input type="number" min="0" max="14400" step="0.1" value={trimEnd} onChange={event => setTrimEnd(event.target.value)}/></label>
+            {editingTransformId && !file && <small className="transform-source-note">No replacement file selected: the saved original will be used.</small>}
+            <div className="transform-trim-controls">
+              <div className="transform-trim-heading">
+                <div><b>CHOOSE THE CLIP RANGE</b><small>Drag either slider. The time boxes update automatically.</small></div>
+                <small>{trimDuration > 0 ? 'Video length · ' + formatTrimTime(trimDuration) : 'Upload a video to enable trimming'}</small>
+              </div>
+              <div className="transform-trim-readouts">
+                <label><span>START TIME</span><output>{formatTrimTime(trimStartValue)}</output></label>
+                <label><span>END TIME</span><output>{trimDuration > 0 ? formatTrimTime(trimEndValue) : '00:00.0'}</output></label>
+              </div>
+              <label className="transform-trim-slider">
+                <span><b>START</b><output>{formatTrimTime(trimStartValue)}</output></span>
+                <input type="range" min="0" max={trimStartMax} step="0.1" value={trimStartValue}
+                  disabled={!trimDuration || trimDuration <= 0.1}
+                  onChange={event => setTrimStart(Number(event.target.value).toFixed(1))}/>
+              </label>
+              <label className="transform-trim-slider">
+                <span><b>END</b><output>{trimDuration > 0 ? formatTrimTime(trimEndValue) : '00:00.0'}</output></span>
+                <input type="range" min={trimEndMin} max={trimDuration || 0} step="0.1" value={trimEndValue}
+                  disabled={!trimDuration || trimDuration <= 0.1}
+                  onChange={event => {
+                    const nextEnd = Number(event.target.value);
+                    setTrimEnd(nextEnd >= trimDuration - 0.05 ? '0' : nextEnd.toFixed(1));
+                  }}/>
+              </label>
             </div>
             <div className="row">
               <label>EXPORT FORMAT<select value={preset} onChange={event => setPreset(event.target.value)}><option value="reel">Reels / Shorts · 9:16</option><option value="landscape">YouTube · 16:9</option><option value="square">Square · 1:1</option></select></label>
