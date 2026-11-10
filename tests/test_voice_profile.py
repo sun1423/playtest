@@ -1,13 +1,68 @@
+import os
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from voice_profile import (
+    HINDI_ASR_PROMPT,
     _active_intervals_from_silence,
     choose_active_audio_window,
     gain_for_levels,
+    transcribe_hindi,
 )
 
 
 class VoiceProfileTests(unittest.TestCase):
+    def test_hindi_transcription_prompts_devanagari_and_retries_urdu_output(self):
+        class FakeASR:
+            def __init__(self):
+                self.outputs = ["آپ کیسے ہیں؟", "आप कैसे हैं?"]
+                self.calls = []
+
+            def transcribe(self, audio_path, **kwargs):
+                self.calls.append(kwargs)
+                return [SimpleNamespace(text=self.outputs.pop(0))], SimpleNamespace(
+                    language="hi", language_probability=0.99
+                )
+
+        fake = FakeASR()
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ, {"VOICE_ASR_MODEL": "base"}), \
+             patch("voice_profile._ASR_MODEL", fake), \
+             patch("voice_profile._ASR_MODEL_NAME", "base"):
+            result = transcribe_hindi(
+                Path(directory) / "reference.wav", Path(directory) / "models"
+            )
+
+        self.assertEqual(result["text"], "आप कैसे हैं?")
+        self.assertEqual(result["transcription_attempts"], 2)
+        self.assertEqual(result["script_warning"], "")
+        self.assertEqual(fake.calls[0]["language"], "hi")
+        self.assertIn("देवनागरी", fake.calls[0]["initial_prompt"])
+        self.assertIn("देवनागरी", HINDI_ASR_PROMPT)
+        self.assertEqual(fake.calls[0]["beam_size"], 5)
+
+    def test_persistent_urdu_script_is_reported_instead_of_silently_accepted(self):
+        class FakeASR:
+            def transcribe(self, audio_path, **kwargs):
+                return [SimpleNamespace(text="آپ کیسے ہیں؟")], SimpleNamespace(
+                    language="hi", language_probability=0.8
+                )
+
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ, {"VOICE_ASR_MODEL": "base"}), \
+             patch("voice_profile._ASR_MODEL", FakeASR()), \
+             patch("voice_profile._ASR_MODEL_NAME", "base"):
+            result = transcribe_hindi(
+                Path(directory) / "reference.wav", Path(directory) / "models"
+            )
+
+        self.assertEqual(result["transcription_attempts"], 2)
+        self.assertTrue(result["script_warning"])
+        self.assertIn("Urdu/Arabic", result["script_warning"])
+
     def test_selects_high_activity_twenty_second_clip(self):
         start, duration, ratio = choose_active_audio_window(
             60.0,
