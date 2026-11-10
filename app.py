@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
+from voice_reference import VoiceAudioError, prepare_wav
 
 ROOT = Path(os.getenv("STUDIO_ROOT", "/srv/ai-video-studio"))
 DB = ROOT / "studio.sqlite3"
@@ -1226,19 +1227,49 @@ async def render_storyboard(
 
 
 @app.post("/api/voices")
-async def voice(name: str = Form(...), file: UploadFile = File(...)):
+async def voice(
+    name: str = Form(...),
+    file: UploadFile = File(...),
+    trim_silence: bool = Form(False),
+    normalize_loudness: bool = Form(False),
+    noise_reduction: bool = Form(False),
+    highpass_hz: int = Form(0),
+    lowpass_hz: int = Form(0),
+):
     if Path(file.filename or "").suffix.lower() != ".wav":
         raise HTTPException(415, "WAV reference required")
     safe_name = "".join(char for char in name if char.isalnum() or char in "-_")[:48]
     if not safe_name:
         raise HTTPException(400, "Invalid name")
-    destination = VOICES / (safe_name + ".wav")
-    if destination.exists():
-        raise HTTPException(409, "Profile already exists")
 
-    size = 0
+    VOICES.mkdir(parents=True, exist_ok=True)
+    staging_dir = VOICES / ".staging"
+    originals_dir = VOICES / ".originals"
+    profiles_dir = VOICES / ".profiles"
+    staging_dir.mkdir(exist_ok=True)
+    originals_dir.mkdir(exist_ok=True)
+    profiles_dir.mkdir(exist_ok=True)
+
+    destination = VOICES / (safe_name + ".wav")
+    original_destination = originals_dir / (safe_name + ".wav")
+    metadata_destination = profiles_dir / (safe_name + ".json")
+    lock_path = staging_dir / (safe_name + ".lock")
+    if destination.exists() or original_destination.exists() or metadata_destination.exists():
+        raise HTTPException(409, "Profile already exists")
     try:
-        with destination.open("xb") as output_file:
+        with lock_path.open("x", encoding="utf-8") as lock:
+            lock.write("upload in progress")
+    except FileExistsError as exc:
+        raise HTTPException(409, "A voice upload with this name is already in progress") from exc
+
+    token = uuid.uuid4().hex
+    source_temp = staging_dir / (safe_name + "." + token + ".source.wav")
+    profile_temp = staging_dir / (safe_name + "." + token + ".profile.wav")
+    metadata_temp = staging_dir / (safe_name + "." + token + ".json")
+    published = []
+    try:
+        size = 0
+        with source_temp.open("xb") as output_file:
             header = await file.read(12)
             size += len(header)
             if len(header) < 12 or header[:4] != b"RIFF" or header[8:12] != b"WAVE":
@@ -1249,17 +1280,165 @@ async def voice(name: str = Form(...), file: UploadFile = File(...)):
                 if size > MAX_VOICE:
                     raise HTTPException(413, "Voice reference exceeds 30 MB")
                 output_file.write(chunk)
-    except Exception:
-        destination.unlink(missing_ok=True)
+            output_file.flush()
+            os.fsync(output_file.fileno())
+
+        try:
+            inspection = prepare_wav(
+                source_temp,
+                profile_temp,
+                trim_silence=trim_silence,
+                normalize_loudness=normalize_loudness,
+                noise_reduction=noise_reduction,
+                highpass_hz=highpass_hz,
+                lowpass_hz=lowpass_hz,
+            )
+        except VoiceAudioError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+        inspection.update({
+            "voice_id": safe_name,
+            "source_filename": Path(file.filename or "voice.wav").name[:180],
+            "source_bytes": size,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "conditioning_status": "not_tested" if tts_runtime_ready() else "engine_disabled",
+            "conditioning_note": "Audio is inspected and prepared, but no voice-conditioning or similarity test has run.",
+        })
+        metadata_temp.write_text(json.dumps(inspection, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        if destination.exists() or original_destination.exists() or metadata_destination.exists():
+            raise HTTPException(409, "Profile already exists")
+        os.replace(source_temp, original_destination)
+        published.append(original_destination)
+        os.replace(profile_temp, destination)
+        published.append(destination)
+        os.replace(metadata_temp, metadata_destination)
+        published.append(metadata_destination)
+        return inspection
+    except HTTPException:
+        for path in published:
+            path.unlink(missing_ok=True)
         raise
+    except OSError as exc:
+        for path in published:
+            path.unlink(missing_ok=True)
+        raise HTTPException(500, "Could not safely save the original and prepared voice files") from exc
     finally:
         await file.close()
-    return {"voice_id": safe_name}
+        source_temp.unlink(missing_ok=True)
+        profile_temp.unlink(missing_ok=True)
+        metadata_temp.unlink(missing_ok=True)
+        lock_path.unlink(missing_ok=True)
 
 
 @app.get("/api/voices")
 def voices():
-    return [{"voice_id": path.stem} for path in VOICES.glob("*.wav")]
+    result = []
+    for path in sorted(VOICES.glob("*.wav")):
+        metadata_path = VOICES / ".profiles" / (path.stem + ".json")
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.is_file() else {}
+        except (OSError, json.JSONDecodeError):
+            metadata = {}
+        if not metadata:
+            metadata = {
+                "voice_id": path.stem,
+                "conditioning_status": "legacy_uninspected",
+                "source_preserved": False,
+                "prepared": {"codec": "unknown", "sample_rate_hz": 0, "channels": 0},
+                "warnings": ["Legacy profile has no source/processing metadata. Re-upload to inspect it."],
+            }
+        else:
+            metadata["source_file_available"] = (VOICES / ".originals" / (path.stem + ".wav")).is_file()
+        result.append(metadata)
+    return result
+
+
+def resolve_voice_asset(voice_id: str, kind: str) -> Path:
+    if not voice_id or len(voice_id) > 48 or any(
+        not (char.isalnum() or char in "-_") for char in voice_id
+    ):
+        raise HTTPException(400, "Invalid voice profile ID")
+    if kind == "source":
+        path = VOICES / ".originals" / (voice_id + ".wav")
+    else:
+        path = VOICES / (voice_id + ".wav")
+    resolved = path.resolve()
+    if VOICES.resolve() not in resolved.parents or not resolved.is_file():
+        raise HTTPException(404, "Voice audio file not found")
+    return resolved
+
+
+@app.post("/api/voices/{voice_id}/prepare")
+def prepare_existing_voice(
+    voice_id: str,
+    trim_silence: bool = Form(False),
+    normalize_loudness: bool = Form(False),
+    noise_reduction: bool = Form(False),
+    highpass_hz: int = Form(0),
+    lowpass_hz: int = Form(0),
+):
+    source_path = resolve_voice_asset(voice_id, "source")
+    profile_path = resolve_voice_asset(voice_id, "profile")
+    staging_dir = VOICES / ".staging"
+    staging_dir.mkdir(exist_ok=True)
+    token = uuid.uuid4().hex
+    temp_path = staging_dir / (voice_id + "." + token + ".reprocess.wav")
+    metadata_temp = staging_dir / (voice_id + "." + token + ".json")
+    metadata_path = VOICES / ".profiles" / (voice_id + ".json")
+    try:
+        try:
+            inspection = prepare_wav(
+                source_path,
+                temp_path,
+                trim_silence=trim_silence,
+                normalize_loudness=normalize_loudness,
+                noise_reduction=noise_reduction,
+                highpass_hz=highpass_hz,
+                lowpass_hz=lowpass_hz,
+            )
+        except VoiceAudioError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            metadata = {"voice_id": voice_id, "source_filename": source_path.name, "source_preserved": True}
+        metadata.update(inspection)
+        metadata.update({
+            "voice_id": voice_id,
+            "source_filename": metadata.get("source_filename", source_path.name),
+            "source_bytes": source_path.stat().st_size,
+            "reprocessed_at": datetime.now(timezone.utc).isoformat(),
+            "conditioning_status": "not_tested" if tts_runtime_ready() else "engine_disabled",
+            "conditioning_note": "Prepared profile updated from the immutable original. No voice-conditioning or similarity test has run.",
+        })
+        metadata_temp.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temp_path, profile_path)
+        os.replace(metadata_temp, metadata_path)
+        for extension in ("emb", "kv"):
+            (VOICES / ".cache" / (voice_id + "." + extension)).unlink(missing_ok=True)
+        return metadata
+    finally:
+        temp_path.unlink(missing_ok=True)
+        metadata_temp.unlink(missing_ok=True)
+
+
+@app.get("/api/voices/{voice_id}/source")
+def voice_source(voice_id: str):
+    path = resolve_voice_asset(voice_id, "source")
+    return FileResponse(
+        path, media_type="audio/wav",
+        headers={"Content-Disposition": f'inline; filename="{voice_id}-original.wav"', "Cache-Control": "private, no-store"},
+    )
+
+
+@app.get("/api/voices/{voice_id}/profile")
+def voice_profile(voice_id: str):
+    path = resolve_voice_asset(voice_id, "profile")
+    return FileResponse(
+        path, media_type="audio/wav",
+        headers={"Content-Disposition": f'inline; filename="{voice_id}-prepared.wav"', "Cache-Control": "private, no-store"},
+    )
 
 
 @app.get("/api/tts/preview-sample")
@@ -1289,14 +1468,15 @@ def tts_preview_sample(variant: str = "original"):
 
 @app.delete("/api/voices/{voice_id}")
 def delete_voice(voice_id: str):
-    if not voice_id or len(voice_id) > 48 or any(
-        not (char.isalnum() or char in "-_") for char in voice_id
-    ):
-        raise HTTPException(400, "Invalid voice profile ID")
-    path = (VOICES / (voice_id + ".wav")).resolve()
-    if VOICES.resolve() not in path.parents or not path.is_file():
-        raise HTTPException(404, "Voice profile not found")
+    path = resolve_voice_asset(voice_id, "profile")
     path.unlink()
+    for asset in (
+        VOICES / ".originals" / (voice_id + ".wav"),
+        VOICES / ".profiles" / (voice_id + ".json"),
+        VOICES / ".cache" / (voice_id + ".emb"),
+        VOICES / ".cache" / (voice_id + ".kv"),
+    ):
+        asset.unlink(missing_ok=True)
     return {"deleted": True, "voice_id": voice_id}
 
 
