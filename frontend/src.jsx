@@ -1145,6 +1145,7 @@ function App() {
               {(voicePrepared.inspection.prepared_analysis?.warnings || []).map((warning,index) => <small className="voice-warning" key={'prepared-'+index}>{warning}</small>)}
             </div>
             <audio className="voice-audio" controls preload="metadata" src={voicePrepared.audio_url}/>
+            {voicePrepared.transcription_info?.script_warning && <small className="voice-warning">{voicePrepared.transcription_info.script_warning}</small>}
             <label>EXTRACTED HINDI SCRIPT · EDIT BEFORE SAVING
               <textarea rows="5" maxLength="12000" value={voiceTranscript}
                 onChange={event => setVoiceTranscript(event.target.value)}
