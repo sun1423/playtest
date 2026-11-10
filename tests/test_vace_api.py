@@ -1,6 +1,8 @@
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 from pathlib import Path
 
 _ROOT = tempfile.TemporaryDirectory(prefix="studio-vace-tests-")
@@ -45,6 +47,66 @@ class VaceRunnerApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(response.json()["job"])
+
+    def test_job_can_be_claimed_and_completed_with_voice_audio(self):
+        voice_path = app.VOICES / "ci_voice.wav"
+        voice_path.write_bytes(b"RIFF-test-wav-reference")
+        fields = {
+            "prompt": "Transform the scene into a soft watercolor animation",
+            "narration": "नमस्ते, यह एक वीडियो परीक्षण है।",
+            "language": "hi",
+            "voice_id": "ci_voice",
+            "motion_mode": "flow",
+            "keep_source_audio": "false",
+        }
+        with patch("app.subprocess.run", return_value=SimpleNamespace(stdout="2.0\\n")):
+            queued = self.client.post(
+                "/api/vace/video",
+                data=fields,
+                files={"file": ("source.mp4", b"source-video-test", "video/mp4")},
+            )
+        self.assertEqual(queued.status_code, 200, queued.text)
+        job_id = queued.json()["id"]
+
+        claim = self.client.post(
+            "/api/vace/runner/next", headers=self.runner_headers
+        )
+        self.assertEqual(claim.status_code, 200, claim.text)
+        job = claim.json()["job"]
+        self.assertEqual(job["id"], job_id)
+        self.assertEqual(job["voice_id"], "ci_voice")
+        self.assertEqual(
+            self.client.get(job["input_url"], headers=self.runner_headers).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.get(job["voice_url"], headers=self.runner_headers).status_code,
+            200,
+        )
+
+        progress = self.client.post(
+            f"/api/vace/runner/jobs/{job_id}/progress",
+            headers=self.runner_headers,
+            json={"stage": "Testing output upload", "progress": 90},
+        )
+        self.assertEqual(progress.status_code, 200, progress.text)
+        with patch(
+            "app.subprocess.run",
+            return_value=SimpleNamespace(stdout="video\\naudio\\n"),
+        ):
+            completed = self.client.post(
+                f"/api/vace/runner/jobs/{job_id}/complete",
+                headers=self.runner_headers,
+                files={"file": ("final.mp4", b"test-mp4-output", "video/mp4")},
+            )
+        self.assertEqual(completed.status_code, 200, completed.text)
+        item = next(row for row in self.client.get("/api/jobs").json() if row["id"] == job_id)
+        self.assertEqual(item["status"], "completed")
+        self.assertEqual(item["progress"], 100)
+        self.assertEqual(
+            self.client.get(f"/api/jobs/{job_id}/output").content,
+            b"test-mp4-output",
+        )
 
     def test_all_remote_runner_routes_are_registered(self):
         paths = app.app.openapi()["paths"]
