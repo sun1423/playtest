@@ -983,7 +983,7 @@ function App() {
             <h3>Adjust an existing profile</h3>
             <p>Change the cleanup controls above, then rebuild only the prepared model copy from the original upload.</p>
             <div className="row">
-              <label>PROFILE<select value={reprocessVoice} onChange={event => setReprocessVoice(event.target.value)}>{voices.filter(item => item.source_file_available).map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}</select></label>
+              <label>PROFILE<select value={reprocessVoice} onChange={event => setReprocessVoice(event.target.value)}><option value="">Select profile</option>{voices.filter(item => item.source_file_available).map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}</select></label>
               <button type="button" disabled={voiceBusy || !reprocessVoice} onClick={reprocessVoiceProfile}>{voiceBusy ? 'Preparing…' : 'Rebuild prepared copy'}</button>
             </div>
             <small>The original recording, its sample rate, channels, bit depth and embedded metadata are retained separately.</small>
