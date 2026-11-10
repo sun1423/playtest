@@ -1759,9 +1759,9 @@ def work(job):
         update(job_id, stage="FaceFusion CPU · preparing models", progress=5)
         command = [
             str(FACEFUSION_PYTHON), str(FACEFUSION_SCRIPT), "headless-run",
-            "--source-paths", str(reference),
-            "--target-path", str(target),
-            "--output-path", str(raw_output),
+            "-s", str(reference),
+            "-t", str(target),
+            "-o", str(raw_output),
             "--processors", "face_swapper",
             "--face-detector-model", "scrfd",
             "--face-landmarker-model", "2dfan4",
