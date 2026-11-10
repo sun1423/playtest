@@ -272,8 +272,8 @@ def prepare_voice_audio(source: Path, destination: Path) -> dict:
         raw_clip.unlink(missing_ok=True)
 
 
-def transcribe_hindi(path: Path, model_cache: Path) -> dict:
-    """Run one local CPU/int8 Hindi transcription; model weights are cached outside Git."""
+def _transcribe_hindi_whisper(path: Path, model_cache: Path) -> dict:
+    """Run local CPU/int8 Whisper Hindi transcription as a reliable fallback."""
     global _ASR_MODEL, _ASR_MODEL_NAME
     model_name = os.getenv("VOICE_ASR_MODEL", "base").strip() or "base"
     with _ASR_LOCK:
@@ -315,6 +315,26 @@ def transcribe_hindi(path: Path, model_cache: Path) -> dict:
         "language": getattr(info, "language", "hi"),
         "language_probability": round(float(getattr(info, "language_probability", 0.0)), 3),
         "model": model_name,
+        "engine": "Whisper CPU/int8 (fallback)",
         "transcription_attempts": attempts,
         "script_warning": script_warning,
     }
+
+
+def transcribe_hindi(path: Path, model_cache: Path) -> dict:
+    """Prefer Hindi-specific IndicConformer ONNX; fall back to local Whisper on errors."""
+    backend = os.getenv("VOICE_ASR_BACKEND", "indicconformer").strip().lower()
+    if backend in {"indicconformer", "indicconformer-hi"}:
+        try:
+            from indicconformer_asr import transcribe_indicconformer_hindi
+            return transcribe_indicconformer_hindi(path, model_cache)
+        except Exception as exc:
+            if os.getenv("VOICE_ASR_FALLBACK_TO_WHISPER", "1").strip() != "1":
+                raise
+            fallback = _transcribe_hindi_whisper(path, model_cache)
+            fallback["fallback_reason"] = str(exc)[:500]
+            fallback["engine"] = "Whisper CPU/int8 (IndicConformer fallback)"
+            return fallback
+    if backend in {"whisper", "faster-whisper"}:
+        return _transcribe_hindi_whisper(path, model_cache)
+    raise RuntimeError(f"Unsupported VOICE_ASR_BACKEND: {backend}")
