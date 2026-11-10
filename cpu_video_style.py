@@ -181,6 +181,15 @@ def run_video_style(
     )
     if "CPUExecutionProvider" not in session.get_providers():
         raise RuntimeError("The video-style model did not initialise on CPU.")
+    model_size = STYLE_MODELS[style]["size"]
+    input_shape = session.get_inputs()[0].shape
+    if (isinstance(input_shape[2], int) and input_shape[2] != model_size) or (
+        isinstance(input_shape[3], int) and input_shape[3] != model_size
+    ):
+        raise RuntimeError(
+            f"Model input shape {input_shape} does not match the selected {model_size}px preset. "
+            "Reinstall the model weights with scripts/install_video_style_models.py."
+        )
 
     capture = cv2.VideoCapture(str(source_video))
     if not capture.isOpened():

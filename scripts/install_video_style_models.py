@@ -9,13 +9,13 @@ import urllib.request
 from pathlib import Path
 
 ANIME_URL = "https://raw.githubusercontent.com/Kazuhito00/AnimeGANv2-ONNX-Sample/1597c3ad45b2db87e1ac4944ee62cfdb30d0670d/model/face_paint_512_v2_0.onnx"
-STYLE_BASE = "https://raw.githubusercontent.com/yakhyo/fast-neural-style-transfer/32f6cb17f1bf63e6c3e4feb2125671266dc083d1/weights/"
+STYLE_MODELS = "https://huggingface.co"
 MODELS = {
     "animeganv2_512.onnx": (ANIME_URL, "1381b17ed988e14a1f3cf8954d88073c0884ff4b70128ebe599f0d6021bca63e", 8_000_000),
-    "candy.onnx": (STYLE_BASE + "candy.onnx", "dd589a07b80f7868e56289fa268e56614846850077e92ec8a9bd80d65c017698", 6_000_000),
-    "mosaic.onnx": (STYLE_BASE + "mosaic.onnx", "9b561367c27898fae588442454c74820ac49e738dad141b8e87fb6ee537da45e", 6_000_000),
-    "rain-princess.onnx": (STYLE_BASE + "rain-princess.onnx", "fe142dc5feabea07231e5993a52009b6c1187f59eff3b91804f0471585ea818b", 6_000_000),
-    "udnie.onnx": (STYLE_BASE + "udnie.onnx", "dc52ca2c6b9426403764341fc09e0587843c78d17f5a48a6652b4f1b80156bb6", 6_000_000),
+    "candy.onnx": (f"{STYLE_MODELS}/onnxmodelzoo/candy-9/resolve/f24fcf558bd4564360f41cf3b5321975a33f962f/candy-9.onnx", "9d11a3529d1e547da6ae07201d93484dbab2ec0a3614535752c8f40f0fe2968a", 6_000_000),
+    "mosaic.onnx": (f"{STYLE_MODELS}/onnxmodelzoo/mosaic-9/resolve/9a267ba8540fba8fb12bc78f3770e0fd9c923c56/mosaic-9.onnx", "fa646dedade881243f8d5a2ceb7de2b93675b21fc24f7482894ac4851a9a0a47", 6_000_000),
+    "rain-princess.onnx": (f"{STYLE_MODELS}/onnxmodelzoo/rain-princess-9/resolve/205625e4c00565b6c0946814de6165116b271e58/rain-princess-9.onnx", "4162912e6f75fedef6f810ae989b9e10d3d5d43308dab34b027c850cf255e152", 6_000_000),
+    "udnie.onnx": (f"{STYLE_MODELS}/onnxmodelzoo/udnie-9/resolve/ab74109f694dc8117f5e39a8571ac53bf83618f6/udnie-9.onnx", "8656b6ce7dec8f22ee13c2d557d6b67bd6f550dde88d0f2e7c9972aeb765cc0d", 6_000_000),
 }
 
 
