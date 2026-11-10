@@ -119,14 +119,24 @@ def run_command(command: list[str], cwd: Path, log_path: Path, client: requests.
             text=True, env=os.environ.copy(),
         )
         last_ping = 0.0
-        while process.poll() is None:
-            now = time.monotonic()
-            if now - last_ping >= 20:
-                elapsed = now - started
-                progress = min(end_progress, start_progress + int(elapsed // 30))
-                post_progress(client, job_id, stage, progress)
-                last_ping = now
-            time.sleep(5)
+        try:
+            while process.poll() is None:
+                now = time.monotonic()
+                if now - last_ping >= 20:
+                    elapsed = now - started
+                    progress = min(end_progress, start_progress + int(elapsed // 30))
+                    post_progress(client, job_id, stage, progress)
+                    last_ping = now
+                time.sleep(5)
+        except Exception:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=10)
+            raise
     if process.returncode != 0:
         tail = log_path.read_text(encoding="utf-8", errors="replace")[-5000:]
         raise RuntimeError(f"{stage} failed (exit {process.returncode}):\n{tail}")
