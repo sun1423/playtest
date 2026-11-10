@@ -56,3 +56,32 @@ Do not enable `ENABLE_TTS` or modify the production service based only on a succ
 - Cold model load time, subsequent load time, generation RTF and CPU contention with Ollama/FFmpeg.
 
 Only after the host is reachable and these measurements are reviewed should we integrate narration into storyboard rendering. The planned workflow is to use the exact storyboard narration text, synthesize one WAV using the selected voice profile, then combine narration and optional background music with the rendered video through FFmpeg. No GPU or external inference service is part of this plan.
+
+## Actual Azure result — 2026-11-10
+
+Tested on the live Azure host in an isolated temporary environment, not inside the Studio venv:
+
+| Metric | Result |
+|---|---:|
+| Host | 2 vCPU, 15 GiB RAM, no GPU |
+| Python / PyTorch | 3.12.3 / 2.6.0+cpu |
+| Model | Chatterbox Multilingual V3 |
+| Voice mode | Built-in reference conditioning; no custom WAV |
+| Model load | 12.52 seconds |
+| Peak process RSS | 6,837 MiB (6.68 GiB) |
+| Hindi sample | 2.56 seconds of audio |
+| Hindi generation time | 45.45 seconds |
+| Real-time factor | 17.75× (slower than playback) |
+| CPU utilization during generation | 178.3% |
+| Available RAM after generation | 10,835 MiB |
+| WAV validation | Valid mono 24 kHz PCM; non-silent |
+
+The initial longer Hindi prompt was stopped at 239/1,000 sampled tokens after about 60 seconds and produced no WAV. A shorter five-word Hindi sample completed successfully, but at 17.75× RTF. Studio API, worker and Ollama remained active; the final health endpoint returned `ok: true`, with about 14 GiB RAM available and no swap use.
+
+### Decision: do not enable Chatterbox CPU in production
+
+The observed throughput is unsuitable for end-to-end video narration on this 2-vCPU host. A one-minute narration at the measured rate would take roughly 17.75 minutes for synthesis alone, before rendering. The benchmark did not use a user voice WAV, so custom-voice preparation and voice similarity are not validated; they cannot improve the measured throughput assumption.
+
+Keep `ENABLE_TTS` disabled. Do not merge or deploy TTS enablement based on this result. The next step should be to benchmark a lighter CPU-oriented TTS/voice-conversion approach or use an efficient voice profile already available for local CPU playback. Chatterbox remains an isolated experiment only.
+
+The upstream Chatterbox README states the project was retired research in August 2026 and is no longer maintained; account for that maintenance risk before adopting it further.
