@@ -35,6 +35,7 @@ OLLAMA_INFERENCE_LOCK = threading.Lock()
 MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
 MAX_VOICE = int(os.getenv("MAX_VOICE_MB", "30")) * 1024 * 1024
 VOICE_PREVIEW_SAMPLE = Path(os.getenv("VOICE_PREVIEW_SAMPLE", "/tmp/ai-video-studio-review/hindi-custom-voice.wav")).expanduser()
+VOICE_PREVIEW_DIAGNOSTICS = VOICE_PREVIEW_SAMPLE.parent / "ab"
 ENABLE_TTS = os.getenv("ENABLE_TTS", "0") == "1"
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "")
@@ -1262,14 +1263,24 @@ def voices():
 
 
 @app.get("/api/tts/preview-sample")
-def tts_preview_sample():
-    if not VOICE_PREVIEW_SAMPLE.is_file():
-        raise HTTPException(404, "The generated voice review sample is unavailable.")
+def tts_preview_sample(variant: str = "original"):
+    variants = {
+        "original": (VOICE_PREVIEW_SAMPLE, "hindi-custom-voice.wav"),
+        "current": (VOICE_PREVIEW_DIAGNOSTICS / "current-full-levelled.wav", "current-settings.wav"),
+        "recommended": (VOICE_PREVIEW_DIAGNOSTICS / "recommended-full-levelled.wav", "two-step-settings.wav"),
+        "clean-reference": (VOICE_PREVIEW_DIAGNOSTICS / "clean-8s-levelled.wav", "clean-reference.wav"),
+    }
+    selected = variants.get(variant)
+    if not selected:
+        raise HTTPException(404, "Unknown voice preview sample.")
+    path, filename = selected
+    if not path.is_file():
+        raise HTTPException(404, "The requested voice review sample is unavailable.")
     return FileResponse(
-        VOICE_PREVIEW_SAMPLE,
+        path,
         media_type="audio/wav",
         headers={
-            "Content-Disposition": 'inline; filename="hindi-custom-voice.wav"',
+            "Content-Disposition": f'inline; filename="{filename}"',
             "Cache-Control": "private, no-store",
             "X-Content-Type-Options": "nosniff",
         },
