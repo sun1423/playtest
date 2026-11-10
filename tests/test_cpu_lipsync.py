@@ -46,6 +46,16 @@ class CpuLipSyncTests(unittest.TestCase):
         data = {"format": {"duration": "180.0"}}
         self.assertEqual(media_stream_duration(data, {"duration": "12.0"}), 12.0)
 
+    def test_video_duration_uses_stream_timestamps_before_container(self):
+        data = {"format": {"duration": "180.0"}}
+        stream = {"duration": "N/A", "duration_ts": "1080000", "time_base": "1/90000"}
+        self.assertEqual(media_stream_duration(data, stream), 12.0)
+
+    def test_video_duration_uses_frame_count_before_container(self):
+        data = {"format": {"duration": "180.0"}}
+        stream = {"duration": "N/A", "nb_frames": "300", "avg_frame_rate": "25/1"}
+        self.assertEqual(media_stream_duration(data, stream), 12.0)
+
     def test_video_duration_falls_back_when_stream_duration_is_unavailable(self):
         data = {"format": {"duration": "12.5"}}
         self.assertEqual(media_stream_duration(data, {"duration": "N/A"}), 12.5)
