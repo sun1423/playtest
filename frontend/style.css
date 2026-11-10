@@ -21,3 +21,4 @@
 
 
 .voice-preview{display:grid;gap:12px;padding:16px;margin:18px 0;background:#14161a;border:1px solid #3c3e43;border-radius:10px;max-width:680px}.voice-preview-copy{display:grid;gap:5px}.voice-preview-copy small{color:#a7a9af;line-height:1.5}.voice-preview audio{width:100%;max-width:560px}
+.voice-preview-copy audio{display:block;margin-top:8px}
