@@ -12,6 +12,8 @@ from pocket_tts import (
     engine_ready,
     normalize_generation_settings,
     normalize_voice_id,
+    normalize_dialogue_text,
+    split_dialogue_chunks,
     resolve_voice_reference,
     valid_voice_id,
 )
@@ -35,6 +37,30 @@ class PocketTtsTests(unittest.TestCase):
         path = root / f"{name}.wav"
         path.write_bytes(b"RIFF" + (32).to_bytes(4, "little") + b"WAVE" + b"data")
         return path
+
+
+    def test_dialogue_normalization_preserves_prosody_and_removes_markup_noise(self):
+        text = normalize_dialogue_text(
+            "नमस्ते!!!\nआप कैसे हैं???\n\n**मैं ठीक हूँ…** 😊"
+        )
+        self.assertIn("नमस्ते!", text)
+        self.assertIn("आप कैसे हैं?", text)
+        self.assertIn("मैं ठीक हूँ।", text)
+        self.assertNotIn("😊", text)
+        self.assertNotIn("**", text)
+        self.assertIn("\n\n", text)
+
+    def test_dialogue_chunking_keeps_chunks_bounded_and_paragraph_pauses(self):
+        source = ("यह एक वाक्य है। " * 90) + "\n\n" + ("दूसरा पैराग्राफ है। " * 30)
+        chunks = split_dialogue_chunks(source, max_chars=180)
+        self.assertGreater(len(chunks), 2)
+        self.assertTrue(all(0 < len(chunk) <= 180 for chunk, _ in chunks))
+        self.assertEqual(chunks[-1][1], 0.0)
+        self.assertTrue(any(pause >= 0.38 for _, pause in chunks[:-1]))
+
+    def test_dialogue_normalization_rejects_symbols_without_speech(self):
+        with self.assertRaises(ValueError):
+            normalize_dialogue_text("😊 ★ !!!")
 
     def test_engine_is_disabled_by_default_even_with_files(self):
         with tempfile.TemporaryDirectory() as temp:
