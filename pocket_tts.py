@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import json
 import os
-import unicodedata
-import subprocess
-import uuid
 import re
-import wave
+import subprocess
 import unicodedata
+import uuid
+import wave
 from pathlib import Path
 
 
@@ -287,7 +286,9 @@ def normalize_dialogue_text(text: str) -> str:
             line = re.sub(r",+", ",", line)
             line = re.sub(r"[!?]{2,}", lambda match: "?" if "?" in match.group() else "!", line)
             line = re.sub(r"[।.]{2,}", "।", line)
-            if line and not re.search(r"[।.!?]$", line):
+            if not any(unicodedata.category(char)[0] in {"L", "N"} for char in line):
+                continue
+            if not re.search(r"[।.!?]$", line):
                 line += "।"
             if line:
                 lines.append(line)
@@ -389,7 +390,7 @@ def synthesize_dialogue(
             output.setnchannels(1)
             output.setsampwidth(2)
             output.setframerate(24000)
-            silence = b"\\x00\\x00"
+            silence = b"\x00\x00"
             for part, pause_after in parts:
                 with wave.open(str(part), "rb") as source:
                     if source.getnchannels() != 1 or source.getsampwidth() != 2 or source.getframerate() != 24000:
