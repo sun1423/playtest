@@ -1125,6 +1125,10 @@ function App() {
           {editingTransformId && <div className="transform-edit-banner">
             <b>Editing a saved transformation</b>
             <small>{jobs.find(job => job.id === editingTransformId)?.payload?.source_filename || 'Original source video'} · original file and saved assets will be reused unless replaced below.</small>
+            <div className="video-preview">
+              <video src={'/api/jobs/' + editingTransformId + '/source'} controls playsInline preload="metadata"/>
+              <small>Saved original source · choose a replacement above to use a different clip</small>
+            </div>
             <button type="button" onClick={cancelTransformEdit}>Cancel editing</button>
           </div>}
           <form onSubmit={upload}>
@@ -1191,8 +1195,8 @@ function App() {
                 {!job.source_available && job.status !== 'queued' && job.status !== 'running' && <small className="transform-warning">Original source was not retained for this older job. Download and delete are still available.</small>}
                 <div className="transform-job-footer">
                   <small>{job.source_available ? 'Original retained for editing' : 'Source unavailable'} · Job {job.id.slice(0,8)}</small>
-                  <button type="button" className="danger" disabled={job.status === 'running' || job.status === 'queued'} onClick={() => deleteMedia('/api/jobs/' + job.id, 'transformation and all its files')}>
-                    <Trash2 size={14}/> {job.status === 'running' || job.status === 'queued' ? 'Processing — cannot delete yet' : 'Delete'}
+                  <button type="button" className="danger" disabled={job.status === 'running'} onClick={() => deleteMedia('/api/jobs/' + job.id, 'transformation and all its files')}>
+                    <Trash2 size={14}/> {job.status === 'running' ? 'Processing — cannot delete yet' : 'Delete'}
                   </button>
                 </div>
               </article>;
