@@ -30,6 +30,7 @@ function App() {
   const [password, setPassword] = useState('');
   const [tab, setTab] = useState('create');
   const [jobs, setJobs] = useState([]);
+  const [transformHistory, setTransformHistory] = useState([]);
   const [voices, setVoices] = useState([]);
   const [ttsInfo, setTtsInfo] = useState({ tts_ready: false, tts_languages: [] });
   const [lipsyncInfo, setLipsyncInfo] = useState({ ready: false });
@@ -37,6 +38,7 @@ function App() {
   const [videoStyle, setVideoStyle] = useState('anime_512');
   const [styleStrength, setStyleStrength] = useState(0.85);
   const [dubFile, setDubFile] = useState(null);
+  const [dubSourceTransformId, setDubSourceTransformId] = useState('');
   const [dubPreviewUrl, setDubPreviewUrl] = useState('');
   const [dubSourceDuration, setDubSourceDuration] = useState(0);
   const [dubNarration, setDubNarration] = useState('');
@@ -222,7 +224,18 @@ function App() {
     }
   }
 
+  async function refreshTransformHistory() {
+    try {
+      const history = await api('/api/transform/history');
+      setTransformHistory(history);
+      setDubSourceTransformId(current => history.some(job => job.id === current && job.status === 'completed' && job.output_available) ? current : '');
+    } catch {
+      // Keep the last known history if the endpoint is temporarily unavailable.
+    }
+  }
+
   async function refresh() {
+    refreshTransformHistory();
     // Job polling is independent: a failed voice/project/model-status endpoint must
     // never prevent Transform progress and completed outputs from appearing.
     refreshJobs();
@@ -350,9 +363,10 @@ function App() {
 
   async function queueVideoDub(event) {
     event.preventDefault();
-    if (!dubFile || !dubVoiceId || !dubNarration.trim()) return;
+    if ((!dubFile && !dubSourceTransformId) || !dubVoiceId || !dubNarration.trim()) return;
     const form = new FormData();
-    form.append('file', dubFile);
+    if (dubSourceTransformId) form.append('source_job_id', dubSourceTransformId);
+    else form.append('file', dubFile);
     form.append('voice_id', dubVoiceId);
     form.append('narration', dubNarration.trim());
     form.append('keep_source_ambience', String(dubKeepAmbience));
@@ -366,6 +380,7 @@ function App() {
       setJobs(current => [queuedJob, ...current.filter(job => job.id !== queuedJob.id)]);
       setMsg('Full video voice-dub and lip-sync job queued on the Azure CPU worker.');
       setDubFile(null);
+      setDubSourceTransformId('');
       setDubSourceDuration(0);
       setDubNarration('');
       refresh();
@@ -940,9 +955,7 @@ function App() {
   }
 
   const scriptAudioJob = jobs.find(job => job.id === scriptAudioJobId);
-  const transformJobs = jobs.filter(job =>
-    job.kind === 'video_transform' && !(job.payload?.scenes?.length)
-  );
+  const transformJobs = transformHistory.filter(job => !(job.payload?.scenes?.length));
   const dubJobs = jobs.filter(job => job.kind === 'video_voice_dub');
   const dubWordCount = dubNarration.trim() ? dubNarration.trim().split(/\s+/u).filter(Boolean).length : 0;
   const dubEstimatedSpeechSeconds = estimateHindiSpeechSeconds(dubNarration);
@@ -1147,10 +1160,31 @@ function App() {
             {!lipsyncInfo.ready && <small className="voice-warning">CPU lip-sync weights/dependencies are not installed yet. Run the installation steps in docs/CPU_VIDEO_DUB.md.</small>}
           </div>
           <form onSubmit={queueVideoDub}>
-            <label className="drop"><Upload/><b>{dubFile?.name || 'Choose the original performance video'}</b><small>MP4 / MOV / MKV / WebM · up to 500 MB · 1–180 seconds · one clearly visible main face</small>
-              <input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={event => { setDubFile(event.target.files?.[0] || null); setDubSourceDuration(0); }}/>
+            <label className="drop"><Upload/><b>{dubFile?.name || 'Upload a new performance video'}</b><small>MP4 / MOV / MKV / WebM · up to 500 MB · 1–180 seconds · one clearly visible main face</small>
+              <input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={event => { setDubFile(event.target.files?.[0] || null); setDubSourceTransformId(''); setDubSourceDuration(0); }}/>
             </label>
             {dubFile && <div className="dub-video-preview"><video src={dubPreviewUrl} controls playsInline preload="metadata" onLoadedMetadata={event => setDubSourceDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}/><small>Original video preview · upload only begins when you queue the job</small></div>}
+            <label>OR SELECT A VIDEO ALREADY CREATED IN TRANSFORM
+              <select value={dubSourceTransformId} onChange={event => {
+                setDubSourceTransformId(event.target.value);
+                if (event.target.value) { setDubFile(null); setDubSourceDuration(0); }
+              }}>
+                <option value="">Choose from Transform history</option>
+                {transformHistory.filter(job => job.status === 'completed' && job.output_available).map(job => (
+                  <option key={job.id} value={job.id}>
+                    {(job.payload?.source_filename || 'Transformed video') + ' · ' + new Date(job.created_at).toLocaleString()}
+                  </option>
+                ))}
+              </select>
+              <small>{transformHistory.some(job => job.status === 'completed' && job.output_available)
+                ? 'The selected export is copied into this Lip Sync job. Its Transform original remains untouched.'
+                : 'No completed Transform videos are available yet.'}</small>
+            </label>
+            {dubSourceTransformId && <div className="dub-video-preview">
+              <video src={'/api/jobs/' + dubSourceTransformId + '/preview-video'} controls playsInline preload="metadata"
+                onLoadedMetadata={event => setDubSourceDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}/>
+              <small>Selected Transform export · source duration is used for dialogue length guidance</small>
+            </div>}
             <label>FULL-FRAME AI VIDEO STYLE
               <select value={videoStyle} onChange={event => setVideoStyle(event.target.value)}>
                 <option value="none">Keep original look · lip-sync only</option>
@@ -1180,8 +1214,9 @@ function App() {
             {!voices.length && <button type="button" className="secondary" onClick={() => setTab('voice')}>Open Voice Studio to save a WAV profile</button>}
             <label>NEW HINDI DIALOGUE
               <textarea rows="6" maxLength="12000" value={dubNarration} onChange={event => setDubNarration(event.target.value)}
-                placeholder="Enter the exact Hindi words your on-screen speaker should say. Use punctuation and paragraph breaks to guide natural pauses…" required/>
+                placeholder="Enter the exact Hindi words your on-screen speaker should say. Punctuation and blank lines guide natural pauses and intonation…" required/>
             </label>
+            <small className="dub-prosody-note">Comma = short pause · । or . = sentence ending · ? = question intonation · ! = emphasis · blank line = longer pause. Decorative symbols and markup are removed. Pocket TTS does not currently support explicit emotion tags such as [angry] or [sad].</small>
             <div className={'dub-length-meter' + (dubSpeechOverLimit ? ' over-limit' : '')}>
               <div className="dub-length-heading">
                 <b>LIVE SPEECH LENGTH ESTIMATE</b>
@@ -1206,7 +1241,7 @@ function App() {
             <label className="dub-checkbox"><input type="checkbox" checked={dubKeepAmbience} onChange={event => setDubKeepAmbience(event.target.checked)}/>
               Keep original background ambience quietly under the new voice (original dialogue may also remain audible)
             </label>
-            <button className="primary" disabled={!dubFile || !dubVoiceId || !dubNarration.trim() || dubBusy || !lipsyncInfo.ready || !ttsInfo.tts_ready || (videoStyle !== 'none' && !styleInfo.models.some(item => item.id === videoStyle && item.ready)) || dubSpeechOverLimit}>
+            <button className="primary" disabled={(!dubFile && !dubSourceTransformId) || !dubVoiceId || !dubNarration.trim() || dubBusy || !lipsyncInfo.ready || !ttsInfo.tts_ready || (videoStyle !== 'none' && !styleInfo.models.some(item => item.id === videoStyle && item.ready)) || dubSpeechOverLimit}>
               {dubBusy ? 'Uploading and queueing…' : 'Generate full video with my voice + lip-sync'}
             </button>
           </form>
@@ -1335,7 +1370,7 @@ function App() {
             </button>
           </form>
           <div className="transform-results">
-            <div className="transform-results-heading"><div><h2>Recent transformations</h2><small>Job status updates automatically · original uploads stay until you delete the job</small></div><button type="button" onClick={refresh}><RefreshCw size={15}/> Refresh</button></div>
+            <div className="transform-results-heading"><div><h2>Transform history</h2><small>All saved Transform videos · preview, download or delete any completed export</small></div><button type="button" onClick={refresh}><RefreshCw size={15}/> Refresh</button></div>
             {transformJobs.length === 0 ? <p>No transformations yet. Queue a video above to see its progress and final export here.</p> : transformJobs.map(job => {
               const label = job.status === 'completed' && job.output_available ? 'Completed' :
                 job.status === 'failed' ? 'Failed' :
