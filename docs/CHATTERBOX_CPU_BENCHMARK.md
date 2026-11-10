@@ -13,28 +13,38 @@ Chatterbox's public README lists Multilingual V3 as a 500M multilingual model su
 Do **not** install these packages into `/opt/ai-video-studio/.venv`. Keep Chatterbox isolated while we establish its memory and runtime cost.
 
 ```bash
-python3.11 -m venv /opt/chatterbox-cpu-venv
+python3.12 -m venv /opt/chatterbox-cpu-venv
 source /opt/chatterbox-cpu-venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu
 python -m pip install -r /opt/ai-video-studio/requirements-chatterbox-cpu.txt
-python -m pip install --no-deps chatterbox-tts==0.1.7
+
+# Install the archived V3-capable source at the exact upstream revision.
+git clone --filter=blob:none https://github.com/resemble-ai/chatterbox.git /opt/chatterbox-source
+git -C /opt/chatterbox-source checkout ab55923c27757c90cfcc407baa57dc25a7d25217
+python -m pip install --no-deps /opt/chatterbox-source
 ```
 
-The CPU wheels are selected explicitly so pip does not install a CUDA build. The Chatterbox package is installed without its full dependency bundle because its Gradio UI is not needed for the benchmark. The benchmark environment is separate from the API and worker virtual environment.
+The CPU wheels are selected explicitly so pip does not install a CUDA build. Do not install the PyPI 0.1.7 wheel for this V3 test: that wheel predates V3 checkpoint support. The pinned source revision includes the V3 loader. The package is installed without its full dependency bundle because its Gradio UI is not needed for the benchmark. The benchmark environment is separate from the API and worker virtual environment. Python 3.12 is used because that is the system Python on this Azure host; the pinned Torch 2.6.0 wheels support Python 3.12.
 
 ## Run against an authorised reference WAV
 
 Use a voice recording whose speaker has explicitly consented to voice synthesis. The reference WAV must be readable and no larger than the Studio 30-MB voice-profile limit.
 
 ```bash
+# Built-in reference voice baseline (can run before a personal WAV is provided)
 /opt/chatterbox-cpu-venv/bin/python /opt/ai-video-studio/tools/benchmark_chatterbox_cpu.py \
-  --reference-wav /srv/ai-video-studio/voices/REPLACE_WITH_PROFILE.wav \
   --output-dir /tmp/chatterbox-cpu-benchmark \
+  --threads 2
+
+# Later, test a saved voice profile after confirming the speaker authorised it:
+/opt/chatterbox-cpu-venv/bin/python /opt/ai-video-studio/tools/benchmark_chatterbox_cpu.py \
+  --reference-wav /path/to/authorised-reference.wav \
+  --output-dir /tmp/chatterbox-custom-voice-benchmark \
   --threads 2
 ```
 
-The output directory contains Hindi and English WAV samples and `benchmark.json`. Listen to both samples; timing and non-silent audio are not sufficient proof of pronunciation or speaker similarity. The text can be overridden with `--hi-text` and `--en-text`. Re-run after the first model download to measure warm-cache model loading. Use `--overwrite` to replace an earlier benchmark output.
+The output directory contains Hindi and English WAV samples and `benchmark.json`. Without `--reference-wav`, it tests the model's built-in reference conditioning; this is only a CPU baseline, not the custom-voice test. Use `--reference-wav` to test an authorised saved voice profile. Listen to both samples; timing and non-silent audio are not sufficient proof of pronunciation or speaker similarity. If the built-in conditioning is absent in the pinned model snapshot, the baseline run will fail clearly and the custom WAV test will be required. The text can be overridden with `--hi-text` and `--en-text`. Re-run after the first model download to measure warm-cache model loading. Use `--overwrite` to replace an earlier benchmark output.
 
 ## Decision gate before integration
 
