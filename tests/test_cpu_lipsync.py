@@ -1,4 +1,8 @@
 import unittest
+import tempfile
+import wave
+from pathlib import Path
+
 
 import numpy as np
 
@@ -11,6 +15,32 @@ from cpu_lipsync import (
 
 
 class CpuLipSyncTests(unittest.TestCase):
+    def test_audio_only_probe_accepts_a_valid_wav(self):
+        from cpu_lipsync import probe_media
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "speech.wav"
+            with wave.open(str(path), "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(16000)
+                wav.writeframes(b"\x00\x00" * 16000)
+            info = probe_media(path, require_video=False)
+            self.assertAlmostEqual(info["duration_seconds"], 1.0, places=2)
+            self.assertTrue(info["has_audio"])
+            self.assertEqual(info["width"], 0)
+
+    def test_video_probe_rejects_audio_only_wav(self):
+        from cpu_lipsync import probe_media
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "speech.wav"
+            with wave.open(str(path), "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(16000)
+                wav.writeframes(b"\x00\x00" * 16000)
+            with self.assertRaisesRegex(ValueError, "no video stream"):
+                probe_media(path)
+
     def test_keeps_source_duration_when_speech_is_shorter(self):
         result = plan_video_timing(30.0, 18.0)
         self.assertEqual(result["video_speed_factor"], 1.0)

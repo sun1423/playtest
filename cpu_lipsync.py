@@ -102,7 +102,8 @@ def _run(command: list[str], timeout: int = 600) -> subprocess.CompletedProcess:
         raise RuntimeError(f"Required executable is missing: {command[0]}") from exc
 
 
-def probe_media(path: Path) -> dict:
+def probe_media(path: Path, require_video: bool = True) -> dict:
+    """Probe either a video (default) or an audio-only file such as the TTS WAV."""
     result = _run([
         "ffprobe", "-v", "error", "-show_streams", "-show_format",
         "-of", "json", str(Path(path).resolve()),
@@ -110,17 +111,23 @@ def probe_media(path: Path) -> dict:
     data = json.loads(result.stdout)
     video = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), None)
     audio = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), None)
-    if video is None:
+    if require_video and video is None:
         raise ValueError("The source file contains no video stream.")
-    duration = float(data.get("format", {}).get("duration") or video.get("duration") or 0)
+    if not require_video and audio is None:
+        raise ValueError("The source file contains no audio stream.")
+    duration = float(
+        data.get("format", {}).get("duration")
+        or (video or audio or {}).get("duration")
+        or 0
+    )
     if not math.isfinite(duration) or duration <= 0:
-        raise ValueError("The source video has an invalid duration.")
+        raise ValueError("The media file has an invalid duration.")
     return {
         "duration_seconds": duration,
-        "width": int(video.get("width") or 0),
-        "height": int(video.get("height") or 0),
+        "width": int(video.get("width") or 0) if video else 0,
+        "height": int(video.get("height") or 0) if video else 0,
         "has_audio": audio is not None,
-        "fps": video.get("avg_frame_rate") or video.get("r_frame_rate") or "unknown",
+        "fps": (video.get("avg_frame_rate") or video.get("r_frame_rate") or "unknown") if video else "unknown",
     }
 
 
@@ -234,12 +241,13 @@ def run_cpu_lipsync(
 
     started = time.monotonic()
     source_info = probe_media(source_video)
-    audio_info = probe_media(narration_wav)
+    audio_info = probe_media(narration_wav, require_video=False)
     timing = plan_video_timing(source_info["duration_seconds"], audio_info["duration_seconds"])
     frame_count = timing["frame_count"]
     fps = timing["fps"]
     target_duration = timing["target_duration"]
     speed_factor = timing["video_speed_factor"]
+    speech_frame_count = min(frame_count, int(math.ceil(audio_info["duration_seconds"] * fps)))
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     working = destination.parent / "lipsync_work"
@@ -419,13 +427,18 @@ def run_cpu_lipsync(
                         f"The source video ended at frame {index + 1} of {frame_count}; "
                         "the full video could not be synchronised."
                     )
-                detector.setInputSize((width, height))
-                _, faces = detector.detect(frame)
-                detected_box = _choose_face(faces, previous_box, width, height)
-                if detected_box is not None:
-                    previous_box = detected_box
-                    box = _padded_box(detected_box, width, height)
+                if index < speech_frame_count:
+                    detector.setInputSize((width, height))
+                    _, faces = detector.detect(frame)
+                    detected_box = _choose_face(faces, previous_box, width, height)
+                    if detected_box is not None:
+                        previous_box = detected_box
+                        box = _padded_box(detected_box, width, height)
+                    else:
+                        box = None
                 else:
+                    # The new narration has ended. Preserve the source performance
+                    # rather than repeating the final synthetic mouth pose.
                     box = None
                 batch_frames.append(frame)
                 batch_mels.append(mel_chunks[index])
@@ -434,7 +447,7 @@ def run_cpu_lipsync(
                     flush_batch()
             flush_batch()
             encoder.stdin.close()
-            return_code = encoder.wait(timeout=900)
+            return_code = encoder.wait(timeout=3600)
             if return_code != 0:
                 raise RuntimeError("FFmpeg could not encode the lip-synced MP4: " +
                                    ffmpeg_log.read_text(errors="replace")[-1200:])
