@@ -66,3 +66,5 @@
 .dub-prosody-note{display:block;color:#a7a9af;letter-spacing:0;font-size:11px;line-height:1.55;background:#14161a;border-left:3px solid #d9ed7b;border-radius:6px;padding:10px 12px}
 
 .facefusion-workspace{max-width:900px}.facefusion-note{display:grid;gap:8px;padding:15px;margin:20px 0;background:#14161a;border:1px solid #3c3e43;border-radius:10px}.facefusion-note small{color:#a7a9af;line-height:1.55}.facefusion-workspace article{display:grid;gap:8px}.facefusion-workspace article progress{margin:4px 0}
+
+.facefusion-upload{display:grid;gap:14px}.facefusion-upload-status{display:grid;gap:8px;padding:14px;border:1px solid #45474d;border-radius:10px;background:#191b20}.facefusion-upload-status progress{height:9px}.facefusion-indeterminate{height:9px;accent-color:#d9ed7b}.facefusion-result{width:100%;max-width:760px;max-height:430px;background:#08090b;border-radius:10px}
