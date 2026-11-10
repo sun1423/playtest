@@ -868,6 +868,14 @@ function App() {
         {tab === 'voice' && <section>
           <span>VOICE LIBRARY</span><h1>Your voice profiles.</h1>
           <p>Upload a clean WAV reference for Chatterbox voice conditioning.</p>
+          <article className="voice-preview">
+            <div className="voice-preview-copy">
+              <b>Generated Hindi voice sample</b>
+              <small>Play the server-side review recording here. It streams in the Studio without downloading.</small>
+            </div>
+            <audio controls preload="none" src="/api/tts/preview-sample"
+              aria-label="Generated Hindi voice sample"/>
+          </article>
           <form onSubmit={addVoice}>
             <label>PROFILE NAME<input value={name} onChange={event => setName(event.target.value)} required/></label>
             <label className="drop"><Mic2/><b>{wav?.name || 'Choose reference WAV'}</b><input type="file" accept=".wav" onChange={event => setWav(event.target.files[0])}/></label>
