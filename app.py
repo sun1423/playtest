@@ -2159,7 +2159,7 @@ def job_video_preview(job_id: str):
     job = getjob(job_id)
     if (
         not job or job["status"] != "completed"
-        or job["kind"] not in {"video_transform", "video_voice_dub"}
+        or job["kind"] not in {"video_transform", "video_voice_dub", "facefusion"}
         or not job.get("output_path")
     ):
         raise HTTPException(404, "Video preview not ready")
