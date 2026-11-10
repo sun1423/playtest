@@ -48,6 +48,20 @@ OLLAMA_INFERENCE_LOCK = threading.Lock()
 MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
 MAX_VOICE = int(os.getenv("MAX_VOICE_MB", "30")) * 1024 * 1024
 ENABLE_TTS = os.getenv("ENABLE_TTS", "0") == "1"
+
+
+LIPSYNC_MODELS_ROOT = Path(
+    os.getenv("LIPSYNC_MODELS_ROOT", str(ROOT / "models" / "wav2lip-cpu"))
+).expanduser().resolve()
+
+
+def cpu_lipsync_ready():
+    try:
+        from cpu_lipsync import engine_ready
+        return engine_ready(LIPSYNC_MODELS_ROOT)
+    except (ImportError, OSError, ValueError):
+        return False
+
 POCKET_TTS_HINDI_ROOT = Path(
     os.getenv("POCKET_TTS_HINDI_ROOT", str(ROOT / "models" / "pocket-tts-hindi"))
 ).expanduser().resolve()
@@ -462,6 +476,86 @@ def health():
         "video_transform_ready": True,
         "authentication": True,
     }
+
+
+
+
+@app.get("/api/lipsync/status")
+def lipsync_status():
+    ready = cpu_lipsync_ready()
+    return {
+        "ready": ready,
+        "engine": "Wav2Lip ONNX · CPU",
+        "runtime": "ONNX Runtime CPUExecutionProvider · no GPU",
+        "models_installed": ready,
+        "language": "Hindi",
+        "source_performance": "Preserves source eyes, face identity, expressions, head and body movement; mouth region is synchronised to new speech.",
+        "max_video_seconds": 180,
+        "fps": 25,
+    }
+
+
+@app.post("/api/video/voice-dub")
+async def create_video_voice_dub(
+    file: UploadFile = File(...),
+    voice_id: str = Form(..., min_length=1, max_length=48),
+    narration: str = Form(..., min_length=1, max_length=12000),
+    keep_source_ambience: bool = Form(False),
+):
+    if not tts_runtime_ready():
+        raise HTTPException(503, "Pocket TTS Hindi is not enabled or its CPU model is unavailable.")
+    if not cpu_lipsync_ready():
+        raise HTTPException(503, "CPU lip-sync is not installed. Install requirements.txt and run scripts/install_cpu_lipsync.py.")
+    try:
+        resolve_voice_reference(VOICES, voice_id, MAX_VOICE)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    extension = Path(file.filename or "").suffix.lower()
+    if extension not in {".mp4", ".mov", ".mkv", ".webm"}:
+        raise HTTPException(415, "Use MP4, MOV, MKV or WebM video.")
+    if len(narration.strip()) < 2:
+        raise HTTPException(400, "Enter the Hindi narration to be spoken.")
+    folder = UP / str(uuid.uuid4())
+    folder.mkdir(parents=True, exist_ok=False)
+    target = folder / ("source" + extension)
+    size = 0
+    try:
+        with target.open("xb") as output_file:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > MAX_UPLOAD:
+                    raise HTTPException(413, "Video upload exceeds the configured size limit.")
+                output_file.write(chunk)
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(target)],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        media = json.loads(probe.stdout)
+        video_stream = next((item for item in media.get("streams", []) if item.get("codec_type") == "video"), None)
+        duration = float(media.get("format", {}).get("duration") or 0)
+        if not video_stream or duration < 1.0 or duration > 180.0:
+            raise HTTPException(413, "Choose a readable video between 1 and 180 seconds.")
+        if int(video_stream.get("width") or 0) < 96 or int(video_stream.get("height") or 0) < 96:
+            raise HTTPException(415, "Source video resolution must be at least 96×96.")
+    except HTTPException:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise HTTPException(415, "The uploaded file is not a readable video.") from exc
+    finally:
+        await file.close()
+    return enqueue(
+        "video_voice_dub",
+        {
+            "voice_id": voice_id,
+            "narration": narration.strip(),
+            "generation_settings": load_voice_generation_settings(voice_id),
+            "keep_source_ambience": bool(keep_source_ambience),
+            "source_duration": duration,
+        },
+        str(target),
+    )
 
 
 @app.get("/api/llm/health")
@@ -1729,6 +1823,45 @@ def work(job):
     cleanup_failed_output(job_id)
     folder.mkdir(parents=True, exist_ok=True)
 
+    if job["kind"] == "video_voice_dub":
+        if not tts_runtime_ready():
+            raise RuntimeError("Pocket TTS Hindi is not enabled or installed.")
+        if not cpu_lipsync_ready():
+            raise RuntimeError("CPU ONNX lip-sync models or dependencies are not installed.")
+        voice_id = payload.get("voice_id", "")
+        update(job_id, stage="Generating Hindi speech with your saved voice", progress=8)
+        narration_path = folder / "narration.wav"
+        synthesize_pocket_tts(
+            payload["narration"],
+            voice_id,
+            VOICES,
+            POCKET_TTS_HINDI_ROOT,
+            narration_path,
+            MAX_VOICE,
+            POCKET_TTS_HINDI_BINARY,
+            payload.get("generation_settings") or load_voice_generation_settings(voice_id),
+        )
+        destination = folder / "video_with_lipsync.mp4"
+        from cpu_lipsync import run_cpu_lipsync
+        result = run_cpu_lipsync(
+            Path(job["input_path"]),
+            narration_path,
+            destination,
+            LIPSYNC_MODELS_ROOT,
+            keep_source_ambience=payload.get("keep_source_ambience", False),
+            progress=lambda percent, stage: update(job_id, stage=stage, progress=percent),
+        )
+        (folder / "video_info.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(destination)],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        streams = set(probe.stdout.splitlines())
+        if "video" not in streams or "audio" not in streams:
+            raise RuntimeError("Lip-sync output must contain both video and generated speech audio.")
+        narration_path.unlink(missing_ok=True)
     if job["kind"] == "video_transform":
         source_for_render = job["input_path"]
         scene_items = payload.get("scenes", [])

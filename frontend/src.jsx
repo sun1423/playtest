@@ -14,6 +14,12 @@ function App() {
   const [jobs, setJobs] = useState([]);
   const [voices, setVoices] = useState([]);
   const [ttsInfo, setTtsInfo] = useState({ tts_ready: false, tts_languages: [] });
+  const [lipsyncInfo, setLipsyncInfo] = useState({ ready: false });
+  const [dubFile, setDubFile] = useState(null);
+  const [dubNarration, setDubNarration] = useState('');
+  const [dubVoiceId, setDubVoiceId] = useState('');
+  const [dubKeepAmbience, setDubKeepAmbience] = useState(false);
+  const [dubBusy, setDubBusy] = useState(false);
   const [text, setText] = useState('');
   const [lang, setLang] = useState('hi');
   const [storyScript, setStoryScript] = useState('');
@@ -169,8 +175,8 @@ function App() {
 
   async function refresh() {
     try {
-      const [jobList, voiceList, savedList, health] = await Promise.all([
-        api('/api/jobs'), api('/api/voices'), api('/api/saved-projects'), api('/api/health')
+      const [jobList, voiceList, savedList, health, lipStatus] = await Promise.all([
+        api('/api/jobs'), api('/api/voices'), api('/api/saved-projects'), api('/api/health'), api('/api/lipsync/status')
       ]);
       setJobs(jobList);
       setVoices(voiceList);
@@ -188,6 +194,8 @@ function App() {
       setVoice(current => voiceList.some(item => item.voice_id === current) ? current : selectedVoiceId);
       setSavedProjects(savedList);
       setTtsInfo(health);
+      setLipsyncInfo(lipStatus);
+      setDubVoiceId(current => voiceList.some(item => item.voice_id === current) ? current : selectedVoiceId);
       setStatus('Azure connected');
     } catch (error) {
       setStatus(error.message === 'Authentication required' ? 'Session expired' : 'Server offline');
@@ -271,6 +279,28 @@ function App() {
     } catch (error) { setMsg(error.message); }
     setBusy(false);
     refresh();
+  }
+
+  async function queueVideoDub(event) {
+    event.preventDefault();
+    if (!dubFile || !dubVoiceId || !dubNarration.trim()) return;
+    const form = new FormData();
+    form.append('file', dubFile);
+    form.append('voice_id', dubVoiceId);
+    form.append('narration', dubNarration.trim());
+    form.append('keep_source_ambience', String(dubKeepAmbience));
+    setDubBusy(true);
+    try {
+      await api('/api/video/voice-dub', { method: 'POST', body: form });
+      setMsg('Full video voice-dub and lip-sync job queued on the Azure CPU worker.');
+      setDubFile(null);
+      setDubNarration('');
+      refresh();
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      setDubBusy(false);
+    }
   }
 
   async function upload(event) {
@@ -747,6 +777,7 @@ function App() {
     ['create', 'Create video', WandSparkles],
     ['writer', 'Script Writer', WandSparkles],
     ['storyboard', 'Storyboard', Film],
+    ['ai-video', 'AI Video · Lip Sync', Film],
     ['transform', 'Transform', Film],
     ['timeline', 'Timeline', Film],
     ['voice', 'Voice studio', Mic2],
@@ -922,6 +953,51 @@ function App() {
             </form>
             <p className="storyboard-note">Images are supplied by you. FRAME / AI adds gentle camera motion, scene transitions and assembles the video. AI image generation is not enabled yet.</p>
           </>}
+        </section>}
+        {tab === 'ai-video' && <section className="dub-workspace">
+          <span>CPU VIDEO-TO-VIDEO · VOICE REPLACEMENT</span>
+          <h1>Keep the performance.<br/><i>Make it speak your voice.</i></h1>
+          <p>Upload a real video, choose your saved Hindi voice profile and provide the replacement dialogue. Studio synthesizes the speech locally, then synchronises mouth movement across the complete video.</p>
+          <div className="dub-status">
+            <b>{lipsyncInfo.ready && ttsInfo.tts_ready ? 'CPU voice + lip-sync ready' : 'Setup required before rendering'}</b>
+            <small>Speech: Pocket TTS Hindi · your saved WAV profile</small>
+            <small>Lip-sync: Wav2Lip ONNX · CPUExecutionProvider · no GPU</small>
+            <small>Azure hardware: 2 vCPU · 16 GB RAM · videos streamed in batches of 8 frames</small>
+            {!ttsInfo.tts_ready && <small className="voice-warning">Pocket TTS Hindi is not enabled or its model is unavailable.</small>}
+            {!lipsyncInfo.ready && <small className="voice-warning">CPU lip-sync weights/dependencies are not installed yet. Run the installation steps in docs/CPU_VIDEO_DUB.md.</small>}
+          </div>
+          <form onSubmit={queueVideoDub}>
+            <label className="drop"><Upload/><b>{dubFile?.name || 'Choose the original performance video'}</b><small>MP4 / MOV / MKV / WebM · up to 500 MB · 1–180 seconds · one clearly visible main face</small>
+              <input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={event => setDubFile(event.target.files?.[0] || null)}/>
+            </label>
+            {dubFile && <div className="dub-video-preview"><video src={URL.createObjectURL(dubFile)} controls playsInline preload="metadata"/><small>Original video preview · upload only begins when you queue the job</small></div>}
+            <label>SAVED HINDI VOICE PROFILE
+              <select required value={dubVoiceId} onChange={event => setDubVoiceId(event.target.value)}>
+                <option value="">Choose your saved WAV voice</option>
+                {voices.map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}
+              </select>
+            </label>
+            {!voices.length && <button type="button" className="secondary" onClick={() => setTab('voice')}>Open Voice Studio to save a WAV profile</button>}
+            <label>NEW HINDI DIALOGUE
+              <textarea rows="6" maxLength="12000" value={dubNarration} onChange={event => setDubNarration(event.target.value)}
+                placeholder="Enter the exact Hindi words your on-screen speaker should say. Use punctuation and paragraph breaks to guide natural pauses…" required/>
+            </label>
+            <label className="dub-checkbox"><input type="checkbox" checked={dubKeepAmbience} onChange={event => setDubKeepAmbience(event.target.checked)}/>
+              Keep original background ambience quietly under the new voice (original dialogue may also remain audible)
+            </label>
+            <button className="primary" disabled={!dubFile || !dubVoiceId || !dubNarration.trim() || dubBusy || !lipsyncInfo.ready || !ttsInfo.tts_ready}>
+              {dubBusy ? 'Uploading and queueing…' : 'Generate full video with my voice + lip-sync'}
+            </button>
+          </form>
+          <article className="dub-expectations">
+            <b>What is preserved and what changes</b>
+            <ul>
+              <li>Preserved: the original person, face identity, eyes, expressions, head turns, body movement, camera motion and background.</li>
+              <li>Changed: the mouth region is re-rendered to match your new Hindi speech, frame by frame for the complete clip.</li>
+              <li>Timing: if speech is shorter, the video keeps its original duration and the voice ends naturally. If speech is up to 20% longer, the source video slows slightly. Longer scripts are rejected rather than silently cut or frozen.</li>
+            </ul>
+            <small>Important: this is CPU mouth re-animation, not full generative face re-animation. It preserves the emotions already present in your source performance; it does not invent new eyebrow, eye or facial emotions. Wav2Lip pretrained weights have personal/research, non-commercial use restrictions—check the model terms before commercial use.</small>
+          </article>
         </section>}
         {tab === 'transform' && <section>
           <span>UPLOAD WORKFLOW</span><h1>Reframe your footage.</h1>
