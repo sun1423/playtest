@@ -34,6 +34,7 @@ OLLAMA_API = "http://127.0.0.1:11434"
 OLLAMA_INFERENCE_LOCK = threading.Lock()
 MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
 MAX_VOICE = int(os.getenv("MAX_VOICE_MB", "30")) * 1024 * 1024
+VOICE_PREVIEW_SAMPLE = Path(os.getenv("VOICE_PREVIEW_SAMPLE", "/tmp/ai-video-studio-review/hindi-custom-voice.wav")).expanduser()
 ENABLE_TTS = os.getenv("ENABLE_TTS", "0") == "1"
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "")
@@ -1258,6 +1259,21 @@ async def voice(name: str = Form(...), file: UploadFile = File(...)):
 @app.get("/api/voices")
 def voices():
     return [{"voice_id": path.stem} for path in VOICES.glob("*.wav")]
+
+
+@app.get("/api/tts/preview-sample")
+def tts_preview_sample():
+    if not VOICE_PREVIEW_SAMPLE.is_file():
+        raise HTTPException(404, "The generated voice review sample is unavailable.")
+    return FileResponse(
+        VOICE_PREVIEW_SAMPLE,
+        media_type="audio/wav",
+        headers={
+            "Content-Disposition": 'inline; filename="hindi-custom-voice.wav"',
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.delete("/api/voices/{voice_id}")
