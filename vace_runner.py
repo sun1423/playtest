@@ -78,6 +78,15 @@ def prepare_vace_runtime() -> None:
     elif config_new not in config_text:
         raise RuntimeError("Could not safely configure VACE transformer precision for this GPU.")
 
+    model_path = VACE_ROOT / "vace/models/wan/wan_vace.py"
+    model_text = model_path.read_text(encoding="utf-8")
+    model_old = "            self.model.to(self.device)"
+    model_new = "            self.model.to(device=self.device, dtype=self.param_dtype)"
+    if model_old in model_text:
+        model_path.write_text(model_text.replace(model_old, model_new, 1), encoding="utf-8")
+    elif model_new not in model_text:
+        raise RuntimeError("Could not safely cast the VACE transformer weights to FP16.")
+
     wan_spec = importlib.util.find_spec("wan")
     if not wan_spec or not wan_spec.submodule_search_locations:
         raise RuntimeError("Wan2.1 Python package is missing; install it using the setup guide.")
