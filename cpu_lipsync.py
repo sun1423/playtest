@@ -102,6 +102,22 @@ def _run(command: list[str], timeout: int = 600) -> subprocess.CompletedProcess:
         raise RuntimeError(f"Required executable is missing: {command[0]}") from exc
 
 
+def media_stream_duration(data: dict, stream: dict | None) -> float:
+    """Prefer the requested stream's duration over the container's longest stream."""
+    candidates = (
+        (stream or {}).get("duration"),
+        (data.get("format") or {}).get("duration"),
+    )
+    for candidate in candidates:
+        try:
+            duration = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(duration) and duration > 0:
+            return duration
+    raise ValueError("The media stream has an invalid duration.")
+
+
 def probe_media(path: Path, require_video: bool = True) -> dict:
     """Probe either a video (default) or an audio-only file such as the TTS WAV."""
     result = _run([
@@ -115,13 +131,7 @@ def probe_media(path: Path, require_video: bool = True) -> dict:
         raise ValueError("The source file contains no video stream.")
     if not require_video and audio is None:
         raise ValueError("The source file contains no audio stream.")
-    duration = float(
-        data.get("format", {}).get("duration")
-        or (video or audio or {}).get("duration")
-        or 0
-    )
-    if not math.isfinite(duration) or duration <= 0:
-        raise ValueError("The media file has an invalid duration.")
+    duration = media_stream_duration(data, video if require_video else audio)
     return {
         "duration_seconds": duration,
         "width": int(video.get("width") or 0) if video else 0,
