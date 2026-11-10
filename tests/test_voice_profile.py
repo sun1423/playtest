@@ -29,7 +29,7 @@ class VoiceProfileTests(unittest.TestCase):
 
         fake = FakeASR()
         with tempfile.TemporaryDirectory() as directory, \
-             patch.dict(os.environ, {"VOICE_ASR_MODEL": "base"}), \
+             patch.dict(os.environ, {"VOICE_ASR_MODEL": "base", "VOICE_ASR_BACKEND": "whisper"}), \
              patch("voice_profile._ASR_MODEL", fake), \
              patch("voice_profile._ASR_MODEL_NAME", "base"):
             result = transcribe_hindi(
@@ -52,7 +52,7 @@ class VoiceProfileTests(unittest.TestCase):
                 )
 
         with tempfile.TemporaryDirectory() as directory, \
-             patch.dict(os.environ, {"VOICE_ASR_MODEL": "base"}), \
+             patch.dict(os.environ, {"VOICE_ASR_MODEL": "base", "VOICE_ASR_BACKEND": "whisper"}), \
              patch("voice_profile._ASR_MODEL", FakeASR()), \
              patch("voice_profile._ASR_MODEL_NAME", "base"):
             result = transcribe_hindi(
@@ -62,6 +62,91 @@ class VoiceProfileTests(unittest.TestCase):
         self.assertEqual(result["transcription_attempts"], 2)
         self.assertTrue(result["script_warning"])
         self.assertIn("Urdu/Arabic", result["script_warning"])
+
+
+    def test_indicconformer_is_preferred_when_selected_backend_is_default(self):
+        expected = {
+            "text": "यह एक हिंदी परीक्षण है।",
+            "language": "hi",
+            "engine": "AI4Bharat IndicConformer Hindi · ONNX CPU",
+            "script_warning": "",
+        }
+        with patch.dict(os.environ, {"VOICE_ASR_BACKEND": "indicconformer"}), \
+             patch("indicconformer_asr.transcribe_indicconformer_hindi", return_value=expected) as recognizer:
+            result = transcribe_hindi(Path("reference.wav"), Path("models/whisper"))
+        for key, value in expected.items():
+            self.assertEqual(result.get(key), value)
+        self.assertEqual(result["backend"], "indicconformer")
+        recognizer.assert_called_once()
+
+    def test_indicconformer_failure_falls_back_only_when_explicitly_configured(self):
+        from unittest.mock import Mock
+        from voice_profile import _ASR_BACKENDS
+
+        fallback = {"text": "नमस्ते", "engine": "Whisper CPU/int8"}
+        whisper = Mock(return_value=fallback)
+        original_whisper = _ASR_BACKENDS["whisper"]
+        _ASR_BACKENDS["whisper"] = whisper
+        try:
+            with patch.dict(os.environ, {"VOICE_ASR_BACKEND": "indicconformer", "VOICE_ASR_FALLBACK_BACKEND": "whisper"}), \
+                 patch("indicconformer_asr.transcribe_indicconformer_hindi", side_effect=RuntimeError("model not installed")):
+                result = transcribe_hindi(Path("reference.wav"), Path("models/whisper"))
+        finally:
+            _ASR_BACKENDS["whisper"] = original_whisper
+        self.assertEqual(result["text"], "नमस्ते")
+        self.assertEqual(result["backend"], "whisper")
+        self.assertEqual(result["requested_backend"], "indicconformer")
+        self.assertIn("model not installed", result["fallback_reason"])
+        whisper.assert_called_once()
+
+
+    def test_indicconformer_is_the_default_backend(self):
+        expected = {"text": "यह हिंदी है।", "language": "hi"}
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "indicconformer_asr.transcribe_indicconformer_hindi", return_value=expected
+        ) as recognizer:
+            result = transcribe_hindi(Path("reference.wav"), Path("models/whisper"))
+        self.assertEqual(result["backend"], "indicconformer")
+        self.assertEqual(result["requested_backend"], "indicconformer")
+        recognizer.assert_called_once()
+
+    def test_selected_backend_failure_does_not_silently_downgrade(self):
+        from unittest.mock import Mock
+        from voice_profile import _ASR_BACKENDS
+
+        whisper = Mock()
+        original_whisper = _ASR_BACKENDS["whisper"]
+        _ASR_BACKENDS["whisper"] = whisper
+        try:
+            with patch.dict(os.environ, {"VOICE_ASR_BACKEND": "indicconformer"}, clear=True), patch(
+                "indicconformer_asr.transcribe_indicconformer_hindi",
+                side_effect=RuntimeError("model unavailable"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "(?i)selected hindi asr backend.*model unavailable"):
+                    transcribe_hindi(Path("reference.wav"), Path("models/whisper"))
+        finally:
+            _ASR_BACKENDS["whisper"] = original_whisper
+        whisper.assert_not_called()
+
+    def test_new_backend_can_be_registered_and_selected_later(self):
+        from voice_profile import register_asr_backend, available_asr_backends
+
+        def future_model(path, model_cache):
+            return {"text": "नया मॉडल", "language": "hi", "engine": "Future model"}
+
+        with patch("voice_profile._ASR_BACKENDS", {}):
+            register_asr_backend("future-model", future_model)
+            self.assertIn("future-model", available_asr_backends())
+            with patch.dict(os.environ, {"VOICE_ASR_BACKEND": "future-model"}, clear=True):
+                result = transcribe_hindi(Path("reference.wav"), Path("models"))
+        self.assertEqual(result["text"], "नया मॉडल")
+        self.assertEqual(result["backend"], "future-model")
+
+    def test_registered_backend_name_must_be_unique(self):
+        from voice_profile import register_asr_backend
+
+        with self.assertRaisesRegex(ValueError, "already registered"):
+            register_asr_backend("indicconformer", lambda path, cache: {})
 
     def test_selects_high_activity_twenty_second_clip(self):
         start, duration, ratio = choose_active_audio_window(
