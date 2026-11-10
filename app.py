@@ -35,6 +35,10 @@ OLLAMA_API = "http://127.0.0.1:11434"
 OLLAMA_INFERENCE_LOCK = threading.Lock()
 MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
 MAX_VOICE = int(os.getenv("MAX_VOICE_MB", "30")) * 1024 * 1024
+FACEFUSION_ROOT = Path(os.getenv("FACEFUSION_ROOT", "/opt/facefusion-cpu"))
+FACEFUSION_PYTHON = FACEFUSION_ROOT / ".venv" / "bin" / "python"
+FACEFUSION_SCRIPT = FACEFUSION_ROOT / "facefusion.py"
+MAX_FACE_VIDEO_SECONDS = 15
 VOICE_PREVIEW_SAMPLE = Path(os.getenv("VOICE_PREVIEW_SAMPLE", "/tmp/ai-video-studio-review/hindi-custom-voice.wav")).expanduser()
 VOICE_PREVIEW_DIAGNOSTICS = VOICE_PREVIEW_SAMPLE.parent / "ab"
 ENABLE_TTS = os.getenv("ENABLE_TTS", "0") == "1"
@@ -1016,6 +1020,66 @@ async def video(
     )
 
 
+@app.post("/api/facefusion")
+async def facefusion_video(
+    file: UploadFile = File(...),
+    source_image: UploadFile = File(...),
+):
+    video_extension = Path(file.filename or "").suffix.lower()
+    image_extension = Path(source_image.filename or "").suffix.lower()
+    if video_extension not in {".mp4", ".mov", ".mkv", ".webm"}:
+        raise HTTPException(415, "Unsupported target video format")
+    if image_extension not in {".jpg", ".jpeg", ".png", ".webp"}:
+        raise HTTPException(415, "Reference must be JPG, PNG or WebP")
+    if not FACEFUSION_PYTHON.is_file() or not FACEFUSION_SCRIPT.is_file():
+        raise HTTPException(503, "FaceFusion CPU engine is not installed.")
+    folder = UP / str(uuid.uuid4())
+    folder.mkdir()
+    target = folder / ("target" + video_extension)
+    reference = folder / ("reference" + image_extension)
+    try:
+        video_size = 0
+        with target.open("xb") as output_file:
+            while chunk := await file.read(1024 * 1024):
+                video_size += len(chunk)
+                if video_size > 100 * 1024 * 1024:
+                    raise HTTPException(413, "Face replacement target is limited to 100 MB.")
+                output_file.write(chunk)
+        image_size = 0
+        with reference.open("xb") as output_file:
+            while chunk := await source_image.read(256 * 1024):
+                image_size += len(chunk)
+                if image_size > 15 * 1024 * 1024:
+                    raise HTTPException(413, "Reference image is limited to 15 MB.")
+                output_file.write(chunk)
+        header = reference.read_bytes()[:16]
+        valid_image = (
+            header.startswith(b"\xff\xd8\xff")
+            or header.startswith(b"\x89PNG\r\n\x1a\n")
+            or (header.startswith(b"RIFF") and header[8:12] == b"WEBP")
+        )
+        if not valid_image:
+            raise HTTPException(415, "Reference file is not a valid JPG, PNG or WebP image.")
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(target)],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+        duration = float(probe.stdout.strip())
+        if not 0 < duration <= MAX_FACE_VIDEO_SECONDS:
+            raise HTTPException(400, "CPU face replacement is currently limited to videos up to 15 seconds.")
+    except HTTPException:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise HTTPException(415, "Could not validate the uploaded video.") from exc
+    finally:
+        await file.close()
+        await source_image.close()
+    return enqueue("facefusion", {"reference_path": str(reference), "duration": duration}, str(target))
+
+
 @app.post("/api/project")
 async def create_project(
     scenes: list[UploadFile] = File(...),
@@ -1681,6 +1745,55 @@ def work(job):
             check=True,
             timeout=7200,
         )
+    elif job["kind"] == "facefusion":
+        reference = Path(payload.get("reference_path", "")).resolve()
+        target = Path(job["input_path"]).resolve()
+        if UP.resolve() not in reference.parents or not reference.is_file():
+            raise RuntimeError("Face reference image is missing or outside the upload directory.")
+        if UP.resolve() not in target.parents or not target.is_file():
+            raise RuntimeError("Target video is missing or outside the upload directory.")
+        if not FACEFUSION_PYTHON.is_file() or not FACEFUSION_SCRIPT.is_file():
+            raise RuntimeError("FaceFusion CPU engine is not installed.")
+        raw_output = folder / "facefusion-video.mp4"
+        destination = folder / "video.mp4"
+        update(job_id, stage="FaceFusion CPU · preparing models", progress=5)
+        command = [
+            str(FACEFUSION_PYTHON), str(FACEFUSION_SCRIPT), "headless-run",
+            "--source-paths", str(reference),
+            "--target-path", str(target),
+            "--output-path", str(raw_output),
+            "--processors", "face_swapper",
+            "--face-detector-model", "scrfd",
+            "--face-landmarker-model", "2dfan4",
+            "--face-swapper-model", "inswapper_128",
+            "--face-selector-mode", "many",
+            "--execution-providers", "cpu",
+            "--execution-thread-count", "2",
+            "--output-video-encoder", "libx264",
+            "--output-video-preset", "veryfast",
+            "--output-video-quality", "80",
+            "--log-level", "info",
+        ]
+        update(job_id, stage="Replacing faces on CPU", progress=15)
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=7200, check=False
+        )
+        if result.returncode or not raw_output.is_file():
+            detail = (result.stderr or result.stdout or "FaceFusion did not produce an output video.")[-1800:]
+            raise RuntimeError(detail)
+        update(job_id, stage="Restoring original audio", progress=90)
+        subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                "-i", str(raw_output), "-i", str(target),
+                "-map", "0:v:0", "-map", "1:a?",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                "-map_metadata", "1", "-movflags", "+faststart",
+                str(destination),
+            ],
+            capture_output=True, text=True, timeout=600, check=True,
+        )
+        raw_output.unlink(missing_ok=True)
     elif job["kind"] == "tts":
         if not tts_runtime_ready():
             raise RuntimeError("Narration engine is not enabled or installed.")
