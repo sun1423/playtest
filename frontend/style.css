@@ -30,3 +30,5 @@
 
 
 .dub-workspace{max-width:900px}.dub-status,.dub-expectations{display:grid;gap:8px;padding:16px;margin:20px 0;background:#14161a;border:1px solid #41434a;border-radius:10px}.dub-status b{color:#d9ed7b}.dub-status small,.dub-expectations small{color:#a6a7ad;line-height:1.55}.dub-video-preview{display:grid;gap:8px;margin:12px 0}.dub-video-preview video{width:100%;max-height:360px;background:#090a0c;border-radius:9px}.dub-video-preview small{color:#999}.dub-checkbox{display:flex;align-items:flex-start;gap:10px;font-size:12px!important;letter-spacing:0!important;color:#c5c7cc!important}.dub-checkbox input{width:17px;height:17px;margin:1px 0 0;accent-color:#d9ed7b}.dub-expectations ul{margin:3px 0;padding-left:20px;color:#c5c7cc;font-size:13px;line-height:1.65}.dub-expectations li{margin:5px 0}.dub-expectations small{margin-top:5px}@media(max-width:620px){.dub-checkbox{align-items:flex-start}}
+
+.dub-style-note{color:#a7a9af;line-height:1.55;font-size:11px}
