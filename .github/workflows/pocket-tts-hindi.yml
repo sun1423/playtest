@@ -8,6 +8,7 @@ on:
   pull_request:
     branches:
       - main
+      - feature/pocket-tts-hindi-voiceover
 
 permissions:
   contents: read
