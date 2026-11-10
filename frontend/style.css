@@ -64,3 +64,5 @@
 .dub-length-footnote{color:#82858d}
 @media(max-width:620px){.dub-length-meter{padding:12px}.dub-length-values{display:grid;grid-template-columns:1fr 1fr}}
 .dub-prosody-note{display:block;color:#a7a9af;letter-spacing:0;font-size:11px;line-height:1.55;background:#14161a;border-left:3px solid #d9ed7b;border-radius:6px;padding:10px 12px}
+
+.facefusion-workspace{max-width:900px}.facefusion-note{display:grid;gap:8px;padding:15px;margin:20px 0;background:#14161a;border:1px solid #3c3e43;border-radius:10px}.facefusion-note small{color:#a7a9af;line-height:1.55}.facefusion-workspace article{display:grid;gap:8px}.facefusion-workspace article progress{margin:4px 0}
