@@ -54,8 +54,8 @@ def peak_rss_mib() -> float:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--reference-wav", required=True, type=Path,
-                        help="A WAV voice reference the user is authorised to use.")
+    parser.add_argument("--reference-wav", type=Path, default=None,
+                        help="Optional authorised WAV; omit to test the model's built-in reference voice.")
     parser.add_argument("--output-dir", type=Path,
                         default=Path("/tmp/chatterbox-cpu-benchmark"))
     parser.add_argument("--threads", type=int, default=min(2, os.cpu_count() or 1))
@@ -75,19 +75,20 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    reference = args.reference_wav.expanduser().resolve()
-    if not reference.is_file() or reference.suffix.lower() != ".wav":
-        raise SystemExit("Reference must be an existing .wav file.")
-    if reference.stat().st_size > 30 * 1024 * 1024:
-        raise SystemExit("Reference WAV exceeds the Studio 30 MB voice-profile limit.")
-
-    try:
-        import soundfile as sf
-        info = sf.info(str(reference))
-    except Exception as exc:
-        raise SystemExit(f"Could not read reference WAV: {exc}") from exc
-    if info.frames <= 0 or info.samplerate <= 0:
-        raise SystemExit("Reference WAV contains no readable audio.")
+    reference = args.reference_wav.expanduser().resolve() if args.reference_wav else None
+    info = None
+    if reference:
+        if not reference.is_file() or reference.suffix.lower() != ".wav":
+            raise SystemExit("Reference must be an existing .wav file.")
+        if reference.stat().st_size > 30 * 1024 * 1024:
+            raise SystemExit("Reference WAV exceeds the Studio 30 MB voice-profile limit.")
+        try:
+            import soundfile as sf
+            info = sf.info(str(reference))
+        except Exception as exc:
+            raise SystemExit(f"Could not read reference WAV: {exc}") from exc
+        if info.frames <= 0 or info.samplerate <= 0:
+            raise SystemExit("Reference WAV contains no readable audio.")
 
     args.output_dir = args.output_dir.expanduser().resolve()
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -108,7 +109,10 @@ def main() -> int:
 
     print("Benchmark: Chatterbox Multilingual TTS on CPU only", flush=True)
     print(f"Host CPUs visible: {os.cpu_count() or 'unknown'}; Torch threads: {args.threads}", flush=True)
-    print(f"Reference: {reference.name}; {info.duration:.1f}s; {info.samplerate}Hz; {info.channels} channel(s)", flush=True)
+    if reference:
+        print(f"Custom reference: {reference.name}; {info.duration:.1f}s; {info.samplerate}Hz; {info.channels} channel(s)", flush=True)
+    else:
+        print("Voice mode: model-provided built-in reference (no custom WAV)", flush=True)
     print(f"Output directory: {args.output_dir}", flush=True)
 
     mem_before = read_proc_values()
@@ -140,12 +144,11 @@ def main() -> int:
         cpu_before = resource.getrusage(resource.RUSAGE_SELF)
         mem_at_start = read_proc_values()
         wall_started = time.perf_counter()
+        generation_kwargs = {"language_id": language}
+        if reference:
+            generation_kwargs["audio_prompt_path"] = str(reference)
         with torch.inference_mode():
-            audio = model.generate(
-                text,
-                language_id=language,
-                audio_prompt_path=str(reference),
-            )
+            audio = model.generate(text, **generation_kwargs)
         generation_seconds = time.perf_counter() - wall_started
         cpu_after = resource.getrusage(resource.RUSAGE_SELF)
         cpu_seconds = (
@@ -201,13 +204,14 @@ def main() -> int:
         "platform": platform.platform(),
         "visible_cpu_count": os.cpu_count(),
         "torch_threads": args.threads,
-        "reference": {
+        "voice_mode": "custom_reference_wav" if reference else "model_builtin_reference",
+        "reference": ({
             "filename": reference.name,
             "duration_seconds": round(info.duration, 3),
             "sample_rate": info.samplerate,
             "channels": info.channels,
             "size_bytes": reference.stat().st_size,
-        },
+        } if reference else None),
         "model_load_seconds": round(load_seconds, 3),
         "process_peak_rss_mib": round(peak_rss_mib(), 1),
         "memory_before_model_mib": mem_before,
