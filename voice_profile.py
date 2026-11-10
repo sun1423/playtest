@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import os
 import re
 import shutil
@@ -321,20 +322,102 @@ def _transcribe_hindi_whisper(path: Path, model_cache: Path) -> dict:
     }
 
 
+def _transcribe_indicconformer(path: Path, model_cache: Path) -> dict:
+    """Lazy adapter for the selected Hindi-specific ONNX recognizer."""
+    from indicconformer_asr import transcribe_indicconformer_hindi
+
+    return transcribe_indicconformer_hindi(path, model_cache)
+
+
+_ASR_BACKENDS = {}
+_ASR_BACKEND_MODULES_LOCK = threading.Lock()
+_ASR_BACKEND_MODULES_LOADED: set[str] = set()
+
+
+def register_asr_backend(name: str, transcriber, *, replace: bool = False) -> None:
+    """Register a model adapter so future ASR engines can be added without changing dispatch."""
+    key = name.strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", key):
+        raise ValueError("ASR backend names must use letters, numbers, '_' or '-'.")
+    if not callable(transcriber):
+        raise TypeError("ASR backend adapter must be callable.")
+    if key in _ASR_BACKENDS and not replace:
+        raise ValueError(f"ASR backend is already registered: {key}")
+    _ASR_BACKENDS[key] = transcriber
+
+
+def available_asr_backends() -> list[str]:
+    """Return the registered backend identifiers for diagnostics and configuration."""
+    return sorted(_ASR_BACKENDS)
+
+
+def _load_external_asr_backends() -> None:
+    """Load optional adapter modules named in VOICE_ASR_BACKEND_MODULES."""
+    module_names = [
+        item.strip()
+        for item in os.getenv("VOICE_ASR_BACKEND_MODULES", "").split(",")
+        if item.strip()
+    ]
+    if not module_names:
+        return
+    with _ASR_BACKEND_MODULES_LOCK:
+        for module_name in module_names:
+            if module_name not in _ASR_BACKEND_MODULES_LOADED:
+                importlib.import_module(module_name)
+                _ASR_BACKEND_MODULES_LOADED.add(module_name)
+
+
+register_asr_backend("indicconformer", _transcribe_indicconformer)
+register_asr_backend("whisper", _transcribe_hindi_whisper)
+
+
 def transcribe_hindi(path: Path, model_cache: Path) -> dict:
-    """Prefer Hindi-specific IndicConformer ONNX; fall back to local Whisper on errors."""
+    """Use the configured local ASR backend; never silently downgrade by default."""
+    _load_external_asr_backends()
     backend = os.getenv("VOICE_ASR_BACKEND", "indicconformer").strip().lower()
-    if backend in {"indicconformer", "indicconformer-hi"}:
-        try:
-            from indicconformer_asr import transcribe_indicconformer_hindi
-            return transcribe_indicconformer_hindi(path, model_cache)
-        except Exception as exc:
-            if os.getenv("VOICE_ASR_FALLBACK_TO_WHISPER", "1").strip() != "1":
-                raise
-            fallback = _transcribe_hindi_whisper(path, model_cache)
-            fallback["fallback_reason"] = str(exc)[:500]
-            fallback["engine"] = "Whisper CPU/int8 (IndicConformer fallback)"
-            return fallback
-    if backend in {"whisper", "faster-whisper"}:
-        return _transcribe_hindi_whisper(path, model_cache)
-    raise RuntimeError(f"Unsupported VOICE_ASR_BACKEND: {backend}")
+    transcriber = _ASR_BACKENDS.get(backend)
+    if transcriber is None:
+        available = ", ".join(available_asr_backends())
+        raise RuntimeError(
+            f"Unsupported VOICE_ASR_BACKEND '{backend}'. "
+            f"Registered backends: {available or 'none'}."
+        )
+
+    try:
+        result = transcriber(path, model_cache)
+        if not isinstance(result, dict):
+            raise TypeError(f"ASR backend '{backend}' must return a dictionary.")
+        result = dict(result)
+        result.setdefault("backend", backend)
+        result.setdefault("requested_backend", backend)
+        return result
+    except Exception as primary_error:
+        # Whisper remains available for rollback, but its lower-quality transcript
+        # must never be substituted silently when the selected Hindi model fails.
+        fallback = os.getenv("VOICE_ASR_FALLBACK_BACKEND", "").strip().lower()
+        if not fallback and os.getenv("VOICE_ASR_FALLBACK_TO_WHISPER", "0").strip() == "1":
+            fallback = "whisper"
+        if fallback in {"", "none", "off", "disabled"}:
+            raise RuntimeError(
+                f"Selected Hindi ASR backend '{backend}' failed: {primary_error}"
+            ) from primary_error
+        fallback_transcriber = _ASR_BACKENDS.get(fallback)
+        if fallback_transcriber is None:
+            raise RuntimeError(
+                f"Fallback ASR backend '{fallback}' is not registered. "
+                f"Registered backends: {', '.join(available_asr_backends())}."
+            ) from primary_error
+        if fallback == backend:
+            raise RuntimeError("Fallback ASR backend must differ from the selected backend.") from primary_error
+        fallback_result = fallback_transcriber(path, model_cache)
+        if not isinstance(fallback_result, dict):
+            raise TypeError(f"Fallback ASR backend '{fallback}' must return a dictionary.")
+        fallback_result = dict(fallback_result)
+        fallback_result["backend"] = fallback
+        fallback_result["requested_backend"] = backend
+        fallback_result["fallback_reason"] = str(primary_error)[:500]
+        fallback_result["engine"] = (
+            f"{fallback_result.get('engine', fallback)} "
+            f"(fallback after {backend} failed)"
+        )
+        return fallback_result
