@@ -348,7 +348,10 @@ function App() {
     form.append('style_strength', String(styleStrength));
     setDubBusy(true);
     try {
-      await api('/api/video/voice-dub', { method: 'POST', body: form });
+      const queuedJob = await api('/api/video/voice-dub', { method: 'POST', body: form });
+      jobsMutationVersionRef.current += 1;
+      jobsRefreshSequenceRef.current += 1;
+      setJobs(current => [queuedJob, ...current.filter(job => job.id !== queuedJob.id)]);
       setMsg('Full video voice-dub and lip-sync job queued on the Azure CPU worker.');
       setDubFile(null);
       setDubNarration('');
@@ -927,6 +930,7 @@ function App() {
   const transformJobs = jobs.filter(job =>
     job.kind === 'video_transform' && !(job.payload?.scenes?.length)
   );
+  const dubJobs = jobs.filter(job => job.kind === 'video_voice_dub');
   const editingTransformJob = jobs.find(job => job.id === editingTransformId);
   const trimEndValue = Number(trimEnd) > 0 ? Math.min(Number(trimEnd), trimDuration) : trimDuration;
   const trimStartValue = Math.min(Math.max(0, Number(trimStart) || 0), Math.max(0, trimEndValue - 0.1));
@@ -1168,6 +1172,48 @@ function App() {
               {dubBusy ? 'Uploading and queueing…' : 'Generate full video with my voice + lip-sync'}
             </button>
           </form>
+          <div className="transform-results dub-results">
+            <div className="transform-results-heading">
+              <div><h2>Recent AI Video generations</h2><small>Progress refreshes automatically · completed videos stay here to play or download</small></div>
+              <button type="button" onClick={refresh}><RefreshCw size={15}/> Refresh</button>
+            </div>
+            {dubJobs.length === 0 ? <p>No AI videos yet. Queue a generation above and its progress and finished video will appear here.</p> :
+              dubJobs.slice(0, 8).map(job => {
+                const ready = job.status === 'completed' && job.output_available;
+                const label = ready ? 'Completed' : job.status === 'failed' ? 'Failed' :
+                  job.status === 'running' ? 'Processing' : job.status === 'queued' ? 'Queued' : job.status;
+                return <article className="transform-job" key={job.id}>
+                  <div className="transform-job-heading">
+                    <div><b>{job.payload?.source_filename || ('Lip-sync · ' + (job.payload?.voice_id || 'Saved voice profile'))}</b>
+                      <small>{new Date(job.created_at).toLocaleString()} · {job.stage}</small></div>
+                    <span className={'transform-status ' + (ready ? 'success' : job.status === 'failed' ? 'failed' : 'pending')}>{label}</span>
+                  </div>
+                  <progress value={job.progress || 0} max="100"/>
+                  <small className="transform-progress-label">{ready ? 'Video ready · 100%' : (job.progress || 0) + '% · ' + job.stage}</small>
+                  {ready && <>
+                    <div className="transform-success-note">Your generated video is ready. Play it below or download the MP4.</div>
+                    <div className="video-preview transform-output-preview">
+                      <video src={'/api/jobs/' + job.id + '/preview-video'} controls playsInline preload="metadata"/>
+                    </div>
+                    <div className="transform-job-actions">
+                      <a className="primary" href={'/api/jobs/' + job.id + '/output'} download="ai_video_with_lipsync.mp4">
+                        <Download size={15}/> Download finished video
+                      </a>
+                    </div>
+                  </>}
+                  {job.status === 'completed' && !job.output_available &&
+                    <small className="transform-warning">The job completed, but the video file is not available in storage.</small>}
+                  {job.status === 'failed' && <p className="transform-error">{job.error || 'The video could not be generated.'}</p>}
+                  <div className="transform-job-footer">
+                    <small>Job {job.id.slice(0, 8)} · {job.payload?.video_style === 'none' ? 'Lip-sync only' : 'Lip-sync + ' + (job.payload?.video_style || 'video style')}</small>
+                    <button type="button" className="danger" disabled={job.status === 'running' || job.status === 'queued'}
+                      onClick={() => deleteMedia('/api/jobs/' + job.id, 'AI video and its files')}>
+                      <Trash2 size={14}/> {job.status === 'running' || job.status === 'queued' ? 'Processing — cannot delete' : 'Delete'}
+                    </button>
+                  </div>
+                </article>;
+              })}
+          </div>
           <article className="dub-expectations">
             <b>What is preserved and what changes</b>
             <ul>
