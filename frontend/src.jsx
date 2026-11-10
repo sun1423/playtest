@@ -15,6 +15,9 @@ function App() {
   const [voices, setVoices] = useState([]);
   const [ttsInfo, setTtsInfo] = useState({ tts_ready: false, tts_languages: [] });
   const [lipsyncInfo, setLipsyncInfo] = useState({ ready: false });
+  const [styleInfo, setStyleInfo] = useState({ ready: false, models: [] });
+  const [videoStyle, setVideoStyle] = useState('anime_512');
+  const [styleStrength, setStyleStrength] = useState(0.85);
   const [dubFile, setDubFile] = useState(null);
   const [dubPreviewUrl, setDubPreviewUrl] = useState('');
   const [dubNarration, setDubNarration] = useState('');
@@ -176,8 +179,9 @@ function App() {
 
   async function refresh() {
     try {
-      const [jobList, voiceList, savedList, health, lipStatus] = await Promise.all([
-        api('/api/jobs'), api('/api/voices'), api('/api/saved-projects'), api('/api/health'), api('/api/lipsync/status')
+      const [jobList, voiceList, savedList, health, lipStatus, styleStatus] = await Promise.all([
+        api('/api/jobs'), api('/api/voices'), api('/api/saved-projects'), api('/api/health'),
+        api('/api/lipsync/status'), api('/api/video-style/status')
       ]);
       setJobs(jobList);
       setVoices(voiceList);
@@ -196,6 +200,12 @@ function App() {
       setSavedProjects(savedList);
       setTtsInfo(health);
       setLipsyncInfo(lipStatus);
+      setStyleInfo(styleStatus);
+      setVideoStyle(current => current === 'none' ||
+        styleStatus.models.some(item => item.id === current && item.ready)
+          ? current
+          : (styleStatus.models.find(item => item.id === 'anime_512' && item.ready)?.id
+            || styleStatus.models.find(item => item.ready)?.id || 'none'));
       setDubVoiceId(current => voiceList.some(item => item.voice_id === current) ? current : selectedVoiceId);
       setStatus('Azure connected');
     } catch (error) {
@@ -299,6 +309,8 @@ function App() {
     form.append('voice_id', dubVoiceId);
     form.append('narration', dubNarration.trim());
     form.append('keep_source_ambience', String(dubKeepAmbience));
+    form.append('video_style', videoStyle);
+    form.append('style_strength', String(styleStrength));
     setDubBusy(true);
     try {
       await api('/api/video/voice-dub', { method: 'POST', body: form });
@@ -967,7 +979,7 @@ function App() {
         {tab === 'ai-video' && <section className="dub-workspace">
           <span>CPU VIDEO-TO-VIDEO · VOICE REPLACEMENT</span>
           <h1>Keep the performance.<br/><i>Make it speak your voice.</i></h1>
-          <p>Upload a real video, choose your saved Hindi voice profile and provide the replacement dialogue. Studio synthesizes the speech locally, then synchronises mouth movement across the complete video.</p>
+          <p>Upload a real video, select your saved Hindi voice profile, enter the dialogue and choose an AI visual style. Studio synthesises your speech locally, lip-syncs the source performance, then stylises every frame while preserving the original scene and motion.</p>
           <div className="dub-status">
             <b>{lipsyncInfo.ready && ttsInfo.tts_ready ? 'CPU voice + lip-sync ready' : 'Setup required before rendering'}</b>
             <small>Speech: Pocket TTS Hindi · your saved WAV profile</small>
@@ -981,6 +993,26 @@ function App() {
               <input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={event => setDubFile(event.target.files?.[0] || null)}/>
             </label>
             {dubFile && <div className="dub-video-preview"><video src={dubPreviewUrl} controls playsInline preload="metadata"/><small>Original video preview · upload only begins when you queue the job</small></div>}
+            <label>FULL-FRAME AI VIDEO STYLE
+              <select value={videoStyle} onChange={event => setVideoStyle(event.target.value)}>
+                <option value="none">Keep original look · lip-sync only</option>
+                {styleInfo.models.map(item => <option key={item.id} value={item.id} disabled={!item.ready}>
+                  {item.label}{item.ready ? '' : ' · model not installed'}
+                </option>)}
+              </select>
+            </label>
+            {videoStyle !== 'none' && <>
+              <label>STYLE INTENSITY · {Math.round(styleStrength * 100)}%
+                <input type="range" min="0.25" max="1" step="0.05" value={styleStrength}
+                  onChange={event => setStyleStrength(Number(event.target.value))}/>
+              </label>
+              <small className="dub-style-note">
+                {videoStyle === 'anime_512'
+                  ? 'Highest-detail anime look · measured about 0.41 frames/sec on this 2-vCPU server.'
+                  : 'Faster painterly look · measured about 5.4 frames/sec on this 2-vCPU server; detail is softer at 224px.'}
+              </small>
+            </>}
+            {!styleInfo.ready && <small className="voice-warning">AI style models are not installed yet. Run scripts/install_video_style_models.py on Azure.</small>}
             <label>SAVED HINDI VOICE PROFILE
               <select required value={dubVoiceId} onChange={event => setDubVoiceId(event.target.value)}>
                 <option value="">Choose your saved WAV voice</option>
@@ -995,7 +1027,7 @@ function App() {
             <label className="dub-checkbox"><input type="checkbox" checked={dubKeepAmbience} onChange={event => setDubKeepAmbience(event.target.checked)}/>
               Keep original background ambience quietly under the new voice (original dialogue may also remain audible)
             </label>
-            <button className="primary" disabled={!dubFile || !dubVoiceId || !dubNarration.trim() || dubBusy || !lipsyncInfo.ready || !ttsInfo.tts_ready}>
+            <button className="primary" disabled={!dubFile || !dubVoiceId || !dubNarration.trim() || dubBusy || !lipsyncInfo.ready || !ttsInfo.tts_ready || (videoStyle !== 'none' && !styleInfo.models.some(item => item.id === videoStyle && item.ready))}>
               {dubBusy ? 'Uploading and queueing…' : 'Generate full video with my voice + lip-sync'}
             </button>
           </form>
@@ -1006,7 +1038,7 @@ function App() {
               <li>Changed: the mouth region is re-rendered to match your new Hindi speech, frame by frame for the complete clip.</li>
               <li>Timing: if speech is shorter, the video keeps its original duration and the voice ends naturally. If speech is up to 20% longer, the source video slows slightly. Longer scripts are rejected rather than silently cut or frozen.</li>
             </ul>
-            <small>Important: this is CPU mouth re-animation, not full generative face re-animation. It preserves the emotions already present in your source performance; it does not invent new eyebrow, eye or facial emotions. Wav2Lip pretrained weights have personal/research, non-commercial use restrictions—check the model terms before commercial use.</small>
+            <small>Important: AI style transfer changes the appearance of the same source frames; it does not invent new objects or camera actions. Lip-sync changes the mouth while retaining source eyes, expressions, head motion and body performance. It does not synthesize new eyebrow or eye emotions. These weights are intended for your personal, non-commercial workflow.</small>
           </article>
         </section>}
         {tab === 'transform' && <section>
