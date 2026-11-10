@@ -25,7 +25,7 @@ def fetch(destination: Path, url: str, expected_sha: str, minimum_size: int) -> 
         if digest == expected_sha:
             print(f"verified existing {destination.name}")
             return
-        raise RuntimeError(f"Existing style model SHA-256 mismatch: {destination}")
+        print(f"replacing outdated or mismatched model {destination.name}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
     os.close(fd)
