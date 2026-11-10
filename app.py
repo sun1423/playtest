@@ -446,6 +446,11 @@ class TTS(BaseModel):
     voice_id: str = Field(min_length=1, max_length=48)
 
 
+class ScriptAudioRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=100000)
+    voice_id: str = Field(min_length=1, max_length=48)
+
+
 class ModelNameRequest(BaseModel):
     model: str = Field(min_length=1, max_length=128)
 
@@ -1192,6 +1197,20 @@ def tts(payload: TTS):
     return enqueue("tts", job_payload)
 
 
+@app.post("/api/tts/script")
+def create_script_audio(payload: ScriptAudioRequest):
+    if not tts_runtime_ready():
+        raise HTTPException(503, "Hindi narration is disabled or the Pocket TTS CPU model is not installed.")
+    try:
+        resolve_voice_reference(VOICES, payload.voice_id, MAX_VOICE)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    job_payload = payload.model_dump()
+    job_payload["generation_settings"] = load_voice_generation_settings(payload.voice_id)
+    job_payload["output_format"] = "mp3"
+    return enqueue("tts_script", job_payload)
+
+
 @app.post("/api/video")
 async def video(
     file: UploadFile = File(...),
@@ -1847,6 +1866,20 @@ def delete_voice(voice_id: str):
     return {"deleted": True, "voice_id": voice_id}
 
 
+@app.get("/api/jobs/{job_id}/preview")
+def job_audio_preview(job_id):
+    job = getjob(job_id)
+    if not job or job["kind"] != "tts_script" or job["status"] != "completed" or not job["output_path"]:
+        raise HTTPException(404, "Audio preview not ready")
+    path = Path(job["output_path"]).resolve()
+    if OUT.resolve() not in path.parents or not path.is_file() or path.suffix.lower() != ".mp3":
+        raise HTTPException(404, "Not found")
+    return FileResponse(
+        path, media_type="audio/mpeg",
+        headers={"Content-Disposition": f'inline; filename="{path.name}"'},
+    )
+
+
 @app.get("/api/jobs/{job_id}/output")
 def output(job_id):
     job = getjob(job_id)
@@ -2186,6 +2219,64 @@ def work(job):
             POCKET_TTS_HINDI_BINARY,
             payload.get("generation_settings") or load_voice_generation_settings(payload["voice_id"]),
         )
+    elif job["kind"] == "tts_script":
+        if not tts_runtime_ready():
+            raise RuntimeError("Hindi narration is disabled or the Pocket TTS CPU model is not installed.")
+        text = payload["text"].strip()
+        chunks = []
+        while text:
+            if len(text) <= 10000:
+                chunks.append(text)
+                break
+            window = text[:10000]
+            boundaries = list(re.finditer(r"\n+|(?<=[।.!?])\s+|\s+", window))
+            cut = boundaries[-1].end() if boundaries else 10000
+            chunks.append(text[:cut].strip())
+            text = text[cut:].strip()
+        parts = []
+        settings = payload.get("generation_settings") or load_voice_generation_settings(payload["voice_id"])
+        for index, chunk in enumerate(chunks, start=1):
+            update(
+                job_id,
+                stage=f"Generating speech · part {index}/{len(chunks)}",
+                progress=10 + int(65 * (index - 1) / len(chunks)),
+            )
+            part = folder / f"script_part_{index:03d}.wav"
+            synthesize_pocket_tts(
+                chunk, payload["voice_id"], VOICES, POCKET_TTS_HINDI_ROOT,
+                part, MAX_VOICE, POCKET_TTS_HINDI_BINARY, settings,
+            )
+            parts.append(part)
+        update(job_id, stage="Combining speech parts", progress=78)
+        concat_list = folder / "audio_parts.txt"
+        concat_list.write_text(
+            "".join(f"file '{part.name}'\n" for part in parts), encoding="utf-8"
+        )
+        combined = folder / "combined.wav"
+        subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                "-f", "concat", "-safe", "0", "-i", str(concat_list),
+                "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le", str(combined),
+            ],
+            check=True, capture_output=True, text=True, timeout=600,
+        )
+        update(job_id, stage="Encoding MP3 · 192 kbps", progress=88)
+        destination = folder / "script_narration.mp3"
+        subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                "-i", str(combined), "-ar", "24000", "-ac", "1",
+                "-c:a", "libmp3lame", "-b:a", "192k", str(destination),
+            ],
+            check=True, capture_output=True, text=True, timeout=600,
+        )
+        if not destination.is_file() or destination.stat().st_size < 1024:
+            raise RuntimeError("MP3 encoding failed or produced an empty audio file.")
+        for part in parts:
+            part.unlink(missing_ok=True)
+        combined.unlink(missing_ok=True)
+        concat_list.unlink(missing_ok=True)
     else:
         raise RuntimeError("Unsupported job type")
 
