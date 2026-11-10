@@ -53,12 +53,31 @@ ENABLE_TTS = os.getenv("ENABLE_TTS", "0") == "1"
 LIPSYNC_MODELS_ROOT = Path(
     os.getenv("LIPSYNC_MODELS_ROOT", str(ROOT / "models" / "wav2lip-cpu"))
 ).expanduser().resolve()
+VIDEO_STYLE_MODELS_ROOT = Path(
+    os.getenv("VIDEO_STYLE_MODELS_ROOT", str(ROOT / "models" / "video-style"))
+).expanduser().resolve()
 
 
 def cpu_lipsync_ready():
     try:
         from cpu_lipsync import engine_ready
         return engine_ready(LIPSYNC_MODELS_ROOT)
+    except (ImportError, OSError, ValueError):
+        return False
+
+
+def cpu_video_style_catalog():
+    try:
+        from cpu_video_style import style_catalog
+        return style_catalog(VIDEO_STYLE_MODELS_ROOT)
+    except (ImportError, OSError, ValueError):
+        return []
+
+
+def cpu_video_style_ready(style):
+    try:
+        from cpu_video_style import engine_ready
+        return engine_ready(VIDEO_STYLE_MODELS_ROOT, style)
     except (ImportError, OSError, ValueError):
         return False
 
@@ -495,12 +514,26 @@ def lipsync_status():
     }
 
 
+@app.get("/api/video-style/status")
+def video_style_status():
+    models = cpu_video_style_catalog()
+    return {
+        "ready": any(item["ready"] for item in models),
+        "models": models,
+        "runtime": "ONNX Runtime CPUExecutionProvider",
+        "hardware": "2 vCPU · 16 GiB RAM · no GPU",
+        "measured_fps": {"anime_512": 0.41, "fast_styles_224": 5.4},
+    }
+
+
 @app.post("/api/video/voice-dub")
 async def create_video_voice_dub(
     file: UploadFile = File(...),
     voice_id: str = Form(..., min_length=1, max_length=48),
     narration: str = Form(..., min_length=1, max_length=12000),
     keep_source_ambience: bool = Form(False),
+    video_style: str = Form("anime_512"),
+    style_strength: float = Form(0.85),
 ):
     if not tts_runtime_ready():
         raise HTTPException(503, "Pocket TTS Hindi is not enabled or its CPU model is unavailable.")
@@ -515,6 +548,13 @@ async def create_video_voice_dub(
         raise HTTPException(415, "Use MP4, MOV, MKV or WebM video.")
     if len(narration.strip()) < 2:
         raise HTTPException(400, "Enter the Hindi narration to be spoken.")
+    from cpu_video_style import STYLE_MODELS
+    if video_style != "none" and video_style not in STYLE_MODELS:
+        raise HTTPException(400, "Unsupported video style.")
+    if not 0.25 <= style_strength <= 1.0:
+        raise HTTPException(400, "Style intensity must be between 0.25 and 1.0.")
+    if video_style != "none" and not cpu_video_style_ready(video_style):
+        raise HTTPException(503, "The selected AI style model is not installed. Run scripts/install_video_style_models.py.")
     folder = UP / str(uuid.uuid4())
     folder.mkdir(parents=True, exist_ok=False)
     target = folder / ("source" + extension)
@@ -552,6 +592,8 @@ async def create_video_voice_dub(
             "narration": narration.strip(),
             "generation_settings": load_voice_generation_settings(voice_id),
             "keep_source_ambience": bool(keep_source_ambience),
+            "video_style": video_style,
+            "style_strength": style_strength,
             "source_duration": duration,
         },
         str(target),
@@ -1841,18 +1883,38 @@ def work(job):
             POCKET_TTS_HINDI_BINARY,
             payload.get("generation_settings") or load_voice_generation_settings(voice_id),
         )
-        destination = folder / "video_with_lipsync.mp4"
+        lipsync_destination = folder / "video_lipsync.mp4"
         from cpu_lipsync import run_cpu_lipsync
-        result = run_cpu_lipsync(
+        lipsync_result = run_cpu_lipsync(
             Path(job["input_path"]),
             narration_path,
-            destination,
+            lipsync_destination,
             LIPSYNC_MODELS_ROOT,
             keep_source_ambience=payload.get("keep_source_ambience", False),
             progress=lambda percent, stage: update(job_id, stage=stage, progress=percent),
         )
+        selected_style = payload.get("video_style", "anime_512")
+        destination = folder / "video_with_lipsync.mp4"
+        style_result = {"style": "none", "style_label": "Original video"}
+        if selected_style == "none":
+            lipsync_destination.replace(destination)
+        else:
+            update(job_id, stage="Applying full-frame AI video style", progress=74)
+            from cpu_video_style import run_video_style
+            style_result = run_video_style(
+                lipsync_destination,
+                destination,
+                VIDEO_STYLE_MODELS_ROOT,
+                style=selected_style,
+                strength=float(payload.get("style_strength", 0.85)),
+                progress=lambda percent, stage: update(
+                    job_id, stage=stage, progress=74 + int(percent * 0.25)
+                ),
+            )
+            lipsync_destination.unlink(missing_ok=True)
         (folder / "video_info.json").write_text(
-            json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+            json.dumps({"lip_sync": lipsync_result, "video_style": style_result},
+                       ensure_ascii=False, indent=2), encoding="utf-8"
         )
         probe = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(destination)],
@@ -1860,7 +1922,8 @@ def work(job):
         )
         streams = set(probe.stdout.splitlines())
         if "video" not in streams or "audio" not in streams:
-            raise RuntimeError("Lip-sync output must contain both video and generated speech audio.")
+            raise RuntimeError("Final output must contain the full video and generated speech audio.")
+        lipsync_destination.unlink(missing_ok=True)
         narration_path.unlink(missing_ok=True)
     elif job["kind"] == "video_transform":
         source_for_render = job["input_path"]
