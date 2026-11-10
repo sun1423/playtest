@@ -74,18 +74,24 @@ class VoiceProfileTests(unittest.TestCase):
         with patch.dict(os.environ, {"VOICE_ASR_BACKEND": "indicconformer"}), \
              patch("indicconformer_asr.transcribe_indicconformer_hindi", return_value=expected) as recognizer:
             result = transcribe_hindi(Path("reference.wav"), Path("models/whisper"))
-        self.assertEqual(result, expected)
+        for key, value in expected.items():
+            self.assertEqual(result.get(key), value)
+        self.assertEqual(result["backend"], "indicconformer")
         recognizer.assert_called_once()
 
-    def test_indicconformer_failure_falls_back_to_whisper(self):
-        fallback = {"text": "नमस्ते", "engine": "Whisper CPU/int8 (fallback)"}
+    def test_indicconformer_failure_falls_back_only_when_explicitly_configured(self):
+        from unittest.mock import Mock
+
+        fallback = {"text": "नमस्ते", "engine": "Whisper CPU/int8"}
         with patch.dict(os.environ, {"VOICE_ASR_BACKEND": "indicconformer", "VOICE_ASR_FALLBACK_BACKEND": "whisper"}), \
              patch("indicconformer_asr.transcribe_indicconformer_hindi", side_effect=RuntimeError("model not installed")), \
-             patch("voice_profile._transcribe_hindi_whisper", return_value=fallback) as whisper:
+             patch.dict("voice_profile._ASR_BACKENDS", {"whisper": Mock(return_value=fallback)}) as backends:
             result = transcribe_hindi(Path("reference.wav"), Path("models/whisper"))
         self.assertEqual(result["text"], "नमस्ते")
+        self.assertEqual(result["backend"], "whisper")
+        self.assertEqual(result["requested_backend"], "indicconformer")
         self.assertIn("model not installed", result["fallback_reason"])
-        whisper.assert_called_once()
+        backends["whisper"].assert_called_once()
 
 
     def test_indicconformer_is_the_default_backend(self):
@@ -99,13 +105,15 @@ class VoiceProfileTests(unittest.TestCase):
         recognizer.assert_called_once()
 
     def test_selected_backend_failure_does_not_silently_downgrade(self):
+        from unittest.mock import Mock
+
         with patch.dict(os.environ, {"VOICE_ASR_BACKEND": "indicconformer"}, clear=True), patch(
             "indicconformer_asr.transcribe_indicconformer_hindi",
             side_effect=RuntimeError("model unavailable"),
-        ), patch("voice_profile._transcribe_hindi_whisper") as whisper:
-            with self.assertRaisesRegex(RuntimeError, "IndicConformer.*model unavailable"):
+        ), patch.dict("voice_profile._ASR_BACKENDS", {"whisper": Mock()}) as backends:
+            with self.assertRaisesRegex(RuntimeError, "selected hindi asr backend.*model unavailable"):
                 transcribe_hindi(Path("reference.wav"), Path("models/whisper"))
-        whisper.assert_not_called()
+        backends["whisper"].assert_not_called()
 
     def test_new_backend_can_be_registered_and_selected_later(self):
         from voice_profile import register_asr_backend, available_asr_backends
