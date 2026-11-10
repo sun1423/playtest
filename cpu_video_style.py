@@ -43,10 +43,14 @@ def engine_ready(models_root: Path, style: str | None = None) -> bool:
 
 def style_catalog(models_root: Path) -> list[dict]:
     root = Path(models_root).resolve()
+    dependencies_ready = all(
+        importlib.util.find_spec(name) is not None for name in ("onnxruntime", "cv2")
+    )
     return [{
         "id": key,
         "label": STYLE_LABELS[key],
-        "ready": (root / value["file"]).is_file()
+        "ready": dependencies_ready
+            and (root / value["file"]).is_file()
             and (root / value["file"]).stat().st_size > 100_000,
         "input_size": value["size"],
         "family": value["family"],
@@ -118,7 +122,7 @@ def _probe(path: Path) -> dict:
     audio = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), None)
     if video is None:
         raise ValueError("The style input contains no video stream.")
-    duration = float(data.get("format", {}).get("duration") or video.get("duration") or 0)
+    duration = float(video.get("duration") or data.get("format", {}).get("duration") or 0)
     try:
         fps = float(Fraction(video.get("avg_frame_rate") or video.get("r_frame_rate") or "25/1"))
     except (ValueError, ZeroDivisionError):
