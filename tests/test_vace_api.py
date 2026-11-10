@@ -59,7 +59,7 @@ class VaceRunnerApiTests(unittest.TestCase):
             "motion_mode": "flow",
             "keep_source_audio": "false",
         }
-        with patch("app.subprocess.run", return_value=SimpleNamespace(stdout="2.0\\n")):
+        with patch("app.subprocess.run", return_value=SimpleNamespace(stdout="2.0\n")):
             queued = self.client.post(
                 "/api/vace/video",
                 data=fields,
@@ -92,7 +92,7 @@ class VaceRunnerApiTests(unittest.TestCase):
         self.assertEqual(progress.status_code, 200, progress.text)
         with patch(
             "app.subprocess.run",
-            return_value=SimpleNamespace(stdout="video\\naudio\\n"),
+            return_value=SimpleNamespace(stdout="video\naudio\n"),
         ):
             completed = self.client.post(
                 f"/api/vace/runner/jobs/{job_id}/complete",
