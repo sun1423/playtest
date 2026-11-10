@@ -2225,12 +2225,12 @@ def work(job):
         text = payload["text"].strip()
         chunks = []
         while text:
-            if len(text) <= 10000:
+            if len(text) <= 1800:
                 chunks.append(text)
                 break
-            window = text[:10000]
+            window = text[:1800]
             boundaries = list(re.finditer(r"\n+|(?<=[।.!?])\s+|\s+", window))
-            cut = boundaries[-1].end() if boundaries else 10000
+            cut = boundaries[-1].end() if boundaries else 1800
             chunks.append(text[:cut].strip())
             text = text[cut:].strip()
         parts = []
