@@ -113,6 +113,38 @@ def _run(command: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
         raise RuntimeError(f"Required executable is missing: {command[0]}") from exc
 
 
+def _video_duration(video: dict, container: dict) -> float:
+    """Use video timestamps/frame count before falling back to container duration."""
+    for candidate in (video.get("duration"),):
+        try:
+            value = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value > 0:
+            return value
+    try:
+        value = float(video.get("duration_ts")) * float(Fraction(str(video.get("time_base"))))
+        if math.isfinite(value) and value > 0:
+            return value
+    except (TypeError, ValueError, ZeroDivisionError):
+        pass
+    try:
+        frames = float(video.get("nb_frames"))
+        rate = float(Fraction(str(video.get("avg_frame_rate") or video.get("r_frame_rate"))))
+        value = frames / rate
+        if math.isfinite(value) and value > 0:
+            return value
+    except (TypeError, ValueError, ZeroDivisionError):
+        pass
+    try:
+        value = float(container.get("duration"))
+    except (TypeError, ValueError):
+        value = 0.0
+    if math.isfinite(value) and value > 0:
+        return value
+    raise ValueError("The style input has invalid video timing.")
+
+
 def _probe(path: Path) -> dict:
     result = _run([
         "ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)
@@ -122,7 +154,7 @@ def _probe(path: Path) -> dict:
     audio = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), None)
     if video is None:
         raise ValueError("The style input contains no video stream.")
-    duration = float(video.get("duration") or data.get("format", {}).get("duration") or 0)
+    duration = _video_duration(video, data.get("format") or {})
     try:
         fps = float(Fraction(video.get("avg_frame_rate") or video.get("r_frame_rate") or "25/1"))
     except (ValueError, ZeroDivisionError):
