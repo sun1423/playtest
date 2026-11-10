@@ -9,6 +9,7 @@ import numpy as np
 from cpu_lipsync import (
     _mouth_mask,
     build_mel_chunks,
+    media_stream_duration,
     plan_video_timing,
     wav2lip_melspectrogram,
 )
@@ -40,6 +41,14 @@ class CpuLipSyncTests(unittest.TestCase):
                 wav.writeframes(b"\x00\x00" * 16000)
             with self.assertRaisesRegex(ValueError, "no video stream"):
                 probe_media(path)
+
+    def test_video_duration_ignores_a_longer_container_audio_track(self):
+        data = {"format": {"duration": "180.0"}}
+        self.assertEqual(media_stream_duration(data, {"duration": "12.0"}), 12.0)
+
+    def test_video_duration_falls_back_when_stream_duration_is_unavailable(self):
+        data = {"format": {"duration": "12.5"}}
+        self.assertEqual(media_stream_duration(data, {"duration": "N/A"}), 12.5)
 
     def test_keeps_source_duration_when_speech_is_shorter(self):
         result = plan_video_timing(30.0, 18.0)
