@@ -30,7 +30,7 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Compile backend and run voice/lip-sync tests
         run: |
-          python -m py_compile app.py pocket_tts.py voice_profile.py voice_reference.py cpu_lipsync.py scripts/install_cpu_lipsync.py tests/test_cpu_lipsync.py tests/test_pocket_tts.py tests/test_voice_profile.py tests/test_voice_reference.py
+          python -m py_compile app.py pocket_tts.py voice_profile.py voice_reference.py cpu_lipsync.py cpu_video_style.py scripts/install_cpu_lipsync.py scripts/install_video_style_models.py tests/test_cpu_lipsync.py tests/test_cpu_video_style.py tests/test_pocket_tts.py tests/test_voice_profile.py tests/test_voice_reference.py
           python -m unittest discover -s tests -v
 
   frontend:
