@@ -35,8 +35,8 @@ class VaceRunnerApiTests(unittest.TestCase):
         self.assertEqual(response.json()["video_model"], "Wan2.1-VACE-1.3B")
 
     def test_runner_endpoints_reject_missing_token(self):
-        unauthenticated = TestClient(app.app)
-        response = unauthenticated.post("/api/vace/runner/next")
+        with TestClient(app.app) as guest:
+            response = guest.post("/api/vace/runner/next")
         self.assertEqual(response.status_code, 401)
 
     def test_authenticated_runner_can_poll_empty_queue(self):
