@@ -938,7 +938,7 @@ function App() {
               <b>Prepare the working copy</b>
               <small>The uploaded original is stored separately and never modified. The model copy is always converted to WAV PCM16, mono, 24 kHz.</small>
               <div className="row voice-option-row">
-                <label className="voice-check"><input type="checkbox" checked={voiceOptions.trim_silence} onChange={event => setVoiceOptions(value => ({...value, trim_silence: event.target.checked}))}/> Trim long leading/trailing silence</label>
+                <label className="voice-check"><input type="checkbox" checked={voiceOptions.trim_silence} onChange={event => setVoiceOptions(value => ({...value, trim_silence: event.target.checked}))}/> Remove long silence gaps</label>
                 <label className="voice-check"><input type="checkbox" checked={voiceOptions.normalize_loudness} onChange={event => setVoiceOptions(value => ({...value, normalize_loudness: event.target.checked}))}/> Normalize loudness</label>
                 <label className="voice-check"><input type="checkbox" checked={voiceOptions.noise_reduction} onChange={event => setVoiceOptions(value => ({...value, noise_reduction: event.target.checked}))}/> Gentle noise reduction</label>
               </div>
@@ -954,6 +954,7 @@ function App() {
             <b>Latest WAV inspection · {lastVoiceUpload.voice_id}</b>
             <small>Original: {lastVoiceUpload.source?.codec || 'WAV'} · {lastVoiceUpload.source?.sample_rate_hz || 'unknown'} Hz · {lastVoiceUpload.source?.channels || 'unknown'} channel(s) · {lastVoiceUpload.source?.bits_per_sample || 'unknown'} bit · {lastVoiceUpload.source?.duration_seconds || '—'} sec</small>
             <small>Prepared: {lastVoiceUpload.prepared?.codec || 'PCM16'} · {lastVoiceUpload.prepared?.sample_rate_hz || 24000} Hz · {lastVoiceUpload.prepared?.channels || 1} channel · {lastVoiceUpload.prepared?.duration_seconds || '—'} sec</small>
+            <small>Original WAV format: {lastVoiceUpload.source?.container || 'unknown'} · {lastVoiceUpload.source?.sample_format || 'unknown'} sample format · {lastVoiceUpload.source?.bits_per_sample || 'unknown'} bit</small>
             <small>Original preserved: {lastVoiceUpload.source_preserved ? 'Yes' : 'No'} · Conditioning: {lastVoiceUpload.conditioning_status === 'engine_disabled' ? 'Not run — TTS engine disabled' : 'Not tested'}</small>
             {lastVoiceUpload.conditioning_note && <small>{lastVoiceUpload.conditioning_note}</small>}
             <div className="voice-file-previews">
