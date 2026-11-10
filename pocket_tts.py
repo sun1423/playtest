@@ -7,6 +7,9 @@ import os
 import unicodedata
 import subprocess
 import uuid
+import re
+import wave
+import unicodedata
 from pathlib import Path
 
 
@@ -249,3 +252,154 @@ def synthesize(
         raise
     finally:
         float_output.unlink(missing_ok=True)
+
+
+def normalize_dialogue_text(text: str) -> str:
+    """Keep Hindi speech and useful prosody punctuation; discard markup/control noise."""
+    if not isinstance(text, str) or not text.strip() or len(text) > 12000:
+        raise ValueError("Hindi dialogue must contain 1–12,000 characters.")
+    value = unicodedata.normalize("NFC", text).replace("\\r\\n", "\\n").replace("\\r", "\\n")
+    value = re.sub(r"[\\u200b-\\u200f\\u202a-\\u202e\\u2060\\ufeff]", "", value)
+    value = re.sub(r"(?m)^\\s*(?:[-*•]+|\\d+[.)])\\s+", "", value)
+    value = re.sub(r"[*_\\x60#~]+", "", value)
+    value = re.sub(r"(?:\\.{2,}|…+)", "।", value).replace("॥", "।")
+    value = re.sub(r"[;；:：]+", ",", value)
+    value = re.sub(r"[—–−]+", "।", value)
+
+    paragraphs = []
+    for block in re.split(r"\\n\\s*\\n+", value):
+        lines = []
+        for line in block.split("\\n"):
+            cleaned = []
+            for char in line:
+                category = unicodedata.category(char)
+                if char.isspace():
+                    cleaned.append(" ")
+                elif category[0] in {"L", "M", "N"} or char in "।,.!?":
+                    cleaned.append(char)
+                else:
+                    # Emoji, brackets, symbols and hidden controls are not TTS words.
+                    cleaned.append(" ")
+            line = "".join(cleaned)
+            line = re.sub(r"\\s+([,।.!?])", r"\\1", line)
+            line = re.sub(r"([,।.!?])(?=\\S)", r"\\1 ", line)
+            line = re.sub(r"\\s+", " ", line).strip()
+            line = re.sub(r",+", ",", line)
+            line = re.sub(r"[!?]{2,}", lambda match: "?" if "?" in match.group() else "!", line)
+            line = re.sub(r"[।.]{2,}", "।", line)
+            if line:
+                lines.append(line)
+        paragraph = "। ".join(lines).strip()
+        paragraph = re.sub(r"\\s+", " ", paragraph).strip()
+        if paragraph and not re.search(r"[।.!?]$", paragraph):
+            paragraph += "।"
+        if paragraph:
+            paragraphs.append(paragraph)
+    if not paragraphs:
+        raise ValueError("Enter Hindi dialogue containing speakable words; symbols alone are not narration.")
+    return "\\n\\n".join(paragraphs)
+
+
+def split_dialogue_chunks(text: str, max_chars: int = 700) -> list[tuple[str, float]]:
+    """Split at sentence/paragraph boundaries and return a natural pause after each chunk."""
+    if not 100 <= max_chars <= 1200:
+        raise ValueError("Dialogue chunk size must be between 100 and 1,200 characters.")
+    normalized = normalize_dialogue_text(text)
+    chunks: list[tuple[str, float]] = []
+    for paragraph in normalized.split("\\n\\n"):
+        sentences = re.split(r"(?<=[।.!?])\\s+", paragraph)
+        current = ""
+
+        def flush(pause: float) -> None:
+            nonlocal current
+            if current.strip():
+                chunks.append((current.strip(), pause))
+                current = ""
+
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            if len(sentence) > max_chars:
+                for word in sentence.split():
+                    if len(word) > max_chars:
+                        if current:
+                            flush(0.12)
+                        for offset in range(0, len(word), max_chars):
+                            part = word[offset:offset + max_chars]
+                            if offset + max_chars < len(word):
+                                chunks.append((part, 0.12))
+                            else:
+                                current = part
+                        continue
+                    candidate = (current + " " + word).strip()
+                    if len(candidate) > max_chars:
+                        flush(0.12)
+                        current = word
+                    else:
+                        current = candidate
+                flush(0.18)
+                continue
+            candidate = (current + " " + sentence).strip()
+            if len(candidate) > max_chars:
+                flush(0.18)
+                current = sentence
+            else:
+                current = candidate
+        flush(0.38)
+    return chunks
+
+
+def synthesize_dialogue(
+    text: str,
+    voice_id: str,
+    voices_dir: Path,
+    model_root: Path,
+    destination: Path,
+    max_voice_bytes: int,
+    binary_path: Path | None = None,
+    settings: dict | None = None,
+) -> float:
+    """Sanitise, chunk and join a full Hindi dialogue without one long TTS request."""
+    chunks = split_dialogue_chunks(text)
+    destination = Path(destination).resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if len(chunks) == 1:
+        return synthesize(
+            chunks[0][0], voice_id, voices_dir, model_root, destination,
+            max_voice_bytes, binary_path, settings,
+        )
+
+    parts = []
+    try:
+        for index, (chunk, pause_after) in enumerate(chunks, start=1):
+            part = destination.with_name(f".{destination.stem}.part_{index:03d}.wav")
+            try:
+                synthesize(
+                    chunk, voice_id, voices_dir, model_root, part,
+                    max_voice_bytes, binary_path, settings,
+                )
+            except Exception as exc:
+                raise RuntimeError(f"Hindi dialogue part {index}/{len(chunks)} failed: {exc}") from exc
+            parts.append((part, pause_after))
+
+        with wave.open(str(destination), "wb") as output:
+            output.setnchannels(1)
+            output.setsampwidth(2)
+            output.setframerate(24000)
+            silence = b"\\x00\\x00"
+            for part, pause_after in parts:
+                with wave.open(str(part), "rb") as source:
+                    if source.getnchannels() != 1 or source.getsampwidth() != 2 or source.getframerate() != 24000:
+                        raise RuntimeError("A generated dialogue part has an unexpected WAV format.")
+                    output.writeframes(source.readframes(source.getnframes()))
+                silence_frames = int(round(24000 * pause_after))
+                if silence_frames:
+                    output.writeframes(silence * silence_frames)
+        return _probe_pcm16_wav(destination)
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    finally:
+        for part, _ in parts:
+            part.unlink(missing_ok=True)
