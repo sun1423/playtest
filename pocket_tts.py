@@ -258,18 +258,18 @@ def normalize_dialogue_text(text: str) -> str:
     """Keep Hindi speech and useful prosody punctuation; discard markup/control noise."""
     if not isinstance(text, str) or not text.strip() or len(text) > 12000:
         raise ValueError("Hindi dialogue must contain 1–12,000 characters.")
-    value = unicodedata.normalize("NFC", text).replace("\\r\\n", "\\n").replace("\\r", "\\n")
-    value = re.sub(r"[\\u200b-\\u200f\\u202a-\\u202e\\u2060\\ufeff]", "", value)
-    value = re.sub(r"(?m)^\\s*(?:[-*•]+|\\d+[.)])\\s+", "", value)
-    value = re.sub(r"[*_\\x60#~]+", "", value)
-    value = re.sub(r"(?:\\.{2,}|…+)", "।", value).replace("॥", "।")
+    value = unicodedata.normalize("NFC", text).replace("\r\n", "\n").replace("\r", "\n")
+    value = re.sub(r"[\u200b-\u200f\u202a-\u202e\u2060\ufeff]", "", value)
+    value = re.sub(r"(?m)^\s*(?:[-*•]+|\d+[.)])\s+", "", value)
+    value = re.sub(r"[*_#~]+", "", value)
+    value = re.sub(r"(?:\.{2,}|…+)", "।", value).replace("॥", "।")
     value = re.sub(r"[;；:：]+", ",", value)
     value = re.sub(r"[—–−]+", "।", value)
 
     paragraphs = []
-    for block in re.split(r"\\n\\s*\\n+", value):
+    for block in re.split(r"\n\s*\n+", value):
         lines = []
-        for line in block.split("\\n"):
+        for line in block.split("\n"):
             cleaned = []
             for char in line:
                 category = unicodedata.category(char)
@@ -281,23 +281,23 @@ def normalize_dialogue_text(text: str) -> str:
                     # Emoji, brackets, symbols and hidden controls are not TTS words.
                     cleaned.append(" ")
             line = "".join(cleaned)
-            line = re.sub(r"\\s+([,।.!?])", r"\\1", line)
-            line = re.sub(r"([,।.!?])(?=\\S)", r"\\1 ", line)
-            line = re.sub(r"\\s+", " ", line).strip()
+            line = re.sub(r"\s+([,।.!?])", r"\1", line)
+            line = re.sub(r"([,।.!?])(?=\S)", r"\1 ", line)
+            line = re.sub(r"\s+", " ", line).strip()
             line = re.sub(r",+", ",", line)
             line = re.sub(r"[!?]{2,}", lambda match: "?" if "?" in match.group() else "!", line)
             line = re.sub(r"[।.]{2,}", "।", line)
+            if line and not re.search(r"[।.!?]$", line):
+                line += "।"
             if line:
                 lines.append(line)
-        paragraph = "। ".join(lines).strip()
-        paragraph = re.sub(r"\\s+", " ", paragraph).strip()
-        if paragraph and not re.search(r"[।.!?]$", paragraph):
-            paragraph += "।"
+        paragraph = " ".join(lines).strip()
+        paragraph = re.sub(r"\s+", " ", paragraph).strip()
         if paragraph:
             paragraphs.append(paragraph)
     if not paragraphs:
         raise ValueError("Enter Hindi dialogue containing speakable words; symbols alone are not narration.")
-    return "\\n\\n".join(paragraphs)
+    return "\n\n".join(paragraphs)
 
 
 def split_dialogue_chunks(text: str, max_chars: int = 700) -> list[tuple[str, float]]:
@@ -306,8 +306,8 @@ def split_dialogue_chunks(text: str, max_chars: int = 700) -> list[tuple[str, fl
         raise ValueError("Dialogue chunk size must be between 100 and 1,200 characters.")
     normalized = normalize_dialogue_text(text)
     chunks: list[tuple[str, float]] = []
-    for paragraph in normalized.split("\\n\\n"):
-        sentences = re.split(r"(?<=[।.!?])\\s+", paragraph)
+    for paragraph in normalized.split("\n\n"):
+        sentences = re.split(r"(?<=[।.!?])\s+", paragraph)
         current = ""
 
         def flush(pause: float) -> None:
@@ -347,6 +347,8 @@ def split_dialogue_chunks(text: str, max_chars: int = 700) -> list[tuple[str, fl
             else:
                 current = candidate
         flush(0.38)
+    if chunks:
+        chunks[-1] = (chunks[-1][0], 0.0)
     return chunks
 
 
