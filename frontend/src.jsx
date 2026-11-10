@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Clapperboard, Film, Mic2, FolderOpen, Upload, Play, RefreshCw,
@@ -13,6 +13,7 @@ function App() {
   const [tab, setTab] = useState('create');
   const [jobs, setJobs] = useState([]);
   const [voices, setVoices] = useState([]);
+  const [ttsInfo, setTtsInfo] = useState({ tts_ready: false, tts_languages: [] });
   const [text, setText] = useState('');
   const [lang, setLang] = useState('hi');
   const [storyScript, setStoryScript] = useState('');
@@ -31,6 +32,7 @@ function App() {
   const [storyBusy, setStoryBusy] = useState(false);
   const [storyImageUrls, setStoryImageUrls] = useState({});
   const [storyRenderBusy, setStoryRenderBusy] = useState(false);
+  const [storyNarrationEnabled, setStoryNarrationEnabled] = useState(false);
   const [voice, setVoice] = useState('');
   const [file, setFile] = useState(null);
   const [sceneFiles, setSceneFiles] = useState([]);
@@ -59,10 +61,16 @@ function App() {
   const [subtitleFile, setSubtitleFile] = useState(null);
   const [name, setName] = useState('');
   const [wav, setWav] = useState(null);
+  const [voicePrepared, setVoicePrepared] = useState(null);
+  const [voiceTranscript, setVoiceTranscript] = useState('');
+  const [voicePreviewText, setVoicePreviewText] = useState('नमस्ते, यह मेरी आवाज़ का परीक्षण है।');
+  const [voicePreviewUrl, setVoicePreviewUrl] = useState('');
+  const [voiceProfileToTest, setVoiceProfileToTest] = useState('');
+  const voiceProfileToTestRef = useRef('');
+  const [voiceGenerationSettings, setVoiceGenerationSettings] = useState({
+    temperature: 0.3, flow_steps: 1, eos_threshold: -2.0, seed: 1
+  });
   const [voiceBusy, setVoiceBusy] = useState(false);
-  const [voiceOptions, setVoiceOptions] = useState({ trim_silence: false, normalize_loudness: false, noise_reduction: false, highpass_hz: 0, lowpass_hz: 0 });
-  const [lastVoiceUpload, setLastVoiceUpload] = useState(null);
-  const [reprocessVoice, setReprocessVoice] = useState('');
   const [msg, setMsg] = useState('');
   const [status, setStatus] = useState('Connecting…');
   const [busy, setBusy] = useState(false);
@@ -161,12 +169,25 @@ function App() {
 
   async function refresh() {
     try {
-      const [jobList, voiceList, savedList] = await Promise.all([
-        api('/api/jobs'), api('/api/voices'), api('/api/saved-projects')
+      const [jobList, voiceList, savedList, health] = await Promise.all([
+        api('/api/jobs'), api('/api/voices'), api('/api/saved-projects'), api('/api/health')
       ]);
       setJobs(jobList);
       setVoices(voiceList);
+      const currentVoiceId = voiceProfileToTestRef.current;
+      const selectedVoiceId = voiceList.some(item => item.voice_id === currentVoiceId)
+        ? currentVoiceId : (voiceList[0]?.voice_id || '');
+      if (selectedVoiceId !== currentVoiceId) {
+        voiceProfileToTestRef.current = selectedVoiceId;
+        setVoiceProfileToTest(selectedVoiceId);
+        const selectedProfile = voiceList.find(item => item.voice_id === selectedVoiceId);
+        setVoiceGenerationSettings(selectedProfile?.generation_settings || {
+          temperature: 0.3, flow_steps: 1, eos_threshold: -2.0, seed: 1
+        });
+      }
+      setVoice(current => voiceList.some(item => item.voice_id === current) ? current : selectedVoiceId);
       setSavedProjects(savedList);
+      setTtsInfo(health);
       setStatus('Azure connected');
     } catch (error) {
       setStatus(error.message === 'Authentication required' ? 'Session expired' : 'Server offline');
@@ -226,6 +247,18 @@ function App() {
 
   async function run(event) {
     event.preventDefault();
+    if (!ttsInfo.tts_ready) {
+      setMsg('Hindi narration is not installed or enabled on Azure yet.');
+      return;
+    }
+    if (lang !== 'hi') {
+      setMsg('The installed CPU voice engine currently supports Hindi only.');
+      return;
+    }
+    if (!voice) {
+      setMsg('Choose a saved Hindi WAV voice profile first.');
+      return;
+    }
     setBusy(true);
     try {
       await api('/api/tts', {
@@ -393,6 +426,10 @@ function App() {
       setMsg('Add one image to every storyboard scene before rendering.');
       return;
     }
+    if (storyNarrationEnabled && (storyLanguage !== 'hi' || !ttsInfo.tts_ready || !voice)) {
+      setMsg('Hindi voiceover requires a Hindi storyboard, an enabled CPU voice engine and a saved WAV profile.');
+      return;
+    }
     const form = new FormData();
     storyScenes.forEach(scene => form.append('images', scene.imageFile));
     form.append('scene_data', JSON.stringify(storyScenes.map(scene => ({
@@ -405,6 +442,11 @@ function App() {
     form.append('overlay_text', overlayText);
     form.append('overlay_position', overlayPosition);
     if (musicFile) form.append('music_file', musicFile);
+    if (storyNarrationEnabled) {
+      form.append('narration_text', storyScenes.map(scene => scene.narration.trim()).filter(Boolean).join(' '));
+      form.append('narration_voice_id', voice);
+      form.append('narration_language', 'hi');
+    }
     setStoryRenderBusy(true);
     try {
       await api('/api/storyboard/render', { method: 'POST', body: form });
@@ -619,23 +661,71 @@ function App() {
     }
   }
 
-  async function addVoice(event) {
+  async function prepareVoice(event) {
     event.preventDefault();
-    if (!wav) return setMsg('Choose a WAV reference first.');
-    const form = new FormData();
-    form.append('name', name);
-    form.append('file', wav);
-    Object.entries(voiceOptions).forEach(([key, value]) => form.append(key, String(value)));
+    if (!wav) return;
     setVoiceBusy(true);
+    setVoicePrepared(null);
+    setVoicePreviewUrl('');
+    setMsg('Inspecting WAV, selecting the cleanest 20-second segment and extracting its script…');
+    const form = new FormData();
+    form.append('file', wav);
     try {
-      const result = await api('/api/voices', { method: 'POST', body: form });
-      setLastVoiceUpload(result);
-      setReprocessVoice(result.voice_id);
-      setMsg(result.conditioning_status === 'engine_disabled'
-        ? 'Original WAV saved. Prepared profile is ready for inspection; voice conditioning is disabled.'
-        : 'Original WAV saved and prepared profile created. Voice conditioning has not been tested.');
+      const result = await api('/api/voices/prepare', { method: 'POST', body: form });
+      setVoicePrepared(result);
+      setVoiceTranscript(result.transcript || '');
+      setMsg(result.transcription_error
+        ? 'Clip prepared. Automatic transcription unavailable: ' + result.transcription_error + ' You can type the script below.'
+        : '20-second reference prepared. Listen to it and review the extracted script.');
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      setVoiceBusy(false);
+    }
+  }
+
+  async function savePreparedVoice(event) {
+    event.preventDefault();
+    if (!voicePrepared?.prepared_id || !name.trim()) return;
+    setVoiceBusy(true);
+    const form = new FormData();
+    form.append('prepared_id', voicePrepared.prepared_id);
+    form.append('name', name);
+    form.append('transcript', voiceTranscript);
+    form.append('generation_settings', JSON.stringify(voiceGenerationSettings));
+    try {
+      const result = await api('/api/voices/save-prepared', { method: 'POST', body: form });
+      voiceProfileToTestRef.current = result.voice_id;
+      setVoiceProfileToTest(result.voice_id);
+      setVoice(result.voice_id);
+      setVoicePrepared(null);
       setWav(null);
       setName('');
+      await refresh();
+      setMsg('Voice profile saved. The original WAV is preserved separately; the prepared 20-second reference, editable script and settings are ready for testing.');
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      setVoiceBusy(false);
+    }
+  }
+
+  async function generateVoicePreview(event) {
+    event.preventDefault();
+    if (!voiceProfileToTest || !voicePreviewText.trim()) return;
+    setVoiceBusy(true);
+    setVoicePreviewUrl('');
+    try {
+      const result = await api('/api/voices/' + encodeURIComponent(voiceProfileToTest) + '/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: voicePreviewText, settings: voiceGenerationSettings })
+      });
+      setVoicePreviewUrl(result.audio_url + '?v=' + result.preview_id);
+      setVoiceGenerationSettings(result.generation_settings);
+      setMsg(result.conditioning_initialized
+        ? 'Sample generated. Reusable voice conditioning is initialised and saved.'
+        : 'Sample generated and profile settings saved.');
       await refresh();
     } catch (error) {
       setMsg(error.message);
@@ -644,23 +734,13 @@ function App() {
     }
   }
 
-  async function reprocessVoiceProfile() {
-    if (!reprocessVoice) return setMsg('Choose a saved profile to rebuild.');
-    const form = new FormData();
-    Object.entries(voiceOptions).forEach(([key, value]) => form.append(key, String(value)));
-    setVoiceBusy(true);
-    try {
-      const result = await api('/api/voices/' + encodeURIComponent(reprocessVoice) + '/prepare', {
-        method: 'POST', body: form
-      });
-      setLastVoiceUpload(result);
-      setMsg('Prepared profile rebuilt from the preserved original WAV. Original file was not changed.');
-      await refresh();
-    } catch (error) {
-      setMsg(error.message);
-    } finally {
-      setVoiceBusy(false);
-    }
+  function selectVoiceProfile(voiceId) {
+    voiceProfileToTestRef.current = voiceId;
+    setVoiceProfileToTest(voiceId);
+    setVoice(voiceId);
+    setVoicePreviewUrl('');
+    const profile = voices.find(item => item.voice_id === voiceId);
+    if (profile?.generation_settings) setVoiceGenerationSettings(profile.generation_settings);
   }
 
   const nav = [
@@ -722,17 +802,18 @@ function App() {
         {tab === 'create' && <section>
           <span>AI VIDEO WORKFLOW</span>
           <h1>Make your next story<br/><i>worth watching.</i></h1>
-          <p>Generate Hindi or English narration on Azure. Prompt-to-video scenes will be enabled after CPU image generation is benchmarked.</p>
+          <p>Generate Hindi narration on the Azure CPU server using your saved WAV voice profile. English synthesis is not included in this engine.</p>
+          {!ttsInfo.tts_ready && <p className="storyboard-note">Hindi voice engine is disabled until the ONNX model is installed and explicitly enabled by the administrator.</p>}
           <form onSubmit={run}>
-            <label>NARRATION TEXT</label>
-            <textarea value={text} onChange={event => setText(event.target.value)} rows="7" placeholder="Write your Hindi or English narration…" required/>
+            <label>HINDI NARRATION TEXT</label>
+            <textarea value={text} onChange={event => setText(event.target.value)} rows="7" placeholder="अपनी हिंदी स्क्रिप्ट यहाँ लिखें…" required/>
             <div className="row">
-              <label>LANGUAGE<select value={lang} onChange={event => setLang(event.target.value)}><option value="hi">Hindi</option><option value="en">English</option></select></label>
-              <label>VOICE PROFILE<select value={voice} onChange={event => setVoice(event.target.value)}><option value="">Default</option>{voices.map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}</select></label>
+              <label>LANGUAGE<select value={lang} onChange={event => setLang(event.target.value)}><option value="hi">Hindi</option></select></label>
+              <label>VOICE PROFILE<select required value={voice} onChange={event => setVoice(event.target.value)}><option value="" disabled>Select saved WAV profile</option>{voices.map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}</select></label>
             </div>
-            <button className="primary" disabled={busy || !text.trim()}><Play size={16}/> Generate narration</button>
+            <button className="primary" disabled={busy || !text.trim() || !voice || !ttsInfo.tts_ready}><Play size={16}/> Generate Hindi narration</button>
           </form>
-          <div className="note">● Single neural worker　● CPU inference　● Azure jobs</div>
+          <div className="note">● Native ONNX runtime　● CPU-only · two threads　● Custom WAV voice conditioning</div>
         </section>}
         {tab === 'writer' && <section className="script-writer-workspace">
           <span>PRIVATE LOCAL SCRIPT WRITER</span><h1>Start with an idea.</h1>
@@ -815,11 +896,29 @@ function App() {
                 <label>FRAMING<select value={framing} onChange={event => setFraming(event.target.value)}><option value="fill">Fill · crop edges</option><option value="fit">Fit · black bars</option></select></label>
               </div>
               <label>FADE DURATION<select value={transitionDuration} onChange={event => setTransitionDuration(event.target.value)}><option value="0.5">0.5 seconds</option><option value="1">1 second</option></select></label>
+              <div className="tts-option">
+                <label className="tts-option-check">
+                  <input type="checkbox" checked={storyNarrationEnabled}
+                    disabled={storyLanguage !== 'hi' || !ttsInfo.tts_ready || voices.length === 0}
+                    onChange={event => setStoryNarrationEnabled(event.target.checked)}/>
+                  Add Hindi voiceover from the scene narration
+                </label>
+                {storyNarrationEnabled && <label>VOICE PROFILE
+                  <select required value={voice} onChange={event => setVoice(event.target.value)}>
+                    <option value="" disabled>Select saved WAV profile</option>
+                    {voices.map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}
+                  </select>
+                </label>}
+                <small>{storyLanguage !== 'hi' ? 'Switch storyboard language to Hindi to enable voiceover.' :
+                  !ttsInfo.tts_ready ? 'Hindi CPU voice engine is not installed or enabled.' :
+                  voices.length === 0 ? 'Save an authorised Hindi WAV profile in Voice Studio first.' :
+                  'Uses each scene’s editable narration. The engine is local, Hindi-only and CPU-based.'}</small>
+              </div>
               <label>BACKGROUND MUSIC (OPTIONAL)<small> {musicFile?.name || 'No music selected; export will be silent'}</small><input type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,audio/*" onChange={event => setMusicFile(event.target.files?.[0] || null)}/></label>
               {musicFile && <label>MUSIC VOLUME · {Math.round(musicVolume*100)}%<input type="range" min="0" max="1.5" step="0.05" value={musicVolume} onChange={event => setMusicVolume(Number(event.target.value))}/></label>}
               <label>PROJECT TITLE (OPTIONAL)<input value={overlayText} maxLength={160} onChange={event => setOverlayText(event.target.value)}/></label>
               <label>TITLE POSITION<select value={overlayPosition} onChange={event => setOverlayPosition(event.target.value)}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select></label>
-              <button className="primary" disabled={storyRenderBusy || storyScenes.some(scene => !scene.imageFile)}>{storyRenderBusy ? 'Queueing storyboard video…' : 'Render storyboard video'}</button>
+              <button className="primary" disabled={storyRenderBusy || storyScenes.some(scene => !scene.imageFile) || (storyNarrationEnabled && (!ttsInfo.tts_ready || storyLanguage !== 'hi' || !voice))}>{storyRenderBusy ? 'Queueing storyboard video…' : 'Render storyboard video'}</button>
             </form>
             <p className="storyboard-note">Images are supplied by you. FRAME / AI adds gentle camera motion, scene transitions and assembles the video. AI image generation is not enabled yet.</p>
           </>}
@@ -901,93 +1000,101 @@ function App() {
             </form>
           </>}
         </section>}
-        {tab === 'voice' && <section>
-          <span>VOICE LIBRARY</span><h1>Your voice profiles.</h1>
-          <p>Upload a clean WAV reference for Chatterbox voice conditioning.</p>
-          <article className="voice-preview">
-            <div className="voice-preview-copy">
-              <b>Original long narration</b>
-              <small>Previous generated test sample using the full 20-second reference.</small>
-              <audio controls preload="none" src="/api/tts/preview-sample?variant=original"
-                aria-label="Original long Hindi voice sample"/>
-            </div>
-            <div className="voice-preview-copy">
-              <b>A · Current settings / full reference</b>
-              <small>Same Hindi test sentence, 1 flow step, EOS -2.0, 20-second reference.</small>
-              <audio controls preload="none" src="/api/tts/preview-sample?variant=current"
-                aria-label="Current Hindi synthesis settings sample"/>
-            </div>
-            <div className="voice-preview-copy">
-              <b>B · Higher decode steps / full reference</b>
-              <small>Same sentence and reference, 2 flow steps, EOS -1.0.</small>
-              <audio controls preload="none" src="/api/tts/preview-sample?variant=recommended"
-                aria-label="Two-step Hindi synthesis settings sample"/>
-            </div>
-            <div className="voice-preview-copy">
-              <b>C · Cleaned 8-second reference</b>
-              <small>Same sentence and current settings, using a separate cropped/levelled copy. The saved source WAV was not changed.</small>
-              <audio controls preload="none" src="/api/tts/preview-sample?variant=clean-reference"
-                aria-label="Cleaned reference Hindi voice sample"/>
-            </div>
-            <small>Diagnostic A/B clips use the same test sentence and matched playback peak. These are comparisons, not final production settings.</small>
+        {tab === 'voice' && <section className="voice-workspace">
+          <span>VOICE PROFILE WORKFLOW</span><h1>Prepare, review and reuse a voice.</h1>
+          <p>Upload a WAV from a speaker who has authorised voice synthesis. Studio inspects it, selects up to 20 seconds with the most active audio, converts only the working copy to Pocket TTS format, and transcribes it locally in Hindi. Listen to the clip and review the script before saving.</p>
+
+          <article className="voice-step">
+            <b>1 · Upload and prepare the recording</b>
+            <form onSubmit={prepareVoice}>
+              <label className="drop"><Mic2/><b>{wav?.name || 'Choose original WAV recording'}</b><small>WAV only · up to 30 MB · original file is never modified</small>
+                <input type="file" accept=".wav,audio/wav" onChange={event => { setWav(event.target.files?.[0] || null); setVoicePrepared(null); setVoiceTranscript(''); }}/>
+              </label>
+              <button className="primary" disabled={!wav || voiceBusy}>{voiceBusy ? 'Preparing recording…' : 'Inspect and prepare 20-second clip'}</button>
+            </form>
           </article>
-          <form onSubmit={addVoice}>
-            <label>PROFILE NAME<input value={name} onChange={event => setName(event.target.value)} required maxLength={48}/></label>
-            <label className="drop"><Mic2/><b>{wav?.name || 'Choose reference WAV'}</b><small>WAV only · 30 MB max · original bytes are preserved</small><input type="file" accept=".wav,audio/wav" onChange={event => setWav(event.target.files[0])}/></label>
-            <div className="voice-options">
-              <b>Prepare the working copy</b>
-              <small>The uploaded original is stored separately and never modified. The model copy is always converted to WAV PCM16, mono, 24 kHz.</small>
-              <div className="row voice-option-row">
-                <label className="voice-check"><input type="checkbox" checked={voiceOptions.trim_silence} onChange={event => setVoiceOptions(value => ({...value, trim_silence: event.target.checked}))}/> Remove long silence gaps</label>
-                <label className="voice-check"><input type="checkbox" checked={voiceOptions.normalize_loudness} onChange={event => setVoiceOptions(value => ({...value, normalize_loudness: event.target.checked}))}/> Normalize loudness</label>
-                <label className="voice-check"><input type="checkbox" checked={voiceOptions.noise_reduction} onChange={event => setVoiceOptions(value => ({...value, noise_reduction: event.target.checked}))}/> Gentle noise reduction</label>
-              </div>
-              <div className="row">
-                <label>HIGH-PASS FILTER<select value={voiceOptions.highpass_hz} onChange={event => setVoiceOptions(value => ({...value, highpass_hz: Number(event.target.value)}))}><option value="0">Off (preserve bass)</option><option value="60">60 Hz</option><option value="80">80 Hz</option><option value="100">100 Hz</option></select></label>
-                <label>LOW-PASS FILTER<select value={voiceOptions.lowpass_hz} onChange={event => setVoiceOptions(value => ({...value, lowpass_hz: Number(event.target.value)}))}><option value="0">Off (preserve highs)</option><option value="8000">8 kHz</option><option value="10000">10 kHz</option><option value="12000">12 kHz</option></select></label>
-              </div>
-              <small>All cleanup options are off by default. Use them only when the recording needs it; aggressive denoising can damage voice tone.</small>
+
+          {voicePrepared && <article className="voice-step">
+            <b>2 · Listen to the prepared clip and review its script</b>
+            <div className="voice-inspection">
+              <span>Original: {voicePrepared.inspection.original.duration_seconds}s · {voicePrepared.inspection.original.sample_rate} Hz · {voicePrepared.inspection.original.channels} channel(s) · {voicePrepared.inspection.original.codec}</span>
+              <span>Prepared: {voicePrepared.inspection.prepared.duration_seconds}s · 24 kHz · mono · PCM16</span>
+              <span>Selected from {voicePrepared.inspection.clip_start_seconds}s · Non-silent audio {Math.round(voicePrepared.inspection.non_silent_audio_ratio * 100)}%</span>
+              <span>{voicePrepared.inspection.processing_note}</span>
+              {voicePrepared.inspection.source_analysis && <span>Original level: peak {voicePrepared.inspection.source_analysis.peak_dbfs} dBFS · RMS {voicePrepared.inspection.source_analysis.rms_dbfs} dBFS · near-silence {voicePrepared.inspection.source_analysis.near_silence_percent}%</span>}
+              {voicePrepared.inspection.prepared_analysis && <span>Prepared level: peak {voicePrepared.inspection.prepared_analysis.peak_dbfs} dBFS · RMS {voicePrepared.inspection.prepared_analysis.rms_dbfs} dBFS · near-silence {voicePrepared.inspection.prepared_analysis.near_silence_percent}%</span>}
+              {voicePrepared.inspection.warnings?.map((warning,index) => <small className="voice-warning" key={'clip-'+index}>{warning}</small>)}
+              {(voicePrepared.inspection.prepared_analysis?.warnings || []).map((warning,index) => <small className="voice-warning" key={'prepared-'+index}>{warning}</small>)}
             </div>
-            <button className="primary" disabled={voiceBusy || !wav || !name.trim()}>{voiceBusy ? 'Inspecting and preparing…' : 'Inspect WAV and save voice profile'}</button>
-          </form>
-          {lastVoiceUpload && <article className="voice-inspection">
-            <b>Latest WAV inspection · {lastVoiceUpload.voice_id}</b>
-            <small>Original: {lastVoiceUpload.source?.codec || 'WAV'} · {lastVoiceUpload.source?.sample_rate_hz || 'unknown'} Hz · {lastVoiceUpload.source?.channels || 'unknown'} channel(s) · {lastVoiceUpload.source?.bits_per_sample || 'unknown'} bit · {lastVoiceUpload.source?.duration_seconds || '—'} sec</small>
-            <small>Prepared: {lastVoiceUpload.prepared?.codec || 'PCM16'} · {lastVoiceUpload.prepared?.sample_rate_hz || 24000} Hz · {lastVoiceUpload.prepared?.channels || 1} channel · {lastVoiceUpload.prepared?.duration_seconds || '—'} sec</small>
-            <small>Original WAV format: {lastVoiceUpload.source?.container || 'unknown'} · {lastVoiceUpload.source?.sample_format || 'unknown'} sample format · {lastVoiceUpload.source?.bits_per_sample || 'unknown'} bit</small>
-            <small>Original preserved: {lastVoiceUpload.source_preserved ? 'Yes' : 'No'} · Conditioning: {lastVoiceUpload.conditioning_status === 'engine_disabled' ? 'Not run — TTS engine disabled' : 'Not tested'}</small>
-            {lastVoiceUpload.conditioning_note && <small>{lastVoiceUpload.conditioning_note}</small>}
-            <div className="voice-file-previews">
-              <label>Uploaded original<audio controls preload="none" src={'/api/voices/' + encodeURIComponent(lastVoiceUpload.voice_id) + '/source'}/></label>
-              <label>Prepared model copy<audio controls preload="none" src={'/api/voices/' + encodeURIComponent(lastVoiceUpload.voice_id) + '/profile'}/></label>
-            </div>
-            {(lastVoiceUpload.source_analysis?.warnings || []).map((warning, index) => <small className="voice-warning" key={'source-' + index}>Original: {warning}</small>)}
-            {(lastVoiceUpload.prepared_analysis?.warnings || []).map((warning, index) => <small className="voice-warning" key={'prepared-' + index}>Prepared: {warning}</small>)}
-            <small>Original loudness: peak {lastVoiceUpload.source_analysis?.peak_dbfs ?? '—'} dBFS · RMS {lastVoiceUpload.source_analysis?.rms_dbfs ?? '—'} dBFS · near-silence {lastVoiceUpload.source_analysis?.near_silence_percent ?? '—'}%</small>
-            <small>Prepared loudness: peak {lastVoiceUpload.prepared_analysis?.peak_dbfs ?? '—'} dBFS · RMS {lastVoiceUpload.prepared_analysis?.rms_dbfs ?? '—'} dBFS · near-silence {lastVoiceUpload.prepared_analysis?.near_silence_percent ?? '—'}%</small>
+            <audio className="voice-audio" controls preload="metadata" src={voicePrepared.audio_url}/>
+            <label>EXTRACTED HINDI SCRIPT · EDIT BEFORE SAVING
+              <textarea rows="5" maxLength="12000" value={voiceTranscript}
+                onChange={event => setVoiceTranscript(event.target.value)}
+                placeholder="The transcript appears here. Correct it, or type the exact words spoken in the reference clip."/>
+            </label>
+            <label>VOICE PROFILE NAME
+              <input value={name} maxLength="48" onChange={event => setName(event.target.value)} placeholder="e.g. My Hindi Voice" required/>
+            </label>
+            <button type="button" className="primary" disabled={!name.trim() || voiceBusy}
+              onClick={savePreparedVoice}>{voiceBusy ? 'Saving profile…' : 'Save prepared clip and voice profile'}</button>
           </article>}
-          <h3>Saved voice references</h3>
-          {voices.length === 0 ? <p>No saved voice references.</p> : voices.map(item =>
+
+          <article className="voice-step">
+            <b>3 · Generate and listen to a sample with the saved profile</b>
+            {voices.length === 0 ? <p>Save a prepared voice profile first.</p> : <>
+              <label>VOICE PROFILE
+                <select value={voiceProfileToTest} onChange={event => selectVoiceProfile(event.target.value)}>
+                  {voices.map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}
+                </select>
+              </label>
+              <label>TEST TEXT · ENTER ANY HINDI TEXT
+                <textarea rows="4" maxLength="2000" value={voicePreviewText}
+                  onChange={event => setVoicePreviewText(event.target.value)}
+                  placeholder="Enter the text you want this voice profile to speak…"/>
+              </label>
+              <div className="voice-settings">
+                <label>TEMPERATURE · {Number(voiceGenerationSettings.temperature).toFixed(2)}
+                  <input type="range" min="0.05" max="1" step="0.05" value={voiceGenerationSettings.temperature}
+                    onChange={event => setVoiceGenerationSettings(current => ({...current,temperature:Number(event.target.value)}))}/>
+                </label>
+                <label>FLOW STEPS
+                  <select value={voiceGenerationSettings.flow_steps}
+                    onChange={event => setVoiceGenerationSettings(current => ({...current,flow_steps:Number(event.target.value)}))}>
+                    {[1,2,3,4,5,6,7,8].map(value => <option key={value} value={value}>{value}</option>)}
+                  </select>
+                </label>
+                <label>EOS THRESHOLD · {Number(voiceGenerationSettings.eos_threshold).toFixed(1)}
+                  <input type="range" min="-6" max="0" step="0.1" value={voiceGenerationSettings.eos_threshold}
+                    onChange={event => setVoiceGenerationSettings(current => ({...current,eos_threshold:Number(event.target.value)}))}/>
+                </label>
+                <label>SEED
+                  <input type="number" min="0" max="2147483647" step="1" value={voiceGenerationSettings.seed}
+                    onChange={event => setVoiceGenerationSettings(current => ({...current,seed:Number(event.target.value)}))}/>
+                </label>
+              </div>
+              <small className="voice-settings-note">CPU-safe defaults: INT8, two threads, temperature 0.30, one flow step, EOS −2.0 and seed 1. Only the four controls above are changed. Settings are stored with this profile and reused in video narration.</small>
+              <button type="button" className="primary" disabled={!ttsInfo.tts_ready || !voiceProfileToTest || !voicePreviewText.trim() || voiceBusy}
+                onClick={generateVoicePreview}>{voiceBusy ? 'Generating sample…' : 'Generate voice sample'}</button>
+              {!ttsInfo.tts_ready && <small className="voice-warning">Pocket TTS Hindi is not enabled or its CPU model is not installed on Azure.</small>}
+              {voicePreviewUrl && <div className="voice-final-sample">
+                <b>Final generated voice sample</b>
+                <audio className="voice-audio" controls preload="metadata" src={voicePreviewUrl}/>
+              </div>}
+            </>}
+          </article>
+
+          <h3>Saved reusable voice profiles</h3>
+          {voices.length === 0 ? <p>No saved profiles yet.</p> : voices.map(item =>
             <article key={item.voice_id} className="media-row voice-profile-row">
-              <div>
-                <b>🎙 {item.voice_id}</b>
-                <small>{item.prepared?.sample_rate_hz || 'Legacy'} Hz · {item.prepared?.channels || '—'} channel · {item.conditioning_status === 'engine_disabled' ? 'Conditioning disabled' : item.conditioning_status === 'legacy_uninspected' ? 'Legacy / not inspected' : 'Prepared / not tested'}</small>
-                {(item.source_analysis?.warnings || []).slice(0, 2).map((warning, index) => <small className="voice-warning" key={index}>{warning}</small>)}
+              <div><b>🎙 {item.voice_id}</b>
+                <small>{item.reference?.duration_seconds ? item.reference.duration_seconds + 's reference · ' : ''}{item.source_file_available ? 'Original preserved · ' : ''}{item.conditioning_initialized ? 'Conditioning initialised' : 'Ready for first sample'}</small>
+                {item.transcript && <small>{item.transcript}</small>}
               </div>
               <button className="danger" onClick={() => deleteMedia('/api/voices/' + encodeURIComponent(item.voice_id), 'Voice profile ' + item.voice_id)}>
                 <Trash2 size={15}/> Delete
               </button>
             </article>
           )}
-          {voices.some(item => item.source_file_available) && <div className="voice-reprocess">
-            <h3>Adjust an existing profile</h3>
-            <p>Change the cleanup controls above, then rebuild only the prepared model copy from the original upload.</p>
-            <div className="row">
-              <label>PROFILE<select value={reprocessVoice} onChange={event => setReprocessVoice(event.target.value)}><option value="">Select profile</option>{voices.filter(item => item.source_file_available).map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}</select></label>
-              <button type="button" disabled={voiceBusy || !reprocessVoice} onClick={reprocessVoiceProfile}>{voiceBusy ? 'Preparing…' : 'Rebuild prepared copy'}</button>
-            </div>
-            <small>The original recording, its sample rate, channels, bit depth and embedded metadata are retained separately.</small>
-          </div>}
         </section>}
         {tab === 'models' && <section className="llm-workspace">
           <span>PRIVATE LOCAL INFERENCE</span><h1>Local AI models.</h1>
