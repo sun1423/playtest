@@ -1369,6 +1369,56 @@ def resolve_voice_asset(voice_id: str, kind: str) -> Path:
     return resolved
 
 
+@app.post("/api/voices/{voice_id}/prepare")
+def prepare_existing_voice(
+    voice_id: str,
+    trim_silence: bool = Form(False),
+    normalize_loudness: bool = Form(False),
+    noise_reduction: bool = Form(False),
+    highpass_hz: int = Form(0),
+    lowpass_hz: int = Form(0),
+):
+    source_path = resolve_voice_asset(voice_id, "source")
+    profile_path = resolve_voice_asset(voice_id, "profile")
+    staging_dir = VOICES / ".staging"
+    staging_dir.mkdir(exist_ok=True)
+    temp_path = staging_dir / (voice_id + "." + uuid.uuid4().hex + ".reprocess.wav")
+    metadata_path = VOICES / ".profiles" / (voice_id + ".json")
+    try:
+        try:
+            inspection = prepare_wav(
+                source_path,
+                temp_path,
+                trim_silence=trim_silence,
+                normalize_loudness=normalize_loudness,
+                noise_reduction=noise_reduction,
+                highpass_hz=highpass_hz,
+                lowpass_hz=lowpass_hz,
+            )
+        except VoiceAudioError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            metadata = {"voice_id": voice_id, "source_filename": source_path.name, "source_preserved": True}
+        metadata.update(inspection)
+        metadata.update({
+            "voice_id": voice_id,
+            "source_filename": metadata.get("source_filename", source_path.name),
+            "source_bytes": source_path.stat().st_size,
+            "reprocessed_at": datetime.now(timezone.utc).isoformat(),
+            "conditioning_status": "not_tested" if tts_runtime_ready() else "engine_disabled",
+            "conditioning_note": "Prepared profile updated from the immutable original. No voice-conditioning or similarity test has run.",
+        })
+        os.replace(temp_path, profile_path)
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        for extension in ("emb", "kv"):
+            (VOICES / ".cache" / (voice_id + "." + extension)).unlink(missing_ok=True)
+        return metadata
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 @app.get("/api/voices/{voice_id}/source")
 def voice_source(voice_id: str):
     path = resolve_voice_asset(voice_id, "source")
