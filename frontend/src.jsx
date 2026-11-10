@@ -59,6 +59,10 @@ function App() {
   const [subtitleFile, setSubtitleFile] = useState(null);
   const [name, setName] = useState('');
   const [wav, setWav] = useState(null);
+  const [voiceBusy, setVoiceBusy] = useState(false);
+  const [voiceOptions, setVoiceOptions] = useState({ trim_silence: false, normalize_loudness: false, noise_reduction: false, highpass_hz: 0, lowpass_hz: 0 });
+  const [lastVoiceUpload, setLastVoiceUpload] = useState(null);
+  const [reprocessVoice, setReprocessVoice] = useState('');
   const [msg, setMsg] = useState('');
   const [status, setStatus] = useState('Connecting…');
   const [busy, setBusy] = useState(false);
@@ -617,14 +621,46 @@ function App() {
 
   async function addVoice(event) {
     event.preventDefault();
+    if (!wav) return setMsg('Choose a WAV reference first.');
     const form = new FormData();
     form.append('name', name);
     form.append('file', wav);
+    Object.entries(voiceOptions).forEach(([key, value]) => form.append(key, String(value)));
+    setVoiceBusy(true);
     try {
-      await api('/api/voices', { method: 'POST', body: form });
-      setMsg('Voice reference saved');
-      refresh();
-    } catch (error) { setMsg(error.message); }
+      const result = await api('/api/voices', { method: 'POST', body: form });
+      setLastVoiceUpload(result);
+      setReprocessVoice(result.voice_id);
+      setMsg(result.conditioning_status === 'engine_disabled'
+        ? 'Original WAV saved. Prepared profile is ready for inspection; voice conditioning is disabled.'
+        : 'Original WAV saved and prepared profile created. Voice conditioning has not been tested.');
+      setWav(null);
+      setName('');
+      await refresh();
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      setVoiceBusy(false);
+    }
+  }
+
+  async function reprocessVoiceProfile() {
+    if (!reprocessVoice) return setMsg('Choose a saved profile to rebuild.');
+    const form = new FormData();
+    Object.entries(voiceOptions).forEach(([key, value]) => form.append(key, String(value)));
+    setVoiceBusy(true);
+    try {
+      const result = await api('/api/voices/' + encodeURIComponent(reprocessVoice) + '/prepare', {
+        method: 'POST', body: form
+      });
+      setLastVoiceUpload(result);
+      setMsg('Prepared profile rebuilt from the preserved original WAV. Original file was not changed.');
+      await refresh();
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      setVoiceBusy(false);
+    }
   }
 
   const nav = [
@@ -896,19 +932,61 @@ function App() {
             <small>Diagnostic A/B clips use the same test sentence and matched playback peak. These are comparisons, not final production settings.</small>
           </article>
           <form onSubmit={addVoice}>
-            <label>PROFILE NAME<input value={name} onChange={event => setName(event.target.value)} required/></label>
-            <label className="drop"><Mic2/><b>{wav?.name || 'Choose reference WAV'}</b><input type="file" accept=".wav" onChange={event => setWav(event.target.files[0])}/></label>
-            <button className="primary" disabled={!wav || !name}>Save voice reference</button>
+            <label>PROFILE NAME<input value={name} onChange={event => setName(event.target.value)} required maxLength={48}/></label>
+            <label className="drop"><Mic2/><b>{wav?.name || 'Choose reference WAV'}</b><small>WAV only · 30 MB max · original bytes are preserved</small><input type="file" accept=".wav,audio/wav" onChange={event => setWav(event.target.files[0])}/></label>
+            <div className="voice-options">
+              <b>Prepare the working copy</b>
+              <small>The uploaded original is stored separately and never modified. The model copy is always converted to WAV PCM16, mono, 24 kHz.</small>
+              <div className="row voice-option-row">
+                <label className="voice-check"><input type="checkbox" checked={voiceOptions.trim_silence} onChange={event => setVoiceOptions(value => ({...value, trim_silence: event.target.checked}))}/> Trim long leading/trailing silence</label>
+                <label className="voice-check"><input type="checkbox" checked={voiceOptions.normalize_loudness} onChange={event => setVoiceOptions(value => ({...value, normalize_loudness: event.target.checked}))}/> Normalize loudness</label>
+                <label className="voice-check"><input type="checkbox" checked={voiceOptions.noise_reduction} onChange={event => setVoiceOptions(value => ({...value, noise_reduction: event.target.checked}))}/> Gentle noise reduction</label>
+              </div>
+              <div className="row">
+                <label>HIGH-PASS FILTER<select value={voiceOptions.highpass_hz} onChange={event => setVoiceOptions(value => ({...value, highpass_hz: Number(event.target.value)}))}><option value="0">Off (preserve bass)</option><option value="60">60 Hz</option><option value="80">80 Hz</option><option value="100">100 Hz</option></select></label>
+                <label>LOW-PASS FILTER<select value={voiceOptions.lowpass_hz} onChange={event => setVoiceOptions(value => ({...value, lowpass_hz: Number(event.target.value)}))}><option value="0">Off (preserve highs)</option><option value="8000">8 kHz</option><option value="10000">10 kHz</option><option value="12000">12 kHz</option></select></label>
+              </div>
+              <small>All cleanup options are off by default. Use them only when the recording needs it; aggressive denoising can damage voice tone.</small>
+            </div>
+            <button className="primary" disabled={voiceBusy || !wav || !name.trim()}>{voiceBusy ? 'Inspecting and preparing…' : 'Inspect WAV and save voice profile'}</button>
           </form>
+          {lastVoiceUpload && <article className="voice-inspection">
+            <b>Latest WAV inspection · {lastVoiceUpload.voice_id}</b>
+            <small>Original: {lastVoiceUpload.source?.codec || 'WAV'} · {lastVoiceUpload.source?.sample_rate_hz || 'unknown'} Hz · {lastVoiceUpload.source?.channels || 'unknown'} channel(s) · {lastVoiceUpload.source?.bits_per_sample || 'unknown'} bit · {lastVoiceUpload.source?.duration_seconds || '—'} sec</small>
+            <small>Prepared: {lastVoiceUpload.prepared?.codec || 'PCM16'} · {lastVoiceUpload.prepared?.sample_rate_hz || 24000} Hz · {lastVoiceUpload.prepared?.channels || 1} channel · {lastVoiceUpload.prepared?.duration_seconds || '—'} sec</small>
+            <small>Original preserved: {lastVoiceUpload.source_preserved ? 'Yes' : 'No'} · Conditioning: {lastVoiceUpload.conditioning_status === 'engine_disabled' ? 'Not run — TTS engine disabled' : 'Not tested'}</small>
+            {lastVoiceUpload.conditioning_note && <small>{lastVoiceUpload.conditioning_note}</small>}
+            <div className="voice-file-previews">
+              <label>Uploaded original<audio controls preload="none" src={'/api/voices/' + encodeURIComponent(lastVoiceUpload.voice_id) + '/source'}/></label>
+              <label>Prepared model copy<audio controls preload="none" src={'/api/voices/' + encodeURIComponent(lastVoiceUpload.voice_id) + '/profile'}/></label>
+            </div>
+            {(lastVoiceUpload.source_analysis?.warnings || []).map((warning, index) => <small className="voice-warning" key={'source-' + index}>Original: {warning}</small>)}
+            {(lastVoiceUpload.prepared_analysis?.warnings || []).map((warning, index) => <small className="voice-warning" key={'prepared-' + index}>Prepared: {warning}</small>)}
+            <small>Original loudness: peak {lastVoiceUpload.source_analysis?.peak_dbfs ?? '—'} dBFS · RMS {lastVoiceUpload.source_analysis?.rms_dbfs ?? '—'} dBFS · near-silence {lastVoiceUpload.source_analysis?.near_silence_percent ?? '—'}%</small>
+            <small>Prepared loudness: peak {lastVoiceUpload.prepared_analysis?.peak_dbfs ?? '—'} dBFS · RMS {lastVoiceUpload.prepared_analysis?.rms_dbfs ?? '—'} dBFS · near-silence {lastVoiceUpload.prepared_analysis?.near_silence_percent ?? '—'}%</small>
+          </article>}
           <h3>Saved voice references</h3>
           {voices.length === 0 ? <p>No saved voice references.</p> : voices.map(item =>
-            <article key={item.voice_id} className="media-row">
-              <b>🎙 {item.voice_id}</b>
+            <article key={item.voice_id} className="media-row voice-profile-row">
+              <div>
+                <b>🎙 {item.voice_id}</b>
+                <small>{item.prepared?.sample_rate_hz || 'Legacy'} Hz · {item.prepared?.channels || '—'} channel · {item.conditioning_status === 'engine_disabled' ? 'Conditioning disabled' : item.conditioning_status === 'legacy_uninspected' ? 'Legacy / not inspected' : 'Prepared / not tested'}</small>
+                {(item.source_analysis?.warnings || []).slice(0, 2).map((warning, index) => <small className="voice-warning" key={index}>{warning}</small>)}
+              </div>
               <button className="danger" onClick={() => deleteMedia('/api/voices/' + encodeURIComponent(item.voice_id), 'Voice profile ' + item.voice_id)}>
                 <Trash2 size={15}/> Delete
               </button>
             </article>
           )}
+          {voices.some(item => item.source_file_available) && <div className="voice-reprocess">
+            <h3>Adjust an existing profile</h3>
+            <p>Change the cleanup controls above, then rebuild only the prepared model copy from the original upload.</p>
+            <div className="row">
+              <label>PROFILE<select value={reprocessVoice} onChange={event => setReprocessVoice(event.target.value)}>{voices.filter(item => item.source_file_available).map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}</select></label>
+              <button type="button" disabled={voiceBusy || !reprocessVoice} onClick={reprocessVoiceProfile}>{voiceBusy ? 'Preparing…' : 'Rebuild prepared copy'}</button>
+            </div>
+            <small>The original recording, its sample rate, channels, bit depth and embedded metadata are retained separately.</small>
+          </div>}
         </section>}
         {tab === 'models' && <section className="llm-workspace">
           <span>PRIVATE LOCAL INFERENCE</span><h1>Local AI models.</h1>
