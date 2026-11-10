@@ -870,11 +870,30 @@ function App() {
           <p>Upload a clean WAV reference for Chatterbox voice conditioning.</p>
           <article className="voice-preview">
             <div className="voice-preview-copy">
-              <b>Generated Hindi voice sample</b>
-              <small>Play the server-side review recording here. It streams in the Studio without downloading.</small>
+              <b>Original long narration</b>
+              <small>Previous generated test sample using the full 20-second reference.</small>
+              <audio controls preload="none" src="/api/tts/preview-sample?variant=original"
+                aria-label="Original long Hindi voice sample"/>
             </div>
-            <audio controls preload="none" src="/api/tts/preview-sample"
-              aria-label="Generated Hindi voice sample"/>
+            <div className="voice-preview-copy">
+              <b>A · Current settings / full reference</b>
+              <small>Same Hindi test sentence, 1 flow step, EOS -2.0, 20-second reference.</small>
+              <audio controls preload="none" src="/api/tts/preview-sample?variant=current"
+                aria-label="Current Hindi synthesis settings sample"/>
+            </div>
+            <div className="voice-preview-copy">
+              <b>B · Higher decode steps / full reference</b>
+              <small>Same sentence and reference, 2 flow steps, EOS -1.0.</small>
+              <audio controls preload="none" src="/api/tts/preview-sample?variant=recommended"
+                aria-label="Two-step Hindi synthesis settings sample"/>
+            </div>
+            <div className="voice-preview-copy">
+              <b>C · Cleaned 8-second reference</b>
+              <small>Same sentence and current settings, using a separate cropped/levelled copy. The saved source WAV was not changed.</small>
+              <audio controls preload="none" src="/api/tts/preview-sample?variant=clean-reference"
+                aria-label="Cleaned reference Hindi voice sample"/>
+            </div>
+            <small>Diagnostic A/B clips use the same test sentence and matched playback peak. These are comparisons, not final production settings.</small>
           </article>
           <form onSubmit={addVoice}>
             <label>PROFILE NAME<input value={name} onChange={event => setName(event.target.value)} required/></label>
