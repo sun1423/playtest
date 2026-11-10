@@ -460,11 +460,13 @@ def run_cpu_lipsync(
         finally:
             capture.release()
 
-    detection_ratio = detected / max(1, frame_count)
+    # Only count frames during active narration; the silent tail deliberately
+    # preserves the original performance and must not lower face-detection quality.
+    detection_ratio = detected / max(1, speech_frame_count)
     if detection_ratio < 0.80:
         destination.unlink(missing_ok=True)
         raise RuntimeError(
-            "A clear face was detected in less than 80% of frames. Use footage with "
+            "A clear face was detected in less than 80% of speech frames. Use footage with "
             "one clearly visible main speaker; long occlusions and frequent off-camera shots "
             "cannot be lip-synchronised reliably by this CPU model."
         )
