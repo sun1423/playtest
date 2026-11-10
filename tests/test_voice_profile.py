@@ -29,7 +29,7 @@ class VoiceProfileTests(unittest.TestCase):
 
         fake = FakeASR()
         with tempfile.TemporaryDirectory() as directory, \
-             patch.dict(os.environ, {"VOICE_ASR_MODEL": "base"}), \
+             patch.dict(os.environ, {"VOICE_ASR_MODEL": "base", "VOICE_ASR_BACKEND": "whisper"}), \
              patch("voice_profile._ASR_MODEL", fake), \
              patch("voice_profile._ASR_MODEL_NAME", "base"):
             result = transcribe_hindi(
@@ -62,6 +62,30 @@ class VoiceProfileTests(unittest.TestCase):
         self.assertEqual(result["transcription_attempts"], 2)
         self.assertTrue(result["script_warning"])
         self.assertIn("Urdu/Arabic", result["script_warning"])
+
+
+    def test_indicconformer_is_preferred_when_selected_backend_is_default(self):
+        expected = {
+            "text": "यह एक हिंदी परीक्षण है।",
+            "language": "hi",
+            "engine": "AI4Bharat IndicConformer Hindi · ONNX CPU",
+            "script_warning": "",
+        }
+        with patch.dict(os.environ, {"VOICE_ASR_BACKEND": "indicconformer"}), \
+             patch("indicconformer_asr.transcribe_indicconformer_hindi", return_value=expected) as recognizer:
+            result = transcribe_hindi(Path("reference.wav"), Path("models/whisper"))
+        self.assertEqual(result, expected)
+        recognizer.assert_called_once()
+
+    def test_indicconformer_failure_falls_back_to_whisper(self):
+        fallback = {"text": "नमस्ते", "engine": "Whisper CPU/int8 (fallback)"}
+        with patch.dict(os.environ, {"VOICE_ASR_BACKEND": "indicconformer", "VOICE_ASR_FALLBACK_TO_WHISPER": "1"}), \
+             patch("indicconformer_asr.transcribe_indicconformer_hindi", side_effect=RuntimeError("model not installed")), \
+             patch("voice_profile._transcribe_hindi_whisper", return_value=fallback) as whisper:
+            result = transcribe_hindi(Path("reference.wav"), Path("models/whisper"))
+        self.assertEqual(result["text"], "नमस्ते")
+        self.assertIn("model not installed", result["fallback_reason"])
+        whisper.assert_called_once()
 
     def test_selects_high_activity_twenty_second_clip(self):
         start, duration, ratio = choose_active_audio_window(
