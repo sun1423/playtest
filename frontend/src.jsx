@@ -873,6 +873,7 @@ function App() {
   const transformJobs = jobs.filter(job =>
     job.kind === 'video_transform' && !(job.payload?.scenes?.length)
   );
+  const editingTransformJob = jobs.find(job => job.id === editingTransformId);
   const nav = [
     ['create', 'Create video', WandSparkles],
     ['writer', 'Script Writer', WandSparkles],
@@ -1160,7 +1161,7 @@ function App() {
             </label>
             <label>TEXT POSITION<select value={overlayPosition} onChange={event => setOverlayPosition(event.target.value)}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select></label>
             <label className="drop"><Upload/><b>{subtitleFile?.name || (editingTransformId ? 'Keep saved subtitles or replace them' : 'Optional SRT subtitles')}</b><small>UTF-8 SRT · Hindi and English · 2 MB max</small><input type="file" accept=".srt,application/x-subrip" onChange={event => setSubtitleFile(event.target.files?.[0] || null)}/></label>
-            <button className="primary" disabled={busy || (!file && !editingTransformId) || (audioMode === 'music' && !musicFile && !editingTransformId) || (trimEnd !== '0' && Number(trimEnd) <= Number(trimStart))}>
+            <button className="primary" disabled={busy || (!file && !editingTransformId) || (audioMode === 'music' && !musicFile && !editingTransformJob?.payload?.music_path) || (trimEnd !== '0' && Number(trimEnd) <= Number(trimStart))}>
               {busy ? 'Queueing export…' : editingTransformId ? 'Create edited version' : 'Queue video transformation'}
             </button>
           </form>
