@@ -64,3 +64,24 @@ The Wav2Lip pretrained generator weights distributed by the selected model sourc
 - **No visible mouth change:** check that the input contains one large, front-facing face and the face-detection ratio passes the 80% gate.
 - **Job rejects speech duration:** shorten the Hindi narration or provide a longer source clip; the worker will not truncate dialogue.
 - **Output mouth is soft or seams are visible:** this is a Wav2Lip quality limitation. Do not assume the source voice profile is the cause.
+
+
+## Full-frame AI video-to-video styles
+
+The second stage stylises every frame after the new voice has been lip-synchronised. It preserves source frame count, aspect ratio, timing, movement and generated speech audio. The style model changes the appearance of the same frames; it does not generate new objects, actions or camera movements.
+
+- **AnimeGANv2 512px**: higher-detail anime conversion; measured at about 0.41 frames/second on this 2-vCPU host.
+- **Candy, Mosaic, Rain Princess and Udnie 224px**: faster painterly styles; measured at about 5.4 frames/second, with softer fine detail because the model input is 224px.
+
+Install the style models once:
+
+```bash
+cd /opt/ai-video-studio
+.venv/bin/python scripts/install_video_style_models.py
+```
+
+The installer SHA-256-verifies all weights into `/srv/ai-video-studio/models/video-style`. Model files total about 36 MB. Inference runs through ONNX Runtime CPUExecutionProvider and streams frames one at a time instead of loading the raw video into RAM.
+
+At 25 fps, AnimeGANv2 512px takes roughly 10 minutes for a 10-second clip based on the measured 0.41 fps. The painterly presets are much faster but blur fine details. Per-frame models can introduce temporal flicker during rapid movement, so review the full export.
+
+MuseTalk 1.5 was also evaluated. Its DWPose landmark pass measured about 6.5 seconds per frame on this 2-vCPU host, so it is not part of the default pipeline. Wav2Lip ONNX is the practical CPU lip-sync engine for full clips. It changes mouth movement and retains the source eyes, expressions, head motion and body performance; it does not generate new eyebrow or eye emotions.
