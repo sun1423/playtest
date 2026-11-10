@@ -170,30 +170,24 @@ def has_audio(path: Path) -> bool:
     return bool(result.stdout.strip())
 
 
-def generate_custom_voice(text: str, language: str, reference_wav: Path, destination: Path) -> None:
+def generate_custom_voice(client: requests.Session, job_id: str, text: str,
+                          language: str, reference_wav: Path, destination: Path) -> None:
     text_file = destination.with_suffix(".txt")
     helper = Path(__file__).with_name("chatterbox_voice_worker.py")
     text_file.write_text(text, encoding="utf-8")
     try:
-        result = subprocess.run(
-            [
-                os.getenv("CHATTERBOX_PYTHON", sys.executable),
-                str(helper),
-                "--text-file", str(text_file),
-                "--language", language,
-                "--reference-wav", str(reference_wav),
-                "--output-wav", str(destination),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=1800,
-            check=False,
+        command = [
+            os.getenv("CHATTERBOX_PYTHON", sys.executable),
+            str(helper),
+            "--text-file", str(text_file),
+            "--language", language,
+            "--reference-wav", str(reference_wav),
+            "--output-wav", str(destination),
+        ]
+        run_command(
+            command, destination.parent, destination.with_suffix(".log"),
+            client, job_id, "Custom voice synthesis", 76, 85,
         )
-        if result.returncode:
-            raise RuntimeError(
-                "Chatterbox custom voice generation failed: "
-                + (result.stderr or result.stdout)[-4000:]
-            )
         if not destination.is_file() or destination.stat().st_size < 44:
             raise RuntimeError("Chatterbox did not create a valid WAV narration.")
     finally:
@@ -275,7 +269,7 @@ def process_job(client: requests.Session, job: dict) -> None:
 
         post_progress(client, job_id, "Generating your custom voice narration", 76)
         generate_custom_voice(
-            job["narration"], job["language"], reference, narration_wav
+            client, job_id, job["narration"], job["language"], reference, narration_wav
         )
 
         post_progress(client, job_id, "Combining video and custom voice", 88)
