@@ -12,6 +12,7 @@ import importlib.util
 import os
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from urllib.parse import urljoin
@@ -170,22 +171,33 @@ def has_audio(path: Path) -> bool:
 
 
 def generate_custom_voice(text: str, language: str, reference_wav: Path, destination: Path) -> None:
-    import torch
-    import torchaudio
-    from chatterbox.mtl_tts import ChatterboxMultilingualTTS
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = ChatterboxMultilingualTTS.from_pretrained(device=device, t3_model="v3")
-    with torch.inference_mode():
-        audio = model.generate(
-            text,
-            language_id=language,
-            audio_prompt_path=str(reference_wav),
+    text_file = destination.with_suffix(".txt")
+    helper = Path(__file__).with_name("chatterbox_voice_worker.py")
+    text_file.write_text(text, encoding="utf-8")
+    try:
+        result = subprocess.run(
+            [
+                os.getenv("CHATTERBOX_PYTHON", sys.executable),
+                str(helper),
+                "--text-file", str(text_file),
+                "--language", language,
+                "--reference-wav", str(reference_wav),
+                "--output-wav", str(destination),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=1800,
+            check=False,
         )
-    torchaudio.save(str(destination), audio.detach().cpu(), model.sr)
-    del model, audio
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+        if result.returncode:
+            raise RuntimeError(
+                "Chatterbox custom voice generation failed: "
+                + (result.stderr or result.stdout)[-4000:]
+            )
+        if not destination.is_file() or destination.stat().st_size < 44:
+            raise RuntimeError("Chatterbox did not create a valid WAV narration.")
+    finally:
+        text_file.unlink(missing_ok=True)
 
 
 def mux_narration(vace_video: Path, narration_wav: Path, source_video: Path,
