@@ -808,6 +808,17 @@ def jobs():
     for row in rows:
         item = dict(row)
         item["payload"] = json.loads(item["payload"])
+        item["source_available"] = False
+        item["output_available"] = False
+        try:
+            if item["kind"] == "video_transform" and item["payload"].get("retain_source"):
+                source = Path(item.get("input_path") or "").resolve()
+                item["source_available"] = UP.resolve() in source.parents and source.is_file()
+            if item["status"] == "completed" and item.get("output_path"):
+                output_file = Path(item["output_path"]).resolve()
+                item["output_available"] = OUT.resolve() in output_file.parents and output_file.is_file()
+        except (OSError, RuntimeError, ValueError):
+            pass
         result.append(item)
     return result
 
@@ -1313,9 +1324,146 @@ async def video(
             "trim_start": trim_start,
             "trim_end": trim_end,
             "music_volume": music_volume,
+            "source_ui": "transform",
+            "source_filename": Path(file.filename or target.name).name[:180],
+            "retain_source": True,
         },
         str(target),
     )
+
+
+@app.post("/api/jobs/{job_id}/rerun")
+async def rerun_video_transform(
+    job_id: str,
+    file: UploadFile | None = File(None),
+    preset: str = Form("reel"),
+    framing: str = Form("fill"),
+    audio: str = Form("keep"),
+    overlay_text: str = Form("", max_length=160),
+    overlay_position: str = Form("bottom"),
+    subtitle_file: UploadFile | None = File(None),
+    music_file: UploadFile | None = File(None),
+    trim_start: float = Form(0),
+    trim_end: float = Form(0),
+    music_volume: float = Form(0.35),
+):
+    original = getjob(job_id)
+    if not original or original["kind"] != "video_transform":
+        raise HTTPException(404, "Transform job not found")
+    if original["status"] in {"queued", "running"}:
+        raise HTTPException(409, "Wait until this transform finishes before editing it.")
+    old_payload = original["payload"]
+    if old_payload.get("source_ui") != "transform" or not old_payload.get("retain_source"):
+        raise HTTPException(409, "This older job has no retained source. It can still be downloaded or deleted.")
+    old_source = Path(original.get("input_path") or "").resolve()
+    if UP.resolve() not in old_source.parents or not old_source.is_file():
+        raise HTTPException(404, "The original source video is no longer available.")
+    if preset not in {"reel", "landscape", "square"} or framing not in {"fill", "fit"}:
+        raise HTTPException(400, "Invalid export settings")
+    if audio not in {"keep", "mute", "music"}:
+        raise HTTPException(400, "Invalid audio mode")
+    if overlay_position not in {"top", "center", "bottom"}:
+        raise HTTPException(400, "Invalid text position")
+    if not 0 <= trim_start <= 14400 or not 0 <= trim_end <= 14400:
+        raise HTTPException(400, "Trim values must be between 0 and 4 hours")
+    if trim_end and trim_end <= trim_start:
+        raise HTTPException(400, "Trim end must be greater than trim start")
+    if not 0 <= music_volume <= 1.5:
+        raise HTTPException(400, "Music volume must be between 0 and 1.5")
+
+    folder = UP / str(uuid.uuid4())
+    folder.mkdir(parents=True, exist_ok=False)
+    queued = False
+    try:
+        extension = Path(file.filename or "").suffix.lower() if file else old_source.suffix.lower()
+        if extension not in {".mp4", ".mov", ".mkv", ".webm"}:
+            raise HTTPException(415, "Unsupported video")
+        target = folder / ("source" + extension)
+        if file:
+            size = 0
+            with target.open("xb") as output_file:
+                while chunk := await file.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > MAX_UPLOAD:
+                        raise HTTPException(413, "Upload too large")
+                    output_file.write(chunk)
+        else:
+            shutil.copy2(old_source, target)
+
+        def copy_existing_asset(key: str, filename: str, maximum: int) -> str:
+            raw_path = old_payload.get(key, "")
+            if not raw_path:
+                return ""
+            candidate = Path(raw_path).resolve()
+            if old_source.parent.resolve() not in candidate.parents or not candidate.is_file():
+                return ""
+            if candidate.stat().st_size > maximum:
+                return ""
+            destination = folder / filename
+            shutil.copy2(candidate, destination)
+            return str(destination)
+
+        if subtitle_file:
+            if Path(subtitle_file.filename or "").suffix.lower() != ".srt":
+                raise HTTPException(415, "Subtitles must be an .srt file")
+            subtitle_path = folder / "captions.srt"
+            size = 0
+            with subtitle_path.open("xb") as subtitle_out:
+                while chunk := await subtitle_file.read(64 * 1024):
+                    size += len(chunk)
+                    if size > 2 * 1024 * 1024:
+                        raise HTTPException(413, "Subtitle file exceeds 2 MB")
+                    subtitle_out.write(chunk)
+            subtitle_path = str(subtitle_path)
+        else:
+            subtitle_path = copy_existing_asset("subtitle_path", "captions.srt", 2 * 1024 * 1024)
+
+        music_path = ""
+        if audio == "music":
+            if music_file:
+                music_extension = Path(music_file.filename or "").suffix.lower()
+                if music_extension not in {".mp3", ".wav", ".m4a", ".aac", ".ogg"}:
+                    raise HTTPException(415, "Unsupported background music format")
+                music_path = folder / ("background" + music_extension)
+                size = 0
+                with music_path.open("xb") as music_out:
+                    while chunk := await music_file.read(64 * 1024):
+                        size += len(chunk)
+                        if size > 30 * 1024 * 1024:
+                            raise HTTPException(413, "Background music exceeds 30 MB")
+                        music_out.write(chunk)
+                music_path = str(music_path)
+            else:
+                existing_music = old_payload.get("music_path", "")
+                music_name = "background" + (Path(existing_music).suffix.lower() if existing_music else ".mp3")
+                music_path = copy_existing_asset("music_path", music_name, 30 * 1024 * 1024)
+                if not music_path:
+                    raise HTTPException(400, "Choose a background music file for this edited version.")
+
+        payload = {
+            "preset": preset,
+            "framing": framing,
+            "audio": audio,
+            "overlay_text": overlay_text.strip(),
+            "overlay_position": overlay_position,
+            "subtitle_path": subtitle_path,
+            "music_path": music_path,
+            "trim_start": trim_start,
+            "trim_end": trim_end,
+            "music_volume": music_volume,
+            "source_ui": "transform",
+            "source_filename": Path(file.filename or old_payload.get("source_filename") or old_source.name).name[:180] if file else old_payload.get("source_filename", old_source.name),
+            "retain_source": True,
+        }
+        result = enqueue("video_transform", payload, str(target))
+        queued = True
+        return result
+    finally:
+        for upload in (file, subtitle_file, music_file):
+            if upload:
+                await upload.close()
+        if not queued:
+            shutil.rmtree(folder, ignore_errors=True)
 
 
 @app.post("/api/project")
@@ -1891,6 +2039,48 @@ def output(job_id):
     return FileResponse(path, filename=path.name)
 
 
+@app.get("/api/jobs/{job_id}/preview-video")
+def job_video_preview(job_id: str):
+    job = getjob(job_id)
+    if (
+        not job or job["status"] != "completed"
+        or job["kind"] not in {"video_transform", "video_voice_dub"}
+        or not job.get("output_path")
+    ):
+        raise HTTPException(404, "Video preview not ready")
+    path = Path(job["output_path"]).resolve()
+    if (
+        OUT.resolve() not in path.parents or not path.is_file()
+        or path.suffix.lower() not in {".mp4", ".mov", ".mkv", ".webm"}
+    ):
+        raise HTTPException(404, "Video output not found")
+    return FileResponse(
+        path, media_type="video/mp4",
+        headers={"Content-Disposition": f'inline; filename="{path.name}"',
+                 "Cache-Control": "private, no-store"},
+    )
+
+
+@app.get("/api/jobs/{job_id}/source")
+def job_video_source(job_id: str):
+    job = getjob(job_id)
+    if (
+        not job or job["kind"] != "video_transform"
+        or not job.get("payload", {}).get("retain_source")
+        or not job.get("input_path")
+    ):
+        raise HTTPException(404, "Editable source is not available")
+    path = Path(job["input_path"]).resolve()
+    if UP.resolve() not in path.parents or not path.is_file():
+        raise HTTPException(404, "Editable source is not available")
+    filename = Path(job["payload"].get("source_filename") or path.name).name
+    return FileResponse(
+        path, media_type="application/octet-stream",
+        headers={"Content-Disposition": f'inline; filename="{filename}"',
+                 "Cache-Control": "private, no-store"},
+    )
+
+
 def work(job):
     job_id = job["id"]
     payload = job["payload"]
@@ -2312,8 +2502,9 @@ def worker():
             cleanup_failed_output(job["id"])
             update(job["id"], status="failed", stage="Failed", error=str(error)[:2000])
         finally:
-            # Keep the source only while queued/running so a crashed worker can recover it.
-            cleanup_upload(job.get("input_path"))
+            # Transform sources remain editable until the user deletes their job.
+            if not job.get("payload", {}).get("retain_source"):
+                cleanup_upload(job.get("input_path"))
 
 
 if __name__ == "__main__":
