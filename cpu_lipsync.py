@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import time
+from fractions import Fraction
 from pathlib import Path
 from typing import Callable
 
@@ -115,6 +116,32 @@ def media_stream_duration(data: dict, stream: dict | None) -> float:
             continue
         if math.isfinite(duration) and duration > 0:
             return duration
+    # Some containers omit stream.duration while still exposing exact stream
+    # timestamps or a frame count. Prefer those over the longer container
+    # duration (which may belong to a separate audio track).
+    try:
+        duration_ts = float((stream or {}).get("duration_ts"))
+        time_base = float(Fraction(str((stream or {}).get("time_base"))))
+        derived = duration_ts * time_base
+        if math.isfinite(derived) and derived > 0:
+            return derived
+    except (TypeError, ValueError, ZeroDivisionError):
+        pass
+    try:
+        frames = float((stream or {}).get("nb_frames"))
+        rate_text = (stream or {}).get("avg_frame_rate") or (stream or {}).get("r_frame_rate")
+        rate = float(Fraction(str(rate_text)))
+        derived = frames / rate
+        if math.isfinite(derived) and derived > 0:
+            return derived
+    except (TypeError, ValueError, ZeroDivisionError):
+        pass
+    try:
+        fallback = float((data.get("format") or {}).get("duration"))
+    except (TypeError, ValueError):
+        fallback = 0.0
+    if math.isfinite(fallback) and fallback > 0:
+        return fallback
     raise ValueError("The media stream has an invalid duration.")
 
 
