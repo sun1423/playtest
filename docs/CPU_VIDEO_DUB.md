@@ -85,3 +85,10 @@ The installer SHA-256-verifies all weights into `/srv/ai-video-studio/models/vid
 At 25 fps, AnimeGANv2 512px takes roughly 10 minutes for a 10-second clip based on the measured 0.41 fps. The painterly presets are much faster but blur fine details. Per-frame models can introduce temporal flicker during rapid movement, so review the full export.
 
 MuseTalk 1.5 was also evaluated. Its DWPose landmark pass measured about 6.5 seconds per frame on this 2-vCPU host, so it is not part of the default pipeline. Wav2Lip ONNX is the practical CPU lip-sync engine for full clips. It changes mouth movement and retains the source eyes, expressions, head motion and body performance; it does not generate new eyebrow or eye emotions.
+
+
+## Lip-sync dialogue text handling
+
+The AI Video · Lip Sync dialogue field keeps Hindi letters, numbers and useful speech punctuation. It removes emoji, hidden formatting marks and decorative markup before sending text to Pocket TTS. Line breaks become sentence pauses; blank lines create longer paragraph pauses. Commas, sentence endings, questions and emphasis marks remain as prosody cues. Long dialogue is split on sentence/word boundaries, generated in bounded sections and joined with controlled silence so one oversized native TTS request is not used.
+
+Pocket TTS Hindi does not expose explicit semantic emotion labels such as [angry] or [sad]. Punctuation can guide timing and intonation, but it cannot reliably command a specific emotion. The renderer still checks the duration of the final generated WAV against the video limit.
