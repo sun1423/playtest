@@ -78,6 +78,8 @@ function App() {
   const [voicePreviewUrl, setVoicePreviewUrl] = useState('');
   const [voiceProfileToTest, setVoiceProfileToTest] = useState('');
   const voiceProfileToTestRef = useRef('');
+  const jobsRefreshSequenceRef = useRef(0);
+  const jobsMutationVersionRef = useRef(0);
   const [voiceGenerationSettings, setVoiceGenerationSettings] = useState({
     temperature: 0.3, flow_steps: 1, eos_threshold: -2.0, seed: 1
   });
@@ -181,13 +183,34 @@ function App() {
     finally { setLlmBusy(false); }
   }
 
-  async function refresh() {
+  async function refreshJobs() {
+    const requestId = ++jobsRefreshSequenceRef.current;
+    const mutationVersion = jobsMutationVersionRef.current;
     try {
-      const [jobList, voiceList, savedList, health, lipStatus, styleStatus] = await Promise.all([
-        api('/api/jobs'), api('/api/voices'), api('/api/saved-projects'), api('/api/health'),
+      const jobList = await api('/api/jobs');
+      if (requestId === jobsRefreshSequenceRef.current &&
+          mutationVersion === jobsMutationVersionRef.current) {
+        setJobs(jobList);
+      }
+      return true;
+    } catch (error) {
+      if (requestId === jobsRefreshSequenceRef.current) {
+        setStatus(error.message === 'Authentication required' ? 'Session expired' : 'Job status unavailable');
+        if (error.message === 'Authentication required') setAuthenticated(false);
+      }
+      return false;
+    }
+  }
+
+  async function refresh() {
+    // Job polling is independent: a failed voice/project/model-status endpoint must
+    // never prevent Transform progress and completed outputs from appearing.
+    refreshJobs();
+    try {
+      const [voiceList, savedList, health, lipStatus, styleStatus] = await Promise.all([
+        api('/api/voices'), api('/api/saved-projects'), api('/api/health'),
         api('/api/lipsync/status'), api('/api/video-style/status')
       ]);
-      setJobs(jobList);
       setVoices(voiceList);
       const currentVoiceId = voiceProfileToTestRef.current;
       const selectedVoiceId = voiceList.some(item => item.voice_id === currentVoiceId)
@@ -382,9 +405,18 @@ function App() {
     setBusy(true);
     try {
       const isEdit = Boolean(editingTransformId);
-      await api(isEdit
+      const queuedJob = await api(isEdit
         ? '/api/jobs/' + encodeURIComponent(editingTransformId) + '/rerun'
         : '/api/video', { method: 'POST', body: form });
+      // Show the returned job immediately; invalidate any older in-flight poll so
+      // it cannot overwrite this new card with a stale job list.
+      jobsMutationVersionRef.current += 1;
+      jobsRefreshSequenceRef.current += 1;
+      setJobs(current => [{
+        ...queuedJob,
+        source_available: Boolean(queuedJob.input_path && queuedJob.payload?.retain_source),
+        output_available: false
+      }, ...current.filter(job => job.id !== queuedJob.id)].slice(0, 100));
       setEditingTransformId('');
       setFile(null);
       setMusicFile(null);
@@ -392,8 +424,8 @@ function App() {
       setMsg(isEdit
         ? 'Edited version queued. The previous export is preserved.'
         : 'Video transformation queued. Its source will remain available for future edits.');
-      await refresh();
       setTab('transform');
+      refreshJobs();
     } catch (error) {
       setMsg(error.message);
     } finally {
