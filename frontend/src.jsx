@@ -81,6 +81,9 @@ function App() {
     temperature: 0.3, flow_steps: 1, eos_threshold: -2.0, seed: 1
   });
   const [voiceBusy, setVoiceBusy] = useState(false);
+  const [scriptAudioText, setScriptAudioText] = useState('');
+  const [scriptAudioJobId, setScriptAudioJobId] = useState('');
+  const [scriptAudioBusy, setScriptAudioBusy] = useState(false);
   const [msg, setMsg] = useState('');
   const [status, setStatus] = useState('Connecting…');
   const [busy, setBusy] = useState(false);
@@ -795,6 +798,28 @@ function App() {
     if (profile?.generation_settings) setVoiceGenerationSettings(profile.generation_settings);
   }
 
+  async function generateScriptAudio(event) {
+    event.preventDefault();
+    if (!voiceProfileToTest || !scriptAudioText.trim()) return;
+    setScriptAudioBusy(true);
+    setScriptAudioJobId('');
+    try {
+      const result = await api('/api/tts/script', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: scriptAudioText, voice_id: voiceProfileToTest })
+      });
+      setScriptAudioJobId(result.id);
+      setMsg('Full script narration queued. It will be generated in parts and exported as MP3.');
+      await refresh();
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      setScriptAudioBusy(false);
+    }
+  }
+
+  const scriptAudioJob = jobs.find(job => job.id === scriptAudioJobId);
   const nav = [
     ['create', 'Create video', WandSparkles],
     ['writer', 'Script Writer', WandSparkles],
@@ -1200,6 +1225,42 @@ function App() {
                 <audio className="voice-audio" controls preload="metadata" src={voicePreviewUrl}/>
               </div>}
             </>}
+          </article>
+
+          <article className="voice-step script-audio-step">
+            <b>4 · Script to Audio · full-length MP3</b>
+            <p>Paste a complete Hindi script, choose your saved voice profile, and generate one continuous MP3 without creating a video. Long scripts are synthesised in smaller CPU-safe parts and joined automatically.</p>
+            <form onSubmit={generateScriptAudio}>
+              <label>FULL SCRIPT
+                <textarea rows="9" maxLength="100000" value={scriptAudioText}
+                  onChange={event => setScriptAudioText(event.target.value)}
+                  placeholder="Paste your complete Hindi script here…"/>
+              </label>
+              <small>{scriptAudioText.length.toLocaleString()} / 100,000 characters · Hindi voice engine</small>
+              <label>VOICE PROFILE
+                <select value={voiceProfileToTest} onChange={event => selectVoiceProfile(event.target.value)}>
+                  {voices.map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}
+                </select>
+              </label>
+              <button type="submit" className="primary"
+                disabled={!ttsInfo.tts_ready || !voices.length || !voiceProfileToTest || !scriptAudioText.trim() || scriptAudioBusy}>
+                {scriptAudioBusy ? 'Queuing…' : 'Generate complete MP3'}
+              </button>
+            </form>
+            {scriptAudioJob && <div className="voice-final-sample">
+              <b>Script audio · {scriptAudioJob.status}</b>
+              <small>{scriptAudioJob.stage} · {scriptAudioJob.progress}%</small>
+              <progress value={scriptAudioJob.progress} max="100"/>
+              {scriptAudioJob.status === 'completed' && <>
+                <audio className="voice-audio" controls preload="metadata"
+                  src={'/api/jobs/' + scriptAudioJob.id + '/preview'}/>
+                <a className="primary" href={'/api/jobs/' + scriptAudioJob.id + '/output'} download="script_narration.mp3">
+                  <Download size={16}/> Download MP3 · 192 kbps
+                </a>
+              </>}
+              {scriptAudioJob.error && <small className="voice-warning">{scriptAudioJob.error}</small>}
+            </div>}
+            {!ttsInfo.tts_ready && <small className="voice-warning">Pocket TTS Hindi is not enabled or its CPU model is not installed on Azure.</small>}
           </article>
 
           <h3>Saved reusable voice profiles</h3>
