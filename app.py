@@ -572,7 +572,8 @@ async def create_video_voice_dub(
         )
         media = json.loads(probe.stdout)
         video_stream = next((item for item in media.get("streams", []) if item.get("codec_type") == "video"), None)
-        duration = float(media.get("format", {}).get("duration") or 0)
+        from cpu_lipsync import media_stream_duration
+        duration = media_stream_duration(media, video_stream)
         if not video_stream or duration < 1.0 or duration > 180.0:
             raise HTTPException(413, "Choose a readable video between 1 and 180 seconds.")
         if int(video_stream.get("width") or 0) < 96 or int(video_stream.get("height") or 0) < 96:
