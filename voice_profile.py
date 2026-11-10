@@ -7,7 +7,42 @@ import re
 import shutil
 import subprocess
 import threading
+import unicodedata
 from pathlib import Path
+
+HINDI_ASR_PROMPT = (
+    "यह हिंदी भाषा का ऑडियो है। बोले गए शब्दों को हिंदी की देवनागरी लिपि में लिखें। "
+    "उर्दू या अरबी लिपि का उपयोग न करें।"
+)
+HINDI_ASR_RETRY_PROMPT = (
+    "यह हिंदी भाषण है, उर्दू नहीं। शब्दों को केवल देवनागरी में लिखें, "
+    "जैसे: नमस्ते, आप कैसे हैं? कृपया अरबी/उर्दू अक्षर न लिखें।"
+)
+
+
+def _contains_urdu_script(text: str) -> bool:
+    """Detect Arabic/Urdu letters in ASR output without flagging punctuation."""
+    return any(
+        0x0600 <= ord(char) <= 0x08FF
+        and unicodedata.category(char)[0] in {"L", "M"}
+        for char in text
+    )
+
+
+def _transcribe_hindi_once(model, audio_path: str, prompt: str):
+    segments, info = model.transcribe(
+        audio_path,
+        language="hi",
+        task="transcribe",
+        initial_prompt=prompt,
+        beam_size=5,
+        vad_filter=True,
+        vad_parameters={"min_silence_duration_ms": 300},
+        condition_on_previous_text=False,
+        temperature=0.0,
+    )
+    text = " ".join(segment.text.strip() for segment in segments).strip()
+    return text, info
 
 _ASR_LOCK = threading.Lock()
 _ASR_MODEL = None
@@ -258,20 +293,28 @@ def transcribe_hindi(path: Path, model_cache: Path) -> dict:
                 download_root=str(model_cache),
             )
             _ASR_MODEL_NAME = model_name
-        segments, info = _ASR_MODEL.transcribe(
-            str(Path(path).resolve()),
-            language="hi",
-            task="transcribe",
-            beam_size=3,
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 300},
-            condition_on_previous_text=False,
-            temperature=0.0,
+        audio_path = str(Path(path).resolve())
+        transcript, info = _transcribe_hindi_once(
+            _ASR_MODEL, audio_path, HINDI_ASR_PROMPT
         )
-        transcript = " ".join(segment.text.strip() for segment in segments).strip()
+        attempts = 1
+        if _contains_urdu_script(transcript):
+            retry_text, retry_info = _transcribe_hindi_once(
+                _ASR_MODEL, audio_path, HINDI_ASR_RETRY_PROMPT
+            )
+            attempts = 2
+            if retry_text:
+                transcript, info = retry_text, retry_info
+    script_warning = (
+        "The recognizer still returned Urdu/Arabic characters. Review and correct "
+        "the transcript in Devanagari before saving this Hindi voice profile."
+        if _contains_urdu_script(transcript) else ""
+    )
     return {
         "text": transcript,
         "language": getattr(info, "language", "hi"),
         "language_probability": round(float(getattr(info, "language_probability", 0.0)), 3),
         "model": model_name,
+        "transcription_attempts": attempts,
+        "script_warning": script_warning,
     }
