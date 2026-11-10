@@ -1330,7 +1330,7 @@ function App() {
           <p>Replace the face in a short target video using a reference image. FaceFusion runs locally on this server using CPU inference; no GPU or paid video API is used. The original video audio is restored after processing.</p>
           <form onSubmit={submitFaceFusion}>
             <label className="drop"><Film/><b>{faceTarget?.name || 'Choose target video'}</b><small>MP4, MOV, MKV or WebM · maximum 15 seconds · 100 MB</small><input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={event => setFaceTarget(event.target.files?.[0] || null)}/></label>
-            <label className="drop"><Upload/><b>{faceReference?.name || 'Choose reference face image'}</b><small>JPG, PNG or WebP · one clear face · 15 MB maximum</small><input type="file" accept="image/jpeg,image/png,image/webp" onChange={event => setFaceReference(event.target.files?.[0] || null)}/></label>
+            <label className="drop"><Upload/><b>{faceReference?.name || 'Choose reference face image'}</b><small>JPG, PNG or WebP · one clear face · 15 MB maximum. Target face must be visible in its opening frame.</small><input type="file" accept="image/jpeg,image/png,image/webp" onChange={event => setFaceReference(event.target.files?.[0] || null)}/></label>
             <button className="primary" disabled={faceBusy || !faceTarget || !faceReference}>{faceBusy ? 'Uploading…' : 'Queue CPU face replacement'}</button>
           </form>
           <div className="facefusion-note">
