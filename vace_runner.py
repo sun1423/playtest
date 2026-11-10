@@ -8,10 +8,10 @@ Only the runner token is allowed to access the protected runner endpoints.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import shutil
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 from urllib.parse import urljoin
@@ -49,6 +49,47 @@ def session() -> requests.Session:
 
 def api_url(path: str) -> str:
     return urljoin(API_BASE + "/", path.lstrip("/"))
+
+
+def prepare_vace_runtime() -> None:
+    """Use FP16 + PyTorch SDPA on free T4-class GPUs without BF16/FlashAttention."""
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("No CUDA GPU detected. Enable a Kaggle GPU accelerator.")
+    capability = torch.cuda.get_device_capability(0)
+    if capability[0] < 7:
+        raise RuntimeError(f"Unsupported GPU compute capability {capability}; use T4 or newer.")
+    print(f"GPU: {torch.cuda.get_device_name(0)} · compute capability {capability}")
+
+    if torch.cuda.is_bf16_supported():
+        print("GPU supports BF16; using the official VACE/Wan precision defaults.")
+        return
+
+    if importlib.util.find_spec("flash_attn") or importlib.util.find_spec("flash_attn_interface"):
+        raise RuntimeError("This GPU requires FP16 PyTorch SDPA. Remove FlashAttention packages and follow KAGGLE_VACE_SETUP.md.")
+
+    config_path = VACE_ROOT / "vace/models/wan/configs/shared_config.py"
+    config_text = config_path.read_text(encoding="utf-8")
+    config_old = "wan_shared_cfg.param_dtype = torch.bfloat16"
+    config_new = "wan_shared_cfg.param_dtype = torch.float16"
+    if config_old in config_text:
+        config_path.write_text(config_text.replace(config_old, config_new, 1), encoding="utf-8")
+    elif config_new not in config_text:
+        raise RuntimeError("Could not safely configure VACE transformer precision for this GPU.")
+
+    wan_spec = importlib.util.find_spec("wan")
+    if not wan_spec or not wan_spec.submodule_search_locations:
+        raise RuntimeError("Wan2.1 Python package is missing; install it using the setup guide.")
+    attention_path = Path(next(iter(wan_spec.submodule_search_locations))) / "modules/attention.py"
+    attention_text = attention_path.read_text(encoding="utf-8")
+    attention_old = "    dtype=torch.bfloat16,\n    version=None,"
+    attention_new = "    dtype=torch.float16,\n    version=None,"
+    if attention_old in attention_text:
+        attention_path.write_text(attention_text.replace(attention_old, attention_new, 1), encoding="utf-8")
+    elif attention_new not in attention_text:
+        raise RuntimeError("Could not safely configure Wan attention precision for this GPU.")
+    print("Configured FP16 transformer + FP16 SDPA; T5 remains CPU-offloaded in BF16.")
 
 
 def post_progress(client: requests.Session, job_id: str, stage: str, progress: int) -> None:
@@ -173,9 +214,11 @@ def process_job(client: requests.Session, job: dict) -> None:
         post_progress(client, job_id, "Preparing 480p VACE input", 12)
         subprocess.run(
             ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-             "-i", str(source), "-t", f"{CLIP_SECONDS:.4f}",
-             "-vf", "fps=16,scale=832:480:force_original_aspect_ratio=decrease,"
+             "-i", str(source),
+             "-vf", "fps=16,tpad=stop_mode=clone:stop_duration=5.1,trim=end_frame=81,"
+                    "scale=832:480:force_original_aspect_ratio=decrease,"
                     "pad=832:480:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p",
+             "-frames:v", "81",
              "-an", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
              "-threads", "2", str(normalized)],
             check=True, timeout=300, capture_output=True, text=True,
@@ -188,15 +231,16 @@ def process_job(client: requests.Session, job: dict) -> None:
             "--video", str(normalized), "--prompt", job["prompt"],
             "--ckpt_dir", str(VACE_CHECKPOINT_DIR),
             "--size", "480p", "--frame_num", str(FRAME_COUNT),
-            "--save_dir", str(output_dir), "--offload_model", "True",
+            "--save_dir", str(output_dir), "--save_file", str(output_dir / "out_video.mp4"),
+            "--offload_model", "True", "--t5_cpu",
         ]
         run_command(
             command, VACE_ROOT, job_dir / "vace.log", client, job_id,
             "VACE video generation", 22, 70,
         )
-        candidates = sorted(output_dir.glob("*.mp4"), key=lambda p: p.stat().st_size, reverse=True)
-        if not candidates:
-            raise RuntimeError("VACE finished without producing an MP4 file.")
+        generated_video = output_dir / "out_video.mp4"
+        if not generated_video.is_file() or generated_video.stat().st_size < 1024:
+            raise RuntimeError("VACE finished without creating the expected out_video.mp4.")
 
         post_progress(client, job_id, "Generating your custom voice narration", 76)
         generate_custom_voice(
@@ -205,7 +249,7 @@ def process_job(client: requests.Session, job: dict) -> None:
 
         post_progress(client, job_id, "Combining video and custom voice", 88)
         mux_narration(
-            candidates[0], narration_wav, source,
+            generated_video, narration_wav, source,
             bool(job.get("keep_source_audio")), final_video,
         )
 
@@ -239,8 +283,8 @@ def main() -> None:
     args = parser.parse_args()
 
     load_kaggle_secrets()
-    if not API_BASE.startswith("https://") and not API_BASE.startswith("http://"):
-        raise SystemExit("Set STUDIO_API_URL to the public base URL of your AI Video Studio.")
+    if not API_BASE.startswith("https://"):
+        raise SystemExit("STUDIO_API_URL must use HTTPS. Do not send the runner token over plain HTTP.")
     if not RUNNER_TOKEN:
         raise SystemExit("Set STUDIO_VACE_RUNNER_TOKEN as an environment variable or Kaggle secret.")
     if not (VACE_ROOT / "vace" / "vace_pipeline.py").is_file():
@@ -251,6 +295,7 @@ def main() -> None:
         raise SystemExit("FFmpeg and ffprobe must be installed in the GPU runtime.")
 
     WORK_ROOT.mkdir(parents=True, exist_ok=True)
+    prepare_vace_runtime()
     client = session()
     print("VACE remote runner connected. Model: Wan2.1-VACE-1.3B; custom voice: Chatterbox V3.")
     while True:
