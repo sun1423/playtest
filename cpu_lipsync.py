@@ -124,19 +124,45 @@ def probe_media(path: Path) -> dict:
     }
 
 
-def _feather_mask(cv2, width: int, height: int, cache: dict):
+def _mouth_mask(cv2, width: int, height: int, cache: dict):
+    """Soft elliptical mask over mouth/lower lip area; eyes and upper face stay original."""
+    import numpy as np
+
     key = (width, height)
     mask = cache.get(key)
     if mask is not None:
         return mask
-    border = max(2, int(min(width, height) * 0.12))
-    mask = __import__("numpy").zeros((height, width), dtype=__import__("numpy").float32)
-    if width > 2 * border and height > 2 * border:
-        mask[border:height - border, border:width - border] = 1.0
-    mask = cv2.GaussianBlur(mask, (0, 0), sigmaX=border / 2, sigmaY=border / 2)
-    mask = mask[:, :, None]
+    mask = np.zeros((height, width), dtype=np.float32)
+    center = (width // 2, int(height * 0.73))
+    axes = (max(8, int(width * 0.43)), max(8, int(height * 0.22)))
+    cv2.ellipse(mask, center, axes, 0, 0, 360, 1.0, -1)
+    sigma = max(2.0, min(width, height) * 0.035)
+    mask = cv2.GaussianBlur(mask, (0, 0), sigmaX=sigma, sigmaY=sigma)[:, :, None]
     cache[key] = mask
     return mask
+
+
+def wav2lip_melspectrogram(waveform):
+    """Reproduce the Wav2Lip reference mel pipeline (amplitude, not power mels)."""
+    import librosa
+    import numpy as np
+    from scipy import signal
+
+    waveform = np.asarray(waveform, dtype=np.float32).reshape(-1)
+    if waveform.size < 800 or not np.all(np.isfinite(waveform)):
+        raise ValueError("Wav2Lip audio must contain at least 800 finite samples.")
+    emphasized = signal.lfilter([1.0, -0.97], [1.0], waveform)
+    stft = librosa.stft(
+        y=emphasized, n_fft=800, hop_length=200, win_length=800
+    )
+    basis = librosa.filters.mel(
+        sr=16000, n_fft=800, n_mels=80, fmin=55, fmax=7600
+    )
+    magnitude = np.dot(basis, np.abs(stft))
+    mel_db = 20.0 * np.log10(np.maximum(1e-5, magnitude)) - 20.0
+    # Original Wav2Lip hparams: min_level_db=-100, max_abs_value=4,
+    # symmetric_mels=True. This exact scaling matters for lip timing.
+    return np.clip(8.0 * ((mel_db + 100.0) / 100.0) - 4.0, -4.0, 4.0).astype(np.float32)
 
 
 def _choose_face(faces, previous, frame_width: int, frame_height: int):
@@ -277,13 +303,8 @@ def run_cpu_lipsync(
     if progress:
         progress(18, "Preparing Hindi speech timing")
     waveform, _ = librosa.load(str(padded_audio), sr=16000, mono=True)
-    mel = librosa.feature.melspectrogram(
-        y=librosa.effects.preemphasis(waveform, coef=0.97),
-        sr=16000, n_fft=800, hop_length=200, win_length=800,
-        n_mels=80, fmin=55, fmax=7600,
-    )
-    mel_db = 20.0 * np.log10(np.maximum(1e-5, mel)) - 20.0
-    mel_chunks = build_mel_chunks(mel_db, frame_count, fps)
+    mel = wav2lip_melspectrogram(waveform)
+    mel_chunks = build_mel_chunks(mel, frame_count, fps)
 
     detector = cv2.FaceDetectorYN.create(
         str(models_root / MODEL_FILES["face_detector"]),
@@ -376,7 +397,7 @@ def run_cpu_lipsync(
                         generated = np.clip(predictions[generated_index], 0, 255).astype(np.uint8)
                         generated_index += 1
                         generated = cv2.resize(generated, (bw, bh), interpolation=cv2.INTER_LINEAR)
-                        mask = _feather_mask(cv2, bw, bh, feather_cache)
+                        mask = _mouth_mask(cv2, bw, bh, feather_cache)
                         original_roi = frame[y1:y2, x1:x2].astype(np.float32)
                         frame[y1:y2, x1:x2] = np.clip(
                             generated.astype(np.float32) * mask
@@ -427,11 +448,12 @@ def run_cpu_lipsync(
             capture.release()
 
     detection_ratio = detected / max(1, frame_count)
-    if detection_ratio < 0.35:
+    if detection_ratio < 0.80:
         destination.unlink(missing_ok=True)
         raise RuntimeError(
-            "A clear face was detected in less than 35% of frames. Use footage with "
-            "one clearly visible, front-facing speaker and avoid heavy occlusion."
+            "A clear face was detected in less than 80% of frames. Use footage with "
+            "one clearly visible main speaker; long occlusions and frequent off-camera shots "
+            "cannot be lip-synchronised reliably by this CPU model."
         )
     if not destination.is_file() or destination.stat().st_size < 1024:
         raise RuntimeError("The lip-sync output MP4 was not created.")

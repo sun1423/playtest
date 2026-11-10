@@ -1862,7 +1862,7 @@ def work(job):
         if "video" not in streams or "audio" not in streams:
             raise RuntimeError("Lip-sync output must contain both video and generated speech audio.")
         narration_path.unlink(missing_ok=True)
-    if job["kind"] == "video_transform":
+    elif job["kind"] == "video_transform":
         source_for_render = job["input_path"]
         scene_items = payload.get("scenes", [])
         if scene_items:

@@ -16,6 +16,7 @@ function App() {
   const [ttsInfo, setTtsInfo] = useState({ tts_ready: false, tts_languages: [] });
   const [lipsyncInfo, setLipsyncInfo] = useState({ ready: false });
   const [dubFile, setDubFile] = useState(null);
+  const [dubPreviewUrl, setDubPreviewUrl] = useState('');
   const [dubNarration, setDubNarration] = useState('');
   const [dubVoiceId, setDubVoiceId] = useState('');
   const [dubKeepAmbience, setDubKeepAmbience] = useState(false);
@@ -246,6 +247,15 @@ function App() {
     setPreviewUrl(url);
     return () => URL.revokeObjectURL(url);
   }, [file]);
+  useEffect(() => {
+    if (!dubFile) {
+      setDubPreviewUrl('');
+      return undefined;
+    }
+    const url = URL.createObjectURL(dubFile);
+    setDubPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [dubFile]);
   useEffect(() => {
     if (!authenticated) return;
     refresh();
@@ -970,7 +980,7 @@ function App() {
             <label className="drop"><Upload/><b>{dubFile?.name || 'Choose the original performance video'}</b><small>MP4 / MOV / MKV / WebM · up to 500 MB · 1–180 seconds · one clearly visible main face</small>
               <input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={event => setDubFile(event.target.files?.[0] || null)}/>
             </label>
-            {dubFile && <div className="dub-video-preview"><video src={URL.createObjectURL(dubFile)} controls playsInline preload="metadata"/><small>Original video preview · upload only begins when you queue the job</small></div>}
+            {dubFile && <div className="dub-video-preview"><video src={dubPreviewUrl} controls playsInline preload="metadata"/><small>Original video preview · upload only begins when you queue the job</small></div>}
             <label>SAVED HINDI VOICE PROFILE
               <select required value={dubVoiceId} onChange={event => setDubVoiceId(event.target.value)}>
                 <option value="">Choose your saved WAV voice</option>
