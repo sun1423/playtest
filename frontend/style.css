@@ -63,3 +63,4 @@
 .dub-length-meter.over-limit progress{accent-color:#e36b60}
 .dub-length-footnote{color:#82858d}
 @media(max-width:620px){.dub-length-meter{padding:12px}.dub-length-values{display:grid;grid-template-columns:1fr 1fr}}
+.dub-prosody-note{display:block;color:#a7a9af;letter-spacing:0;font-size:11px;line-height:1.55;background:#14161a;border-left:3px solid #d9ed7b;border-radius:6px;padding:10px 12px}
