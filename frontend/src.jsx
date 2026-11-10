@@ -6,6 +6,17 @@ import {
 } from 'lucide-react';
 import './style.css';
 
+function estimateHindiSpeechSeconds(value) {
+  const narration = String(value || '').trim();
+  if (!narration) return 0;
+  const words = narration.split(/\s+/u).filter(Boolean).length;
+  const sentencePauses = (narration.match(/[।.!?！？]+/gu) || []).length;
+  const phrasePauses = (narration.match(/[,，;；:：]/gu) || []).length;
+  const paragraphPauses = (narration.match(/\n+/g) || []).length;
+  // Conservative planning estimate: 100 words/minute plus short punctuation pauses.
+  return words / (100 / 60) + sentencePauses * 0.35 + phrasePauses * 0.15 + paragraphPauses * 0.2;
+}
+
 function formatTrimTime(value) {
   const seconds = Math.max(0, Number(value) || 0);
   const minutes = Math.floor(seconds / 60);
@@ -27,6 +38,7 @@ function App() {
   const [styleStrength, setStyleStrength] = useState(0.85);
   const [dubFile, setDubFile] = useState(null);
   const [dubPreviewUrl, setDubPreviewUrl] = useState('');
+  const [dubSourceDuration, setDubSourceDuration] = useState(0);
   const [dubNarration, setDubNarration] = useState('');
   const [dubVoiceId, setDubVoiceId] = useState('');
   const [dubKeepAmbience, setDubKeepAmbience] = useState(false);
@@ -354,6 +366,7 @@ function App() {
       setJobs(current => [queuedJob, ...current.filter(job => job.id !== queuedJob.id)]);
       setMsg('Full video voice-dub and lip-sync job queued on the Azure CPU worker.');
       setDubFile(null);
+      setDubSourceDuration(0);
       setDubNarration('');
       refresh();
     } catch (error) {
@@ -931,6 +944,10 @@ function App() {
     job.kind === 'video_transform' && !(job.payload?.scenes?.length)
   );
   const dubJobs = jobs.filter(job => job.kind === 'video_voice_dub');
+  const dubWordCount = dubNarration.trim() ? dubNarration.trim().split(/\s+/u).filter(Boolean).length : 0;
+  const dubEstimatedSpeechSeconds = estimateHindiSpeechSeconds(dubNarration);
+  const dubMaximumSpeechSeconds = dubSourceDuration > 0 ? dubSourceDuration * 1.2 : 0;
+  const dubSpeechOverLimit = dubMaximumSpeechSeconds > 0 && dubEstimatedSpeechSeconds > dubMaximumSpeechSeconds + 0.5;
   const editingTransformJob = jobs.find(job => job.id === editingTransformId);
   const trimEndValue = Number(trimEnd) > 0 ? Math.min(Number(trimEnd), trimDuration) : trimDuration;
   const trimStartValue = Math.min(Math.max(0, Number(trimStart) || 0), Math.max(0, trimEndValue - 0.1));
@@ -1131,9 +1148,9 @@ function App() {
           </div>
           <form onSubmit={queueVideoDub}>
             <label className="drop"><Upload/><b>{dubFile?.name || 'Choose the original performance video'}</b><small>MP4 / MOV / MKV / WebM · up to 500 MB · 1–180 seconds · one clearly visible main face</small>
-              <input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={event => setDubFile(event.target.files?.[0] || null)}/>
+              <input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={event => { setDubFile(event.target.files?.[0] || null); setDubSourceDuration(0); }}/>
             </label>
-            {dubFile && <div className="dub-video-preview"><video src={dubPreviewUrl} controls playsInline preload="metadata"/><small>Original video preview · upload only begins when you queue the job</small></div>}
+            {dubFile && <div className="dub-video-preview"><video src={dubPreviewUrl} controls playsInline preload="metadata" onLoadedMetadata={event => setDubSourceDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}/><small>Original video preview · upload only begins when you queue the job</small></div>}
             <label>FULL-FRAME AI VIDEO STYLE
               <select value={videoStyle} onChange={event => setVideoStyle(event.target.value)}>
                 <option value="none">Keep original look · lip-sync only</option>
@@ -1165,10 +1182,31 @@ function App() {
               <textarea rows="6" maxLength="12000" value={dubNarration} onChange={event => setDubNarration(event.target.value)}
                 placeholder="Enter the exact Hindi words your on-screen speaker should say. Use punctuation and paragraph breaks to guide natural pauses…" required/>
             </label>
+            <div className={'dub-length-meter' + (dubSpeechOverLimit ? ' over-limit' : '')}>
+              <div className="dub-length-heading">
+                <b>LIVE SPEECH LENGTH ESTIMATE</b>
+                <small>{dubWordCount.toLocaleString()} words · {dubNarration.length.toLocaleString()} / 12,000 characters</small>
+              </div>
+              {dubSourceDuration > 0 ? <>
+                <div className="dub-length-values">
+                  <span>Estimated narration <b>{formatTrimTime(dubEstimatedSpeechSeconds)}</b></span>
+                  <span>Maximum allowed <b>{formatTrimTime(dubMaximumSpeechSeconds)}</b></span>
+                </div>
+                <progress value={Math.min(dubEstimatedSpeechSeconds, dubMaximumSpeechSeconds)} max={dubMaximumSpeechSeconds || 1}/>
+                <small className={dubSpeechOverLimit ? 'dub-length-warning' : 'dub-length-guidance'}>
+                  {dubSpeechOverLimit
+                    ? 'Estimated speech is over the 20% limit. Shorten the dialogue or choose a longer video before generating.'
+                    : dubNarration.trim()
+                      ? 'Within the estimated limit · ' + formatTrimTime(Math.max(0, dubMaximumSpeechSeconds - dubEstimatedSpeechSeconds)) + ' estimated time remaining.'
+                      : 'Start typing to see the estimated speech length and remaining allowance.'}
+                </small>
+              </> : <small className="dub-length-guidance">Choose a video and let its preview load to calculate the maximum speech length (video duration + 20%).</small>}
+              <small className="dub-length-footnote">Estimate uses approximately 100 words/minute plus punctuation pauses. Pocket TTS output can vary; the renderer still checks the exact generated audio duration.</small>
+            </div>
             <label className="dub-checkbox"><input type="checkbox" checked={dubKeepAmbience} onChange={event => setDubKeepAmbience(event.target.checked)}/>
               Keep original background ambience quietly under the new voice (original dialogue may also remain audible)
             </label>
-            <button className="primary" disabled={!dubFile || !dubVoiceId || !dubNarration.trim() || dubBusy || !lipsyncInfo.ready || !ttsInfo.tts_ready || (videoStyle !== 'none' && !styleInfo.models.some(item => item.id === videoStyle && item.ready))}>
+            <button className="primary" disabled={!dubFile || !dubVoiceId || !dubNarration.trim() || dubBusy || !lipsyncInfo.ready || !ttsInfo.tts_ready || (videoStyle !== 'none' && !styleInfo.models.some(item => item.id === videoStyle && item.ready)) || dubSpeechOverLimit}>
               {dubBusy ? 'Uploading and queueing…' : 'Generate full video with my voice + lip-sync'}
             </button>
           </form>
