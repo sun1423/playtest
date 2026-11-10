@@ -58,6 +58,7 @@ function App() {
   const [llmTest, setLlmTest] = useState(null);
 
   const [previewUrl, setPreviewUrl] = useState('');
+  const [editingTransformId, setEditingTransformId] = useState('');
   const [trimStart, setTrimStart] = useState('0');
   const [trimEnd, setTrimEnd] = useState('0');
   const [musicVolume, setMusicVolume] = useState(0.35);
@@ -328,10 +329,46 @@ function App() {
     }
   }
 
+  function editTransform(job) {
+    const options = job.payload || {};
+    if (!job.source_available) {
+      setMsg('The original source is not available for editing this older job.');
+      return;
+    }
+    setEditingTransformId(job.id);
+    setFile(null);
+    setTrimStart(String(options.trim_start ?? 0));
+    setTrimEnd(String(options.trim_end ?? 0));
+    setPreset(options.preset || 'reel');
+    setFraming(options.framing || 'fill');
+    setAudioMode(options.audio || 'keep');
+    setMusicVolume(Number(options.music_volume ?? 0.35));
+    setOverlayText(options.overlay_text || '');
+    setOverlayPosition(options.overlay_position || 'bottom');
+    setMusicFile(null);
+    setSubtitleFile(null);
+    setTab('transform');
+    setMsg('Editing ' + (options.source_filename || 'saved video') +
+      '. The original and saved music/subtitles will be reused unless you replace them.');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function cancelTransformEdit() {
+    setEditingTransformId('');
+    setFile(null);
+    setMusicFile(null);
+    setSubtitleFile(null);
+    setMsg('Edit cancelled. Original saved transformation remains unchanged.');
+  }
+
   async function upload(event) {
     event.preventDefault();
+    if (!file && !editingTransformId) {
+      setMsg('Choose a video file first.');
+      return;
+    }
     const form = new FormData();
-    form.append('file', file);
+    if (file) form.append('file', file);
     form.append('preset', preset);
     form.append('framing', framing);
     form.append('audio', audioMode);
@@ -344,11 +381,24 @@ function App() {
     if (subtitleFile) form.append('subtitle_file', subtitleFile);
     setBusy(true);
     try {
-      await api('/api/video', { method: 'POST', body: form });
-      setMsg('Video queued on Azure');
-    } catch (error) { setMsg(error.message); }
-    setBusy(false);
-    refresh();
+      const isEdit = Boolean(editingTransformId);
+      await api(isEdit
+        ? '/api/jobs/' + encodeURIComponent(editingTransformId) + '/rerun'
+        : '/api/video', { method: 'POST', body: form });
+      setEditingTransformId('');
+      setFile(null);
+      setMusicFile(null);
+      setSubtitleFile(null);
+      setMsg(isEdit
+        ? 'Edited version queued. The previous export is preserved.'
+        : 'Video transformation queued. Its source will remain available for future edits.');
+      await refresh();
+      setTab('transform');
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      setBusy(false);
+    }
   }
 
   function addScenes(event) {
@@ -820,6 +870,9 @@ function App() {
   }
 
   const scriptAudioJob = jobs.find(job => job.id === scriptAudioJobId);
+  const transformJobs = jobs.filter(job =>
+    job.kind === 'video_transform' && !(job.payload?.scenes?.length)
+  );
   const nav = [
     ['create', 'Create video', WandSparkles],
     ['writer', 'Script Writer', WandSparkles],
@@ -1066,16 +1119,22 @@ function App() {
             <small>Important: AI style transfer changes the appearance of the same source frames; it does not invent new objects or camera actions. Lip-sync changes the mouth while retaining source eyes, expressions, head motion and body performance. It does not synthesize new eyebrow or eye emotions. These weights are intended for your personal, non-commercial workflow.</small>
           </article>
         </section>}
-        {tab === 'transform' && <section>
-          <span>UPLOAD WORKFLOW</span><h1>Reframe your footage.</h1>
-          <p>Original video stays untouched. New export rendered with FFmpeg on Azure.</p>
+        {tab === 'transform' && <section className="transform-workspace">
+          <span>VIDEO TRANSFORMATION</span><h1>{editingTransformId ? 'Edit your export.' : 'Reframe your footage.'}</h1>
+          <p>Every export is saved in this workspace. Watch it here, download it, or edit the settings and create another version without losing the previous one.</p>
+          {editingTransformId && <div className="transform-edit-banner">
+            <b>Editing a saved transformation</b>
+            <small>{jobs.find(job => job.id === editingTransformId)?.payload?.source_filename || 'Original source video'} · original file and saved assets will be reused unless replaced below.</small>
+            <button type="button" onClick={cancelTransformEdit}>Cancel editing</button>
+          </div>}
           <form onSubmit={upload}>
-            <label className="drop"><Upload/><b>{file?.name || 'Choose a video file'}</b><small>MP4 / MOV / MKV / WebM</small><input type="file" accept="video/*" onChange={event => setFile(event.target.files[0])}/></label>
+            <label className="drop"><Upload/><b>{file?.name || (editingTransformId ? 'Keep saved original video or choose a replacement' : 'Choose a video file')}</b><small>MP4 / MOV / MKV / WebM · max 500 MB</small><input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={event => setFile(event.target.files?.[0] || null)}/></label>
             {previewUrl && <div className="video-preview">
               <video src={previewUrl} controls playsInline preload="metadata"/>
               {overlayText && <div className={"preview-title preview-" + overlayPosition}>{overlayText}</div>}
-              <small>Local preview · original file is not uploaded until you queue the export</small>
+              <small>Selected source preview · the upload is stored separately from previous exports</small>
             </div>}
+            {editingTransformId && <small className="transform-source-note">No replacement file selected: the saved original will be used.</small>}
             <div className="row">
               <label>TRIM START (SECONDS)<input type="number" min="0" max="14400" step="0.1" value={trimStart} onChange={event => setTrimStart(event.target.value)}/></label>
               <label>TRIM END (SECONDS · 0 = FULL LENGTH)<input type="number" min="0" max="14400" step="0.1" value={trimEnd} onChange={event => setTrimEnd(event.target.value)}/></label>
@@ -1086,7 +1145,8 @@ function App() {
             </div>
             <label>AUDIO<select value={audioMode} onChange={event => setAudioMode(event.target.value)}><option value="keep">Keep original audio</option><option value="mute">Remove audio</option><option value="music">Replace with background music</option></select></label>
             {audioMode === 'music' && <>
-              <label className="drop"><Upload/><b>{musicFile?.name || 'Choose background music'}</b><small>MP3 / WAV / M4A / AAC / OGG · 30 MB max</small><input type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,audio/*" onChange={event => setMusicFile(event.target.files[0])}/></label>
+              <label className="drop"><Upload/><b>{musicFile?.name || (editingTransformId ? 'Keep saved background music or replace it' : 'Choose background music')}</b><small>MP3 / WAV / M4A / AAC / OGG · 30 MB max</small><input type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,audio/*" onChange={event => setMusicFile(event.target.files?.[0] || null)}/></label>
+              {editingTransformId && !musicFile && <small className="transform-source-note">Saved background music will be reused when available.</small>}
               <label>MUSIC VOLUME · {Math.round(musicVolume * 100)}%
                 <input type="range" min="0" max="1.5" step="0.05" value={musicVolume} onChange={event => setMusicVolume(Number(event.target.value))}/>
               </label>
@@ -1095,9 +1155,49 @@ function App() {
               <input value={overlayText} maxLength={160} onChange={event => setOverlayText(event.target.value)} placeholder="Add a title or short message (160 characters max)"/>
             </label>
             <label>TEXT POSITION<select value={overlayPosition} onChange={event => setOverlayPosition(event.target.value)}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select></label>
-            <label className="drop"><Upload/><b>{subtitleFile?.name || 'Optional SRT subtitles'}</b><small>UTF-8 SRT · Hindi and English · 2 MB max</small><input type="file" accept=".srt,application/x-subrip" onChange={event => setSubtitleFile(event.target.files[0])}/></label>
-            <button className="primary" disabled={!file || busy || (audioMode === 'music' && !musicFile) || (trimEnd !== '0' && Number(trimEnd) <= Number(trimStart))}>Queue video transform</button>
+            <label className="drop"><Upload/><b>{subtitleFile?.name || (editingTransformId ? 'Keep saved subtitles or replace them' : 'Optional SRT subtitles')}</b><small>UTF-8 SRT · Hindi and English · 2 MB max</small><input type="file" accept=".srt,application/x-subrip" onChange={event => setSubtitleFile(event.target.files?.[0] || null)}/></label>
+            <button className="primary" disabled={busy || (!file && !editingTransformId) || (audioMode === 'music' && !musicFile && !editingTransformId) || (trimEnd !== '0' && Number(trimEnd) <= Number(trimStart))}>
+              {busy ? 'Queueing export…' : editingTransformId ? 'Create edited version' : 'Queue video transformation'}
+            </button>
           </form>
+          <div className="transform-results">
+            <div className="transform-results-heading"><div><h2>Recent transformations</h2><small>Job status updates automatically · original uploads stay until you delete the job</small></div><button type="button" onClick={refresh}><RefreshCw size={15}/> Refresh</button></div>
+            {transformJobs.length === 0 ? <p>No transformations yet. Queue a video above to see its progress and final export here.</p> : transformJobs.map(job => {
+              const label = job.status === 'completed' && job.output_available ? 'Completed' :
+                job.status === 'failed' ? 'Failed' :
+                job.status === 'running' ? 'Processing' : job.status === 'queued' ? 'Queued' : job.status;
+              return <article className="transform-job" key={job.id}>
+                <div className="transform-job-heading">
+                  <div><b>{job.payload?.source_filename || 'Video transformation'}</b><small>{new Date(job.created_at).toLocaleString()} · {job.stage}</small></div>
+                  <span className={'transform-status ' + (job.status === 'completed' ? 'success' : job.status === 'failed' ? 'failed' : 'pending')}>{label}</span>
+                </div>
+                <progress value={job.progress || 0} max="100"/>
+                <small className="transform-progress-label">{job.status === 'completed' ? 'Export ready · 100%' : (job.progress || 0) + '% · ' + job.stage}</small>
+                {job.status === 'completed' && job.output_available && <>
+                  <div className="transform-success-note">Export completed successfully. Preview or download your MP4 below.</div>
+                  <div className="video-preview transform-output-preview">
+                    <video src={'/api/jobs/' + job.id + '/preview-video'} controls playsInline preload="metadata"/>
+                  </div>
+                  <div className="transform-job-actions">
+                    <a className="primary" href={'/api/jobs/' + job.id + '/output'} download={(job.payload?.source_filename || 'video').replace(/\.[^.]+$/, '') + '_transformed.mp4'}><Download size={15}/> Download MP4</a>
+                    {job.source_available && <button type="button" onClick={() => editTransform(job)}>Edit / create version</button>}
+                  </div>
+                </>}
+                {job.status === 'completed' && !job.output_available && <small className="transform-warning">The job completed, but its output file is missing from storage.</small>}
+                {job.status === 'failed' && <p className="transform-error">{job.error || 'The worker could not complete this transformation.'}</p>}
+                {(job.status !== 'completed' || !job.output_available) && job.source_available && <div className="transform-job-actions">
+                  <button type="button" disabled={job.status === 'queued' || job.status === 'running'} onClick={() => editTransform(job)}>Edit / try again</button>
+                </div>}
+                {!job.source_available && job.status !== 'queued' && job.status !== 'running' && <small className="transform-warning">Original source was not retained for this older job. Download and delete are still available.</small>}
+                <div className="transform-job-footer">
+                  <small>{job.source_available ? 'Original retained for editing' : 'Source unavailable'} · Job {job.id.slice(0,8)}</small>
+                  <button type="button" className="danger" disabled={job.status === 'running' || job.status === 'queued'} onClick={() => deleteMedia('/api/jobs/' + job.id, 'transformation and all its files')}>
+                    <Trash2 size={14}/> {job.status === 'running' || job.status === 'queued' ? 'Processing — cannot delete yet' : 'Delete'}
+                  </button>
+                </div>
+              </article>;
+            })}
+          </div>
         </section>}
         {tab === 'timeline' && <section className="timeline-workspace">
           <span>MULTI-SCENE EDITOR</span><h1>Build your story.</h1>
