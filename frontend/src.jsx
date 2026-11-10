@@ -70,6 +70,7 @@ function App() {
   const [faceReference, setFaceReference] = useState(null);
   const [faceBusy, setFaceBusy] = useState(false);
   const [faceUploadProgress, setFaceUploadProgress] = useState(-1);
+  const [faceTargetDuration, setFaceTargetDuration] = useState(0);
   const [sceneFiles, setSceneFiles] = useState([]);
   const [activeScene, setActiveScene] = useState(0);
   const [scenePreviewUrl, setScenePreviewUrl] = useState('');
@@ -441,9 +442,58 @@ function App() {
     setMsg('Edit cancelled. Original saved transformation remains unchanged.');
   }
 
+  async function readFaceVideoDuration(file) {
+    const url = URL.createObjectURL(file);
+    try {
+      const video = document.createElement('video');
+      video.preload = 'metadata';
+      video.src = url;
+      await new Promise((resolve, reject) => {
+        video.onloadedmetadata = resolve;
+        video.onerror = () => reject(new Error('Could not read this video duration. Try an MP4 or MOV file.'));
+      });
+      if (!Number.isFinite(video.duration) || video.duration <= 0) {
+        throw new Error('Could not determine the video duration.');
+      }
+      return video.duration;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async function handleFaceTargetChange(event) {
+    const selected = event.target.files?.[0] || null;
+    setFaceTarget(null);
+    setFaceTargetDuration(0);
+    if (!selected) return;
+    setMsg('Checking video duration before upload…');
+    try {
+      const duration = await readFaceVideoDuration(selected);
+      if (duration > 15) {
+        setMsg('Video is ' + duration.toFixed(1) + ' seconds. Face Replacement currently accepts videos up to 15 seconds. Please trim the video and select it again. Nothing was uploaded.');
+        event.target.value = '';
+        return;
+      }
+      setFaceTarget(selected);
+      setFaceTargetDuration(duration);
+      setMsg('Video checked: ' + duration.toFixed(1) + ' seconds. It is within the 15-second limit.');
+    } catch (error) {
+      event.target.value = '';
+      setMsg(error.message || 'Could not validate the selected video.');
+    }
+  }
+
   async function submitFaceFusion() {
     if (!faceTarget || !faceReference) {
       setMsg('Select both the target video and the reference face image first.');
+      return;
+    }
+    const checkedDuration = await readFaceVideoDuration(faceTarget).catch(error => { setMsg(error.message); return 0; });
+    if (!checkedDuration) return;
+    if (checkedDuration > 15) {
+      setFaceTarget(null);
+      setFaceTargetDuration(0);
+      setMsg('This video is ' + checkedDuration.toFixed(1) + ' seconds. The maximum is 15 seconds. Select a shorter video; no upload was started.');
       return;
     }
     const form = new FormData();
@@ -1354,7 +1404,7 @@ function App() {
           <h1>Face replacement.</h1>
           <p>Replace the face in a short target video using a reference image. FaceFusion runs locally on this server using CPU inference; no GPU or paid video API is used. Original video audio is restored after processing.</p>
           <div className="facefusion-upload">
-            <label className="drop"><Film/><b>{faceTarget?.name || 'Choose target video'}</b><small>MP4, MOV, MKV or WebM · maximum 15 seconds · 100 MB</small><input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={event => setFaceTarget(event.target.files?.[0] || null)}/></label>
+            <label className="drop"><Film/><b>{faceTarget?.name || 'Choose target video'}</b><small>MP4, MOV, MKV or WebM · maximum 15 seconds · 100 MB{faceTargetDuration ? ' · ' + faceTargetDuration.toFixed(1) + 's checked' : ''}</small><input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={handleFaceTargetChange}/></label>
             <label className="drop"><Upload/><b>{faceReference?.name || 'Choose reference face image'}</b><small>JPG, PNG or WebP · one clear face · 15 MB maximum. Target face must be visible in its opening frame.</small><input type="file" accept="image/jpeg,image/png,image/webp" onChange={event => setFaceReference(event.target.files?.[0] || null)}/></label>
             <button type="button" className="primary" disabled={faceBusy} onClick={submitFaceFusion}>{faceBusy ? 'Uploading…' : 'Queue CPU face replacement'}</button>
             {faceBusy && <div className="facefusion-upload-status"><b>Uploading files to Azure · {faceUploadProgress}%</b><progress value={faceUploadProgress} max="100"/><small>Keep this page open until the upload finishes. CPU processing begins after the server accepts both files.</small></div>}
