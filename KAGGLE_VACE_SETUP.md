@@ -78,14 +78,21 @@ Path("/kaggle/working/vace-kaggle-requirements.txt").write_text("\n".join(filter
 !pip install --no-deps "wan @ git+https://github.com/Wan-Video/Wan2.1"
 ```
 
-Install Chatterbox Multilingual V3 without allowing its package metadata to replace Kaggle's Torch or VACE's Diffusers versions:
+Create a separate Chatterbox environment so its pinned Diffusers and Transformers do not replace the VACE versions. It inherits the notebook's CUDA-enabled Torch/TorchAudio from the base environment:
 
 ```bash
-!pip install --no-deps chatterbox-tts==0.1.7
-!pip install "librosa==0.11.0" s3tokenizer "conformer==0.3.2" "safetensors==0.5.3" spacy-pkuseg "pykakasi==2.3.0" resemble-perth pyloudnorm omegaconf
+!python -m venv --system-site-packages /kaggle/working/chatterbox-env
+!/kaggle/working/chatterbox-env/bin/pip install --no-deps chatterbox-tts==0.1.7
+!/kaggle/working/chatterbox-env/bin/pip install "numpy>=1.24,<2" "librosa==0.11.0" s3tokenizer "transformers==5.2.0" "diffusers==0.29.0" "conformer==0.3.2" "safetensors==0.5.3" spacy-pkuseg "pykakasi==2.3.0" "resemble-perth @ git+https://github.com/resemble-ai/Perth.git@master" pyloudnorm omegaconf
 ```
 
-Check the selected runtime before continuing:
+Do not install Torch or TorchAudio into this second environment. Confirm it inherits the same working CUDA versions:
+
+```python
+!/kaggle/working/chatterbox-env/bin/python -c "import torch,torchaudio; print(torch.__version__, torchaudio.__version__, torch.cuda.is_available()); assert torch.__version__.split('+')[0] == torchaudio.__version__.split('+')[0]"
+```
+
+Check the selected VACE runtime before continuing:
 
 ```python
 import torch, torchaudio
@@ -124,6 +131,7 @@ The runner uses the flow or depth annotator checkpoint from this download. Do no
 !pip install -r requirements-vace-runner.txt
 %env VACE_ROOT=/kaggle/working/VACE
 %env VACE_CHECKPOINT_DIR=/kaggle/working/VACE/models/Wan2.1-VACE-1.3B
+%env CHATTERBOX_PYTHON=/kaggle/working/chatterbox-env/bin/python
 !python vace_runner.py --poll-seconds 15
 ```
 
@@ -145,6 +153,6 @@ The voice selector uses the existing Voice Studio profile; you do not need to up
 - A short source clip is padded by repeating its last frame to create the required 81-frame input. The final video holds its last frame if narration is longer than the generated visual segment.
 - T4 x2 has 16 GB per GPU; this runner uses GPU 0 only. FP16/SDPA makes the default BF16 configuration compatible in principle, but VACE memory use and generation speed still need a real T4 notebook test. A job can fail with CUDA out-of-memory; the Azure server is not used as a fallback.
 - The feature branch has not yet been run on a real Kaggle GPU. Do not treat generation as production-validated until a sample job completes end-to-end.
-- Chatterbox is an archived open-source research project; it can still be run locally, but it no longer receives upstream maintenance. Its Multilingual V3 model supports Hindi and English, and the Studio uses the same WAV-reference interface already present in Voice Studio.
+- Chatterbox is an archived open-source research project; it can still be run locally, but it no longer receives upstream maintenance. Its Multilingual V3 model supports Hindi and English. The TTS worker runs in a separate Python environment to avoid dependency conflicts with VACE, while reusing the notebook's already-installed CUDA Torch/TorchAudio.
 - Kaggle temporarily receives the uploaded video and voice WAV. The runner deletes its per-job workspace after completion/failure; Kaggle session storage is temporary.
 
