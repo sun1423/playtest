@@ -1382,7 +1382,9 @@ def prepare_existing_voice(
     profile_path = resolve_voice_asset(voice_id, "profile")
     staging_dir = VOICES / ".staging"
     staging_dir.mkdir(exist_ok=True)
-    temp_path = staging_dir / (voice_id + "." + uuid.uuid4().hex + ".reprocess.wav")
+    token = uuid.uuid4().hex
+    temp_path = staging_dir / (voice_id + "." + token + ".reprocess.wav")
+    metadata_temp = staging_dir / (voice_id + "." + token + ".json")
     metadata_path = VOICES / ".profiles" / (voice_id + ".json")
     try:
         try:
@@ -1410,13 +1412,15 @@ def prepare_existing_voice(
             "conditioning_status": "not_tested" if tts_runtime_ready() else "engine_disabled",
             "conditioning_note": "Prepared profile updated from the immutable original. No voice-conditioning or similarity test has run.",
         })
+        metadata_temp.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(temp_path, profile_path)
-        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(metadata_temp, metadata_path)
         for extension in ("emb", "kv"):
             (VOICES / ".cache" / (voice_id + "." + extension)).unlink(missing_ok=True)
         return metadata
     finally:
         temp_path.unlink(missing_ok=True)
+        metadata_temp.unlink(missing_ok=True)
 
 
 @app.get("/api/voices/{voice_id}/source")
