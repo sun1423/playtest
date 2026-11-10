@@ -1,12 +1,12 @@
 # Free GPU VACE runner (Kaggle)
 
-This keeps the Studio API, SQLite database, uploads and projects on Azure. A Kaggle GPU notebook acts as an optional remote worker. It pulls queued jobs, runs Wan2.1 VACE, generates narration with Chatterbox Multilingual V3 using the WAV voice profile already stored in Voice Studio, mixes the audio, and uploads the finished MP4.
+This keeps the Studio API, SQLite database, uploads and projects on Azure. A Kaggle GPU notebook acts as an optional remote worker. It pulls queued jobs, runs open-weight Wan2.1 VACE 1.3B, generates custom Hindi/English narration with Chatterbox Multilingual V3 using a WAV profile already stored in Voice Studio, mixes the audio and uploads the finished MP4.
 
-**No paid inference API is used.** Kaggle free GPU availability and quotas are controlled by Kaggle and are not guaranteed. VACE and Chatterbox model weights are downloaded into the temporary Kaggle session; they are not installed on the 2-vCPU Azure host.
+**No paid inference API is used.** Kaggle's free GPU availability and weekly quota are controlled by Kaggle and can change. Its September 2026 notice retired the free P100 and says T4 x2 remains available. The runner currently uses the first T4 GPU; it does not distribute a single VACE job across both cards. Verify the actual accelerator with `nvidia-smi` before downloading models. The Azure host remains CPU-only and does not load diffusion weights.
 
 ## 1. Configure the Studio API runner token
 
-After this branch is merged and deployed, generate a long random token on the Azure host:
+After this feature branch is merged and deployed, generate a random token on the Azure host:
 
 ```bash
 openssl rand -hex 32
@@ -18,7 +18,7 @@ Keep the output private. Add it to the API service environment using a systemd o
 sudo systemctl edit ai-video-studio-api.service
 ```
 
-Enter this override, replacing the placeholder with the generated value:
+Enter this override, replacing the placeholder with the generated token:
 
 ```ini
 [Service]
@@ -32,16 +32,16 @@ sudo systemctl daemon-reload
 sudo systemctl restart ai-video-studio-api.service
 ```
 
-Do not commit the token or put it in a notebook cell. The API does not return the token from any status endpoint. The runner endpoints accept only the matching Bearer token.
+Do not commit the token or paste it into a notebook cell. The runner API accepts only the matching Bearer token. The runner refuses to start unless `STUDIO_API_URL` is HTTPS: configure a publicly trusted TLS endpoint for Studio first. Do not expose this token over the current plain-HTTP IP endpoint.
 
 ## 2. Create a Kaggle notebook
 
-1. Create a new Kaggle Notebook.
-2. In Notebook options, enable **Internet** and select a **GPU T4** accelerator when Kaggle makes one available.
-3. Add two Kaggle secrets (Notebook add-ons / Secrets):
-   - `STUDIO_API_URL`: the public base URL of the deployed Studio, without a trailing slash.
-   - `STUDIO_VACE_RUNNER_TOKEN`: the same random token configured on the API service.
-4. Do not paste the token into a notebook cell or save it in the Git repository.
+1. Create a Kaggle Notebook and enable Internet.
+2. Select **GPU T4 x2** under Settings → Accelerator when it is available. Kaggle can queue or limit free GPU sessions.
+3. Add two Kaggle Secrets:
+   - `STUDIO_API_URL`: the HTTPS base URL of the deployed Studio, without a trailing slash.
+   - `STUDIO_VACE_RUNNER_TOKEN`: the same random token configured in the API service.
+4. Do not paste the token into notebook cells or save it in Git.
 
 Run these setup cells:
 
@@ -52,23 +52,55 @@ Run these setup cells:
 !git clone https://github.com/ali-vilab/VACE.git /kaggle/working/VACE
 ```
 
-The VACE authors report testing with Python 3.10.13, PyTorch 2.5.1 and CUDA 12.4. Kaggle's preinstalled runtime can differ; do not force-reinstall CUDA/PyTorch if that would break the selected Kaggle image. Use a compatible runtime or adjust to the official VACE installation instructions.
+The official VACE instructions report testing with Python 3.10.13, PyTorch 2.5.1 and CUDA 12.4. Kaggle's preinstalled runtime may differ. Do not force-reinstall PyTorch, torchvision or CUDA from pip; the TTS and video pipelines must share a working CUDA-enabled Torch installation.
 
-Install the official VACE requirements and the Wan adapter:
+## 3. Install VACE without incompatible GPU kernels
+
+VACE's stock Wan config defaults to BF16, which is not supported by T4. This runner applies a narrow local runtime adjustment on GPUs without BF16: Wan's transformer autocast and SDPA attention use FP16. The text encoder remains CPU-offloaded. The adjustment only edits the Kaggle checkout and installed Wan attention module; it does not alter the Git repository or Azure host.
+
+FlashAttention is intentionally omitted: this path uses PyTorch SDPA instead. Install the framework requirements while preserving Kaggle's Torch/CUDA packages:
+
+```python
+from pathlib import Path
+
+source = Path("/kaggle/working/VACE/requirements/framework.txt")
+skip = ("torch", "torchvision", "flash_attn", "onnxruntime-gpu")
+filtered = [
+    line for line in source.read_text().splitlines()
+    if line.strip() and not line.lstrip().startswith(skip)
+]
+Path("/kaggle/working/vace-kaggle-requirements.txt").write_text("\n".join(filtered) + "\n")
+```
 
 ```bash
 %cd /kaggle/working/VACE
-!pip install -r requirements.txt
-!pip install "wan @ git+https://github.com/Wan-Video/Wan2.1"
+!pip install -r /kaggle/working/vace-kaggle-requirements.txt
+!pip install --no-deps "wan @ git+https://github.com/Wan-Video/Wan2.1"
 ```
 
-Install Chatterbox Multilingual TTS into the same Python environment:
+Install Chatterbox Multilingual V3 without allowing its package metadata to replace Kaggle's Torch or VACE's Diffusers versions:
 
 ```bash
-!pip install chatterbox-tts
+!pip install --no-deps chatterbox-tts==0.1.7
+!pip install "librosa==0.11.0" s3tokenizer "conformer==0.3.2" "safetensors==0.5.3" spacy-pkuseg "pykakasi==2.3.0" resemble-perth pyloudnorm omegaconf
 ```
 
-Download the 1.3B VACE checkpoint and preprocessing annotators:
+Check the selected runtime before continuing:
+
+```python
+import torch, torchaudio
+print("Torch:", torch.__version__, "TorchAudio:", torchaudio.__version__)
+print("CUDA:", torch.cuda.is_available(), "BF16:", torch.cuda.is_bf16_supported())
+print("GPU 0:", torch.cuda.get_device_name(0))
+assert torch.cuda.is_available(), "Enable a CUDA GPU accelerator"
+assert torch.__version__.split("+")[0] == torchaudio.__version__.split("+")[0], "Torch and TorchAudio versions must match"
+```
+
+If pip changes Torch or TorchAudio, stop and restore a matching Kaggle CUDA build before proceeding. If a dependency is missing at runtime, resolve it without upgrading/downgrading Torch, TorchAudio, Diffusers or Transformers as a group.
+
+## 4. Download model weights
+
+Download the 1.3B VACE checkpoint and preprocessing annotators into the temporary Kaggle workspace:
 
 ```python
 from huggingface_hub import snapshot_download
@@ -83,9 +115,9 @@ snapshot_download(
 )
 ```
 
-If the annotator/model download or dependency install fails, stop and inspect the Kaggle cell output before starting the runner. Do not switch to the 14B model on a T4.
+The runner uses the flow or depth annotator checkpoint from this download. Do not switch to the 14B model on a free T4.
 
-## 3. Start the remote runner
+## 5. Start the remote runner
 
 ```bash
 %cd /kaggle/working/playtest
@@ -95,20 +127,24 @@ If the annotator/model download or dependency install fails, stop and inspect th
 !python vace_runner.py --poll-seconds 15
 ```
 
-Leave the final cell running while you queue an AI Video job in Studio. The runner checks for jobs, downloads the source video and chosen saved WAV voice profile, runs VACE flow/depth editing, synthesizes the narration in that custom voice, and uploads the MP4. Stop the notebook when finished to release the GPU session.
+The runner verifies the GPU and applies the FP16/SDPA compatibility adjustment when BF16 is unavailable. It then polls the API, downloads the source video and selected WAV voice, runs VACE, generates the custom narration, mixes both and uploads the MP4. Leave the cell running while jobs are queued; stop it when finished to release the free GPU session.
 
-## 4. Use it in Studio
+## 6. Use it in Studio
 
-1. Upload a clean 5–10 second WAV voice reference in **Voice Studio**. Avoid music, reverb and background conversation.
-2. Open **AI Video**, upload a source video and enter an English or Hindi visual prompt.
-3. Enter narration text, choose the matching language and select the saved voice profile.
-4. Choose **Flow** to prioritize motion continuity or **Depth** to prioritize scene structure.
-5. Optionally mix the original video's audio quietly under the narration, then queue the job.
+1. In **Voice Studio**, upload a clean 5–10 second WAV reference of a voice you have permission to use. Avoid music, reverberation and background conversation.
+2. Open **AI Video**, upload a source video and write the visual transformation prompt.
+3. Enter the narration text, select Hindi or English, then choose the saved voice profile.
+4. Choose **Flow** to preserve movement cues or **Depth** to guide scene structure.
+5. Optionally mix the source video's sound quietly below the narration, then queue the job.
 
-## Current prototype limits
+The voice selector uses the existing Voice Studio profile; you do not need to upload the WAV again. Chatterbox generates the requested spoken narration from the reference voice. VACE performs only the visual transformation.
 
-- Wan2.1 VACE 1.3B generates about 5.06 seconds at 480p per job. The runner takes the first 5.06 seconds of the uploaded source in this first version.
-- If the generated voice lasts longer than the generated visuals, the last video frame is held until narration finishes.
-- T4 availability is not guaranteed. If VACE runs out of VRAM, stop the job and use a GPU runtime with more memory; the Azure production host has no GPU and is deliberately not used for diffusion inference.
-- The custom voice is generated as narration with Chatterbox. VACE itself does not clone or synthesize voices.
-- Kaggle temporarily receives your uploaded video and reference WAV for processing. The runner deletes its local job folder after completion/failure; Kaggle session storage is temporary.
+## Prototype limits and validation status
+
+- Initial output is 81 frames (about 5.06 seconds) at 480p. The first implementation uses the first 5.06 seconds of the uploaded footage; it does not process the full 120-second upload as one clip.
+- A short source clip is padded by repeating its last frame to create the required 81-frame input. The final video holds its last frame if narration is longer than the generated visual segment.
+- T4 x2 has 16 GB per GPU; this runner uses GPU 0 only. FP16/SDPA makes the default BF16 configuration compatible in principle, but VACE memory use and generation speed still need a real T4 notebook test. A job can fail with CUDA out-of-memory; the Azure server is not used as a fallback.
+- The feature branch has not yet been run on a real Kaggle GPU. Do not treat generation as production-validated until a sample job completes end-to-end.
+- Chatterbox is an archived open-source research project; it can still be run locally, but it no longer receives upstream maintenance. Its Multilingual V3 model supports Hindi and English, and the Studio uses the same WAV-reference interface already present in Voice Studio.
+- Kaggle temporarily receives the uploaded video and voice WAV. The runner deletes its per-job workspace after completion/failure; Kaggle session storage is temporary.
+
