@@ -2074,8 +2074,12 @@ def job_video_source(job_id: str):
     if UP.resolve() not in path.parents or not path.is_file():
         raise HTTPException(404, "Editable source is not available")
     filename = Path(job["payload"].get("source_filename") or path.name).name
+    media_type = {
+        ".mp4": "video/mp4", ".mov": "video/quicktime",
+        ".mkv": "video/x-matroska", ".webm": "video/webm",
+    }.get(path.suffix.lower(), "application/octet-stream")
     return FileResponse(
-        path, media_type="application/octet-stream",
+        path, media_type=media_type,
         headers={"Content-Disposition": f'inline; filename="{filename}"',
                  "Cache-Control": "private, no-store"},
     )
