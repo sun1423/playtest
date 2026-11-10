@@ -5,6 +5,7 @@ on:
     branches:
       - feature/pocket-tts-hindi-voiceover
       - feature/cpu-video-dub-lipsync
+      - feature/indicconformer-hindi-asr
   pull_request:
     branches:
       - main
