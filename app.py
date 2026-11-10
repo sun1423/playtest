@@ -2524,9 +2524,15 @@ def work(job):
             raise RuntimeError("FaceFusion CPU engine is not installed.")
         raw_output = folder / "facefusion-video.mp4"
         destination = folder / "video.mp4"
+        facefusion_temp = ROOT / "tmp" / "facefusion"
+        facefusion_jobs = ROOT / "facefusion-jobs"
+        facefusion_temp.mkdir(parents=True, exist_ok=True)
+        facefusion_jobs.mkdir(parents=True, exist_ok=True)
         update(job_id, stage="FaceFusion CPU · preparing models", progress=5)
         command = [
             str(FACEFUSION_PYTHON), str(FACEFUSION_SCRIPT), "headless-run",
+            "--temp-path", str(facefusion_temp),
+            "--jobs-path", str(facefusion_jobs),
             "-s", str(reference),
             "-t", str(target),
             "-o", str(raw_output),
