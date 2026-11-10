@@ -1,0 +1,27 @@
+name: Chatterbox CPU benchmark tool checks
+
+on:
+  push:
+    branches:
+      - feature/chatterbox-cpu-benchmark
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  static-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile benchmark tool
+        run: python -m py_compile tools/benchmark_chatterbox_cpu.py
+      - name: Verify command-line interface
+        run: python tools/benchmark_chatterbox_cpu.py --help
