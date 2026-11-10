@@ -69,6 +69,7 @@ function App() {
   const [faceTarget, setFaceTarget] = useState(null);
   const [faceReference, setFaceReference] = useState(null);
   const [faceBusy, setFaceBusy] = useState(false);
+  const [faceUploadProgress, setFaceUploadProgress] = useState(-1);
   const [sceneFiles, setSceneFiles] = useState([]);
   const [activeScene, setActiveScene] = useState(0);
   const [scenePreviewUrl, setScenePreviewUrl] = useState('');
@@ -440,26 +441,50 @@ function App() {
     setMsg('Edit cancelled. Original saved transformation remains unchanged.');
   }
 
-  async function submitFaceFusion(event) {
-    event.preventDefault();
+  async function submitFaceFusion() {
     if (!faceTarget || !faceReference) {
-      setMsg('Choose both a target video and a reference face image.');
+      setMsg('Select both the target video and the reference face image first.');
       return;
     }
     const form = new FormData();
     form.append('file', faceTarget);
     form.append('source_image', faceReference);
     setFaceBusy(true);
+    setFaceUploadProgress(0);
+    setMsg('Uploading video and reference image to Azure…');
     try {
-      await api('/api/facefusion', { method: 'POST', body: form });
-      setMsg('Face replacement queued. CPU processing can take a long time; the original audio will be restored.');
+      const queuedJob = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/facefusion');
+        xhr.withCredentials = true;
+        xhr.timeout = 15 * 60 * 1000;
+        xhr.upload.onprogress = event => {
+          if (event.lengthComputable) setFaceUploadProgress(Math.round(event.loaded / event.total * 100));
+        };
+        xhr.onload = () => {
+          let result;
+          try { result = JSON.parse(xhr.responseText || '{}'); }
+          catch { reject(new Error('Azure returned an unreadable response.')); return; }
+          if (xhr.status >= 200 && xhr.status < 300) resolve(result);
+          else reject(new Error(result.detail || 'Upload failed with HTTP ' + xhr.status));
+        };
+        xhr.onerror = () => reject(new Error('Network error while uploading. Check your connection and try again.'));
+        xhr.ontimeout = () => reject(new Error('Upload timed out. Try a smaller video.'));
+        xhr.onabort = () => reject(new Error('Upload was cancelled.'));
+        xhr.send(form);
+      });
+      jobsMutationVersionRef.current += 1;
+      jobsRefreshSequenceRef.current += 1;
+      setJobs(current => [queuedJob, ...current.filter(job => job.id !== queuedJob.id)].slice(0, 100));
       setFaceTarget(null);
       setFaceReference(null);
-      await refresh();
+      setMsg('Upload complete. Face replacement job queued; CPU processing has started or is waiting for the worker.');
+      await refreshJobs();
     } catch (error) {
-      setMsg(error.message);
+      setMsg(error.message || 'Could not queue face replacement.');
     } finally {
       setFaceBusy(false);
+      setFaceUploadProgress(-1);
     }
   }
 
@@ -1327,25 +1352,27 @@ function App() {
         {tab === 'facefusion' && <section className="facefusion-workspace">
           <span>CPU VIDEO PROCESSING</span>
           <h1>Face replacement.</h1>
-          <p>Replace the face in a short target video using a reference image. FaceFusion runs locally on this server using CPU inference; no GPU or paid video API is used. The original video audio is restored after processing.</p>
-          <form onSubmit={submitFaceFusion}>
+          <p>Replace the face in a short target video using a reference image. FaceFusion runs locally on this server using CPU inference; no GPU or paid video API is used. Original video audio is restored after processing.</p>
+          <div className="facefusion-upload">
             <label className="drop"><Film/><b>{faceTarget?.name || 'Choose target video'}</b><small>MP4, MOV, MKV or WebM · maximum 15 seconds · 100 MB</small><input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={event => setFaceTarget(event.target.files?.[0] || null)}/></label>
             <label className="drop"><Upload/><b>{faceReference?.name || 'Choose reference face image'}</b><small>JPG, PNG or WebP · one clear face · 15 MB maximum. Target face must be visible in its opening frame.</small><input type="file" accept="image/jpeg,image/png,image/webp" onChange={event => setFaceReference(event.target.files?.[0] || null)}/></label>
-            <button className="primary" disabled={faceBusy || !faceTarget || !faceReference}>{faceBusy ? 'Uploading…' : 'Queue CPU face replacement'}</button>
-          </form>
+            <button type="button" className="primary" disabled={faceBusy} onClick={submitFaceFusion}>{faceBusy ? 'Uploading…' : 'Queue CPU face replacement'}</button>
+            {faceBusy && <div className="facefusion-upload-status"><b>Uploading files to Azure · {faceUploadProgress}%</b><progress value={faceUploadProgress} max="100"/><small>Keep this page open until the upload finishes. CPU processing begins after the server accepts both files.</small></div>}
+          </div>
           <div className="facefusion-note">
             <b>Important limitations</b>
             <small>This is face replacement, not full character transformation. It does not change hairstyle, clothing, body or background from a text prompt. Results depend on face visibility, angle, lighting and occlusion.</small>
-            <small>The first run may take longer while FaceFusion downloads required model weights. Only one job is processed by the existing Studio worker.</small>
+            <small>During CPU inference, the progress bar is indeterminate because FaceFusion does not expose a reliable frame percentage through this integration. Job status and errors are refreshed automatically.</small>
           </div>
           <h2>Face replacement jobs</h2>
-          {jobs.filter(job => job.kind === 'facefusion').length === 0 ? <p>No face replacement jobs yet.</p> : jobs.filter(job => job.kind === 'facefusion').map(job =>
+          {jobs.filter(job => job.kind === 'facefusion').length === 0 ? <p>No face replacement jobs yet. After upload, your job will appear here.</p> : jobs.filter(job => job.kind === 'facefusion').map(job =>
             <article key={job.id}>
-              <b>CPU face replacement</b><small>{job.stage} · {job.status} · {job.progress}%</small>
-              <progress value={job.progress} max="100"/>
-              {job.status === 'completed' && <a href={'/api/jobs/' + job.id + '/output'}>Download processed video</a>}
-              {job.error && <p className="validation-error">{job.error}</p>}
-              <button className="danger" disabled={job.status === 'running'} onClick={() => deleteMedia('/api/jobs/' + job.id, 'face replacement job and its media')}>{job.status === 'running' ? 'Processing — cannot delete' : 'Delete job and media'}</button>
+              <b>CPU face replacement</b>
+              <small>{job.stage} · {job.status === 'running' ? 'Processing on CPU' : job.status} · {job.progress}%</small>
+              {job.status === 'running' ? <progress className="facefusion-indeterminate"/> : <progress value={job.progress} max="100"/>}
+              {job.status === 'completed' && <><video className="facefusion-result" src={'/api/jobs/' + job.id + '/preview-video'} controls playsInline preload="metadata"/><a href={'/api/jobs/' + job.id + '/output'}>Download processed video</a></>}
+              {job.status === 'failed' && <p className="validation-error">{job.error || 'Processing failed. Check the worker logs.'}</p>}
+              <button type="button" className="danger" disabled={job.status === 'running'} onClick={() => deleteMedia('/api/jobs/' + job.id, 'face replacement job and its media')}>{job.status === 'running' ? 'Processing — cannot delete' : 'Delete job and media'}</button>
             </article>
           )}
         </section>}
