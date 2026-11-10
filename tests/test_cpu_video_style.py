@@ -1,6 +1,10 @@
 import unittest
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+
 import numpy as np
-from cpu_video_style import STYLE_MODELS, _square_frame
+from cpu_video_style import STYLE_MODELS, _square_frame, style_catalog
 
 
 class CpuVideoStyleTests(unittest.TestCase):
@@ -8,6 +12,15 @@ class CpuVideoStyleTests(unittest.TestCase):
         self.assertEqual(STYLE_MODELS["anime_512"]["size"], 512)
         for name in ("candy", "mosaic", "rain_princess", "udnie"):
             self.assertEqual(STYLE_MODELS[name]["size"], 224)
+
+    def test_style_catalog_requires_runtime_dependencies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / STYLE_MODELS["candy"]["file"]).write_bytes(b"x" * 100_001)
+            with patch("cpu_video_style.importlib.util.find_spec", return_value=None):
+                catalog = style_catalog(root)
+            candy = next(item for item in catalog if item["id"] == "candy")
+            self.assertFalse(candy["ready"])
 
     def test_portrait_letterbox_preserves_aspect_ratio(self):
         import cv2
