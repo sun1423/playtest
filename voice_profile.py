@@ -315,7 +315,7 @@ def _transcribe_hindi_whisper(path: Path, model_cache: Path) -> dict:
         "language": getattr(info, "language", "hi"),
         "language_probability": round(float(getattr(info, "language_probability", 0.0)), 3),
         "model": model_name,
-        "engine": "Whisper CPU/int8 (fallback)",
+        "engine": "Whisper CPU/int8",
         "transcription_attempts": attempts,
         "script_warning": script_warning,
     }
