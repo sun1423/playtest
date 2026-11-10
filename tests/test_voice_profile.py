@@ -81,17 +81,23 @@ class VoiceProfileTests(unittest.TestCase):
 
     def test_indicconformer_failure_falls_back_only_when_explicitly_configured(self):
         from unittest.mock import Mock
+        from voice_profile import _ASR_BACKENDS
 
         fallback = {"text": "नमस्ते", "engine": "Whisper CPU/int8"}
-        with patch.dict(os.environ, {"VOICE_ASR_BACKEND": "indicconformer", "VOICE_ASR_FALLBACK_BACKEND": "whisper"}), \
-             patch("indicconformer_asr.transcribe_indicconformer_hindi", side_effect=RuntimeError("model not installed")), \
-             patch.dict("voice_profile._ASR_BACKENDS", {"whisper": Mock(return_value=fallback)}) as backends:
-            result = transcribe_hindi(Path("reference.wav"), Path("models/whisper"))
+        whisper = Mock(return_value=fallback)
+        original_whisper = _ASR_BACKENDS["whisper"]
+        _ASR_BACKENDS["whisper"] = whisper
+        try:
+            with patch.dict(os.environ, {"VOICE_ASR_BACKEND": "indicconformer", "VOICE_ASR_FALLBACK_BACKEND": "whisper"}), \
+                 patch("indicconformer_asr.transcribe_indicconformer_hindi", side_effect=RuntimeError("model not installed")):
+                result = transcribe_hindi(Path("reference.wav"), Path("models/whisper"))
+        finally:
+            _ASR_BACKENDS["whisper"] = original_whisper
         self.assertEqual(result["text"], "नमस्ते")
         self.assertEqual(result["backend"], "whisper")
         self.assertEqual(result["requested_backend"], "indicconformer")
         self.assertIn("model not installed", result["fallback_reason"])
-        backends["whisper"].assert_called_once()
+        whisper.assert_called_once()
 
 
     def test_indicconformer_is_the_default_backend(self):
@@ -106,14 +112,21 @@ class VoiceProfileTests(unittest.TestCase):
 
     def test_selected_backend_failure_does_not_silently_downgrade(self):
         from unittest.mock import Mock
+        from voice_profile import _ASR_BACKENDS
 
-        with patch.dict(os.environ, {"VOICE_ASR_BACKEND": "indicconformer"}, clear=True), patch(
-            "indicconformer_asr.transcribe_indicconformer_hindi",
-            side_effect=RuntimeError("model unavailable"),
-        ), patch.dict("voice_profile._ASR_BACKENDS", {"whisper": Mock()}) as backends:
-            with self.assertRaisesRegex(RuntimeError, "selected hindi asr backend.*model unavailable"):
-                transcribe_hindi(Path("reference.wav"), Path("models/whisper"))
-        backends["whisper"].assert_not_called()
+        whisper = Mock()
+        original_whisper = _ASR_BACKENDS["whisper"]
+        _ASR_BACKENDS["whisper"] = whisper
+        try:
+            with patch.dict(os.environ, {"VOICE_ASR_BACKEND": "indicconformer"}, clear=True), patch(
+                "indicconformer_asr.transcribe_indicconformer_hindi",
+                side_effect=RuntimeError("model unavailable"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "(?i)selected hindi asr backend.*model unavailable"):
+                    transcribe_hindi(Path("reference.wav"), Path("models/whisper"))
+        finally:
+            _ASR_BACKENDS["whisper"] = original_whisper
+        whisper.assert_not_called()
 
     def test_new_backend_can_be_registered_and_selected_later(self):
         from voice_profile import register_asr_backend, available_asr_backends
