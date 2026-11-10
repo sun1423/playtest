@@ -26,6 +26,7 @@ from pocket_tts import (
     normalize_generation_settings, normalize_voice_id, resolve_voice_reference, valid_voice_id,
 )
 from pocket_tts import synthesize as synthesize_pocket_tts
+from pocket_tts import synthesize_dialogue as synthesize_pocket_tts_dialogue
 from voice_profile import prepare_voice_audio, probe_audio, transcribe_hindi
 from voice_reference import analyze_pcm16, decode_pcm16
 
@@ -533,7 +534,8 @@ def video_style_status():
 
 @app.post("/api/video/voice-dub")
 async def create_video_voice_dub(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
+    source_job_id: str = Form(""),
     voice_id: str = Form(..., min_length=1, max_length=48),
     narration: str = Form(..., min_length=1, max_length=12000),
     keep_source_ambience: bool = Form(False),
@@ -548,9 +550,9 @@ async def create_video_voice_dub(
         resolve_voice_reference(VOICES, voice_id, MAX_VOICE)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    extension = Path(file.filename or "").suffix.lower()
-    if extension not in {".mp4", ".mov", ".mkv", ".webm"}:
-        raise HTTPException(415, "Use MP4, MOV, MKV or WebM video.")
+    source_job_id = source_job_id.strip()
+    if bool(file) == bool(source_job_id):
+        raise HTTPException(400, "Choose either an uploaded video or one completed Transform export.")
     if len(narration.strip()) < 2:
         raise HTTPException(400, "Enter the Hindi narration to be spoken.")
     from cpu_video_style import STYLE_MODELS
@@ -560,17 +562,49 @@ async def create_video_voice_dub(
         raise HTTPException(400, "Style intensity must be between 0.25 and 1.0.")
     if video_style != "none" and not cpu_video_style_ready(video_style):
         raise HTTPException(503, "The selected AI style model is not installed. Run scripts/install_video_style_models.py.")
+
     folder = UP / str(uuid.uuid4())
     folder.mkdir(parents=True, exist_ok=False)
-    target = folder / ("source" + extension)
-    size = 0
+    source_filename = ""
+    source_transform_job_id = ""
     try:
-        with target.open("xb") as output_file:
-            while chunk := await file.read(1024 * 1024):
-                size += len(chunk)
-                if size > MAX_UPLOAD:
-                    raise HTTPException(413, "Video upload exceeds the configured size limit.")
-                output_file.write(chunk)
+        if source_job_id:
+            source_job = getjob(source_job_id)
+            if (
+                not source_job or source_job.get("kind") != "video_transform"
+                or source_job.get("status") != "completed" or not source_job.get("output_path")
+            ):
+                raise HTTPException(404, "Choose a completed video from Transform history.")
+            source_path = Path(source_job["output_path"]).resolve()
+            if (
+                OUT.resolve() not in source_path.parents or not source_path.is_file()
+                or source_path.suffix.lower() not in {".mp4", ".mov", ".mkv", ".webm"}
+            ):
+                raise HTTPException(404, "The selected Transform export is no longer available.")
+            extension = source_path.suffix.lower()
+            size = source_path.stat().st_size
+            if size > MAX_UPLOAD:
+                raise HTTPException(413, "The selected Transform export exceeds the configured size limit.")
+            source_filename = Path(
+                source_job["payload"].get("source_filename") or source_path.name
+            ).name
+            source_transform_job_id = source_job_id
+            target = folder / ("source" + extension)
+            with source_path.open("rb") as source_file, target.open("xb") as output_file:
+                shutil.copyfileobj(source_file, output_file, length=1024 * 1024)
+        else:
+            extension = Path(file.filename or "").suffix.lower()
+            if extension not in {".mp4", ".mov", ".mkv", ".webm"}:
+                raise HTTPException(415, "Use MP4, MOV, MKV or WebM video.")
+            source_filename = Path(file.filename or ("source" + extension)).name
+            target = folder / ("source" + extension)
+            size = 0
+            with target.open("xb") as output_file:
+                while chunk := await file.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > MAX_UPLOAD:
+                        raise HTTPException(413, "Video upload exceeds the configured size limit.")
+                    output_file.write(chunk)
         probe = subprocess.run(
             ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(target)],
             check=True, capture_output=True, text=True, timeout=30,
@@ -590,7 +624,8 @@ async def create_video_voice_dub(
         shutil.rmtree(folder, ignore_errors=True)
         raise HTTPException(415, "The uploaded file is not a readable video.") from exc
     finally:
-        await file.close()
+        if file is not None:
+            await file.close()
     return enqueue(
         "video_voice_dub",
         {
@@ -601,6 +636,8 @@ async def create_video_voice_dub(
             "video_style": video_style,
             "style_strength": style_strength,
             "source_duration": duration,
+            "source_filename": source_filename,
+            "source_transform_job_id": source_transform_job_id,
         },
         str(target),
     )
@@ -800,27 +837,41 @@ def delete_job(job_id: str):
     return {"deleted": True, "job_id": job_id}
 
 
+def serialize_job_media_status(row):
+    item = dict(row)
+    item["payload"] = json.loads(item["payload"])
+    item["source_available"] = False
+    item["output_available"] = False
+    try:
+        if item["kind"] == "video_transform" and item["payload"].get("retain_source"):
+            source = Path(item.get("input_path") or "").resolve()
+            item["source_available"] = UP.resolve() in source.parents and source.is_file()
+        if item["status"] == "completed" and item.get("output_path"):
+            output_file = Path(item["output_path"]).resolve()
+            item["output_available"] = OUT.resolve() in output_file.parents and output_file.is_file()
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return item
+
+
 @app.get("/api/jobs")
 def jobs():
     with db() as conn:
         rows = conn.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT 100").fetchall()
-    result = []
-    for row in rows:
-        item = dict(row)
-        item["payload"] = json.loads(item["payload"])
-        item["source_available"] = False
-        item["output_available"] = False
-        try:
-            if item["kind"] == "video_transform" and item["payload"].get("retain_source"):
-                source = Path(item.get("input_path") or "").resolve()
-                item["source_available"] = UP.resolve() in source.parents and source.is_file()
-            if item["status"] == "completed" and item.get("output_path"):
-                output_file = Path(item["output_path"]).resolve()
-                item["output_available"] = OUT.resolve() in output_file.parents and output_file.is_file()
-        except (OSError, RuntimeError, ValueError):
-            pass
-        result.append(item)
-    return result
+    return [serialize_job_media_status(row) for row in rows]
+
+
+@app.get("/api/transform/history")
+def transform_history():
+    """Return every Transform export, not just the latest 100 mixed job records."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM jobs WHERE kind='video_transform' ORDER BY created_at DESC"
+        ).fetchall()
+    return [
+        serialize_job_media_status(row) for row in rows
+        if not json.loads(row["payload"]).get("scenes")
+    ]
 
 
 @app.get("/api/saved-projects")
@@ -2101,7 +2152,7 @@ def work(job):
         voice_id = payload.get("voice_id", "")
         update(job_id, stage="Generating Hindi speech with your saved voice", progress=8)
         narration_path = folder / "narration.wav"
-        synthesize_pocket_tts(
+        synthesize_pocket_tts_dialogue(
             payload["narration"],
             voice_id,
             VOICES,
