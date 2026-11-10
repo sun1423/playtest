@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
-from cpu_video_style import STYLE_MODELS, _square_frame, style_catalog
+from cpu_video_style import STYLE_MODELS, _square_frame, _video_duration, style_catalog
 
 
 class CpuVideoStyleTests(unittest.TestCase):
@@ -12,6 +12,10 @@ class CpuVideoStyleTests(unittest.TestCase):
         self.assertEqual(STYLE_MODELS["anime_512"]["size"], 512)
         for name in ("candy", "mosaic", "rain_princess", "udnie"):
             self.assertEqual(STYLE_MODELS[name]["size"], 224)
+
+    def test_video_style_duration_uses_video_stream_before_container(self):
+        video = {"duration": "N/A", "duration_ts": "1080000", "time_base": "1/90000"}
+        self.assertEqual(_video_duration(video, {"duration": "180.0"}), 12.0)
 
     def test_style_catalog_requires_runtime_dependencies(self):
         with tempfile.TemporaryDirectory() as directory:
