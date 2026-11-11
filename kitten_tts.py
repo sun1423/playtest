@@ -108,7 +108,7 @@ def engine_ready(
 
 def is_hindi_text(text: str) -> bool:
     """Detect Devanagari so Hindi gets its own safer multilingual sampling path."""
-    return any("\\u0900" <= char <= "\\u097f" for char in text)
+    return any("\u0900" <= char <= "\u097f" for char in text)
 
 
 def validate_text(text: str) -> str:
