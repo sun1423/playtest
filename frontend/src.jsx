@@ -1856,27 +1856,29 @@ function App() {
                   onChange={event => setVoicePreviewText(event.target.value)}
                   placeholder="Enter the text you want this voice profile to speak…"/>
               </label>
-              {ttsEngine === 'pocket' && <div className="voice-settings">
-                <label>TEMPERATURE · {Number(voiceGenerationSettings.temperature).toFixed(2)}
-                  <input type="range" min="0.05" max="1" step="0.05" value={voiceGenerationSettings.temperature}
-                    onChange={event => setVoiceGenerationSettings(current => ({...current,temperature:Number(event.target.value)}))}/>
-                </label>
-                <label>FLOW STEPS
-                  <select value={voiceGenerationSettings.flow_steps}
-                    onChange={event => setVoiceGenerationSettings(current => ({...current,flow_steps:Number(event.target.value)}))}>
-                    {[1,2,3,4,5,6,7,8].map(value => <option key={value} value={value}>{value}</option>)}
-                  </select>
-                </label>
-                <label>EOS THRESHOLD · {Number(voiceGenerationSettings.eos_threshold).toFixed(1)}
-                  <input type="range" min="-6" max="0" step="0.1" value={voiceGenerationSettings.eos_threshold}
-                    onChange={event => setVoiceGenerationSettings(current => ({...current,eos_threshold:Number(event.target.value)}))}/>
-                </label>
-                <label>SEED
-                  <input type="number" min="0" max="2147483647" step="1" value={voiceGenerationSettings.seed}
-                    onChange={event => setVoiceGenerationSettings(current => ({...current,seed:Number(event.target.value)}))}/>
-                </label>
-              </div>
-              <small className="voice-settings-note">CPU-safe defaults: INT8, two threads, temperature 0.30, one flow step, EOS −2.0 and seed 1. Only the four controls above are changed. Settings are stored with this profile and reused in Pocket TTS narration.</small>}
+              {ttsEngine === 'pocket' && <>
+                <div className="voice-settings">
+                  <label>TEMPERATURE · {Number(voiceGenerationSettings.temperature).toFixed(2)}
+                    <input type="range" min="0.05" max="1" step="0.05" value={voiceGenerationSettings.temperature}
+                      onChange={event => setVoiceGenerationSettings(current => ({...current,temperature:Number(event.target.value)}))}/>
+                  </label>
+                  <label>FLOW STEPS
+                    <select value={voiceGenerationSettings.flow_steps}
+                      onChange={event => setVoiceGenerationSettings(current => ({...current,flow_steps:Number(event.target.value)}))}>
+                      {[1,2,3,4,5,6,7,8].map(value => <option key={value} value={value}>{value}</option>)}
+                    </select>
+                  </label>
+                  <label>EOS THRESHOLD · {Number(voiceGenerationSettings.eos_threshold).toFixed(1)}
+                    <input type="range" min="-6" max="0" step="0.1" value={voiceGenerationSettings.eos_threshold}
+                      onChange={event => setVoiceGenerationSettings(current => ({...current,eos_threshold:Number(event.target.value)}))}/>
+                  </label>
+                  <label>SEED
+                    <input type="number" min="0" max="2147483647" step="1" value={voiceGenerationSettings.seed}
+                      onChange={event => setVoiceGenerationSettings(current => ({...current,seed:Number(event.target.value)}))}/>
+                  </label>
+                </div>
+                <small className="voice-settings-note">CPU-safe defaults: INT8, two threads, temperature 0.30, one flow step, EOS −2.0 and seed 1. Only the four controls above are changed. Settings are stored with this profile and reused in Pocket TTS narration.</small>
+              </>}
               <button type="button" className="primary" disabled={!activeTtsReady || !voiceProfileToTest || !voicePreviewText.trim() || voiceBusy}
                 onClick={generateVoicePreview}>{voiceBusy ? 'Generating sample…' : 'Generate voice sample'}</button>
               {!activeTtsReady && <small className="voice-warning">{ttsEngine === 'kitten' ? 'KittenTTS 2 is not installed/enabled on Azure.' : 'Pocket TTS Hindi is not enabled or its CPU model is not installed on Azure.'}</small>}
