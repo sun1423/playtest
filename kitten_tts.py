@@ -106,6 +106,11 @@ def engine_ready(
         return False
 
 
+def is_hindi_text(text: str) -> bool:
+    """Detect Devanagari so Hindi gets its own safer multilingual sampling path."""
+    return any("\\u0900" <= char <= "\\u097f" for char in text)
+
+
 def validate_text(text: str) -> str:
     """Keep recognised emotion, vocal-event and emphasis markup intact."""
     if not isinstance(text, str) or not text.strip():
@@ -329,6 +334,7 @@ def synthesize(
     threads: int = 2,
 ) -> float:
     text = validate_text(text)
+    hindi_text = is_hindi_text(text)
     reference = resolve_voice_reference(voices_dir, voice_id, max_voice_bytes)
     transcript = str((metadata or {}).get("transcript") or "").strip()
     destination = Path(destination).resolve()
@@ -351,12 +357,27 @@ def synthesize(
                 "--voice", voice_id,
                 "--threads", str(thread_count),
                 "--decoder-threads", str(thread_count),
-                "--preset", "expressive",
+                "--preset", "stable" if hindi_text else "expressive",
                 "--no-normalize",
                 "--no-repack",
                 "--output", str(float_output),
                 "--report", str(report_path),
             ]
+            if hindi_text:
+                # The saved reference supplies speaker identity. Its long audio/text
+                # prompt was destabilising Hindi pronunciation, so use timbre only.
+                command.extend([
+                    "--temperature", "0.8",
+                    "--top-k", "50",
+                    "--top-p", "0.85",
+                    "--repetition-penalty", "1.18",
+                    "--repetition-window", "50",
+                    "--run-penalty", "2.5",
+                    "--run-grace", "3",
+                    "--chunk-chars", "240",
+                    "--chunk-min-chars", "90",
+                    "--no-reference",
+                ])
             env = os.environ.copy()
             env["OMP_NUM_THREADS"] = str(thread_count)
             env["MKL_NUM_THREADS"] = str(thread_count)
@@ -376,11 +397,16 @@ def synthesize(
             if result.returncode != 0 or not float_output.is_file() or float_output.stat().st_size < 44:
                 detail = (result.stderr or result.stdout or "KittenTTS inference failed.").strip()
                 raise RuntimeError(f"KittenTTS 2 synthesis failed: {detail[-1600:]}")
+            audio_filter = (
+                "volume=5dB,alimiter=limit=0.89:attack=5:release=50:level=0"
+                if hindi_text else
+                "alimiter=limit=0.89:attack=5:release=50:level=0"
+            )
             subprocess.run(
                 [
                     "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
                     "-i", str(float_output),
-                    "-af", "alimiter=limit=0.89:attack=5:release=50:level=0",
+                    "-af", audio_filter,
                     "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le", "-threads", "1",
                     str(destination),
                 ],
