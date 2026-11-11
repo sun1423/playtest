@@ -63,15 +63,15 @@ def patch_native_cpu_sources() -> None:
 
     sampling_source = sampling_h.read_text(encoding="utf-8")
     if "#include <stdexcept>" not in sampling_source:
-        include_anchor = "#include <random>\\n"
+        include_anchor = "#include <random>\n"
         if include_anchor not in sampling_source:
             raise RuntimeError("Pinned Kitten source changed: cannot add sampler error handling.")
         sampling_source = sampling_source.replace(
-            include_anchor, include_anchor + "#include <stdexcept>\\n", 1
+            include_anchor, include_anchor + "#include <stdexcept>\n", 1
         )
     old_sampler = "        float peak=scores[order.back()]; double sum=0;"
     safe_sampler = (
-        '        if(order.empty()) throw std::runtime_error("no finite logits remain after top-k filtering");\\n'
+        '        if(order.empty()) throw std::runtime_error("no finite logits remain after top-k filtering");\n'
         "        float peak=scores[order.back()]; double sum=0;"
     )
     if safe_sampler not in sampling_source:
