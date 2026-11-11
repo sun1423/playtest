@@ -191,6 +191,72 @@ def _probe_pcm16_wav(path: Path) -> float:
     return duration
 
 
+
+def speech_gain_db(mean_db: float, peak_db: float) -> float:
+    """Raise quiet speech conservatively without compressing its dynamics."""
+    if not math.isfinite(mean_db) or not math.isfinite(peak_db):
+        return 0.0
+    requested_gain = max(0.0, -20.0 - mean_db)
+    peak_headroom = max(0.0, -3.0 - peak_db)
+    return round(min(9.0, requested_gain, peak_headroom), 2)
+
+
+def _measure_audio_levels(path: Path) -> tuple[float, float]:
+    """Measure generated speech mean/peak before choosing safe static gain."""
+    result = subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-nostats", "-i", str(path),
+            "-vn", "-af", "volumedetect", "-f", "null", "-",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    output = result.stderr or ""
+    mean_match = re.search(
+        r"mean_volume:\s*(-?(?:[0-9]+(?:\.[0-9]+)?|inf))\s*dB", output
+    )
+    peak_match = re.search(
+        r"max_volume:\s*(-?(?:[0-9]+(?:\.[0-9]+)?|inf))\s*dB", output
+    )
+    if not mean_match or not peak_match:
+        raise RuntimeError("Could not measure generated Hindi speech loudness.")
+    mean_text, peak_text = mean_match.group(1), peak_match.group(1)
+    mean_db = -90.0 if mean_text == "-inf" else (0.0 if mean_text == "inf" else float(mean_text))
+    peak_db = -90.0 if peak_text == "-inf" else (0.0 if peak_text == "inf" else float(peak_text))
+    return mean_db, peak_db
+
+
+def _apply_speech_gain(path: Path) -> None:
+    """Apply one gentle gain to the complete joined utterance, keeping 3 dB peak headroom."""
+    path = Path(path).resolve()
+    mean_db, peak_db = _measure_audio_levels(path)
+    gain_db = speech_gain_db(mean_db, peak_db)
+    if gain_db <= 0:
+        return
+    adjusted = path.with_name(f".{path.stem}.{uuid.uuid4().hex}.level.wav")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                "-i", str(path),
+                "-af", f"volume={gain_db:.2f}dB,alimiter=limit=0.89:attack=5:release=50:level=0",
+                "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le", "-threads", "1",
+                str(adjusted),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if not adjusted.is_file() or adjusted.stat().st_size < 44:
+            raise RuntimeError("Hindi speech loudness adjustment failed.")
+        os.replace(adjusted, path)
+    finally:
+        adjusted.unlink(missing_ok=True)
+
+
 def synthesize(
     text: str,
     voice_id: str,
@@ -200,6 +266,7 @@ def synthesize(
     max_voice_bytes: int,
     binary_path: Path | None = None,
     settings: dict | None = None,
+    normalize_loudness: bool = True,
 ) -> float:
     """Generate and safely normalize a mono 24 kHz PCM16 WAV using CPU-only ONNX."""
     reference = resolve_voice_reference(voices_dir, voice_id, max_voice_bytes)
@@ -227,12 +294,19 @@ def synthesize(
             raise RuntimeError("Hindi narration exceeded the 15-minute safety limit.") from exc
         if result.returncode != 0 or not float_output.is_file() or float_output.stat().st_size < 44:
             raise RuntimeError("Pocket TTS Hindi failed to generate a valid audio file.")
+        audio_filters = []
+        if normalize_loudness:
+            mean_db, peak_db = _measure_audio_levels(float_output)
+            gain_db = speech_gain_db(mean_db, peak_db)
+            if gain_db > 0:
+                audio_filters.append(f"volume={gain_db:.2f}dB")
+        audio_filters.append("alimiter=limit=0.89:attack=5:release=50:level=0")
         try:
             subprocess.run(
                 [
                     "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
                     "-i", str(float_output),
-                    "-af", "alimiter=limit=0.89:attack=5:release=50:level=0",
+                    "-af", ",".join(audio_filters),
                     "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le", "-threads", "1",
                     str(destination),
                 ],
@@ -254,102 +328,59 @@ def synthesize(
 
 
 def normalize_dialogue_text(text: str) -> str:
-    """Keep Hindi speech and useful prosody punctuation; discard markup/control noise."""
+    """Return plain Hindi words; this model does not learn punctuation-based prosody."""
     if not isinstance(text, str) or not text.strip() or len(text) > 12000:
         raise ValueError("Hindi dialogue must contain 1–12,000 characters.")
     value = unicodedata.normalize("NFC", text).replace("\r\n", "\n").replace("\r", "\n")
     value = re.sub(r"[\u200b-\u200f\u202a-\u202e\u2060\ufeff]", "", value)
     value = re.sub(r"(?m)^\s*(?:[-*•]+|\d+[.)])\s+", "", value)
-    value = re.sub(r"[*_#~]+", "", value)
-    value = re.sub(r"(?:\.{2,}|…+)", "।", value).replace("॥", "।")
-    value = re.sub(r"[;；:：]+", ",", value)
-    value = re.sub(r"[—–−]+", "।", value)
+    # Bracketed stage directions/emotion tags are not spoken dialogue.
+    value = re.sub(r"\[[^\]\n]{1,100}\]", " ", value)
+    value = re.sub(r"<[^>\n]{1,100}>", " ", value)
 
-    paragraphs = []
-    for block in re.split(r"\n\s*\n+", value):
-        lines = []
-        for line in block.split("\n"):
-            cleaned = []
-            for char in line:
-                category = unicodedata.category(char)
-                if char.isspace():
-                    cleaned.append(" ")
-                elif category[0] in {"L", "M", "N"} or char in "।,.!?":
-                    cleaned.append(char)
-                else:
-                    # Emoji, brackets, symbols and hidden controls are not TTS words.
-                    cleaned.append(" ")
-            line = "".join(cleaned)
-            line = re.sub(r"\s+([,।.!?])", r"\1", line)
-            line = re.sub(r"([,।.!?])(?=\S)", r"\1 ", line)
-            line = re.sub(r"\s+", " ", line).strip()
-            line = re.sub(r",+", ",", line)
-            line = re.sub(r"[!?]{2,}", lambda match: "?" if "?" in match.group() else "!", line)
-            line = re.sub(r"[।.]{2,}", "।", line)
-            if not any(unicodedata.category(char)[0] in {"L", "N"} for char in line):
-                continue
-            if not re.search(r"[।.!?]$", line):
-                line += "।"
-            if line:
-                lines.append(line)
-        paragraph = " ".join(lines).strip()
-        paragraph = re.sub(r"\s+", " ", paragraph).strip()
-        if paragraph:
-            paragraphs.append(paragraph)
-    if not paragraphs:
+    # Keep Unicode letters, combining marks and digits only. Punctuation,
+    # emoji and decorative symbols become word separators, not TTS tokens.
+    cleaned = []
+    for char in value:
+        category = unicodedata.category(char)
+        if char.isspace():
+            cleaned.append(" ")
+        elif category[0] in {"L", "M", "N"}:
+            cleaned.append(char)
+        else:
+            cleaned.append(" ")
+    normalized = re.sub(r"\s+", " ", "".join(cleaned)).strip()
+    if not any(unicodedata.category(char)[0] in {"L", "N"} for char in normalized):
         raise ValueError("Enter Hindi dialogue containing speakable words; symbols alone are not narration.")
-    return "\n\n".join(paragraphs)
+    return normalized
 
 
-def split_dialogue_chunks(text: str, max_chars: int = 700) -> list[tuple[str, float]]:
-    """Split at sentence/paragraph boundaries and return a natural pause after each chunk."""
+def split_dialogue_chunks(text: str, max_chars: int = 1200) -> list[tuple[str, float]]:
+    """Split only at word boundaries; punctuation never creates separate TTS utterances."""
     if not 100 <= max_chars <= 1200:
         raise ValueError("Dialogue chunk size must be between 100 and 1,200 characters.")
     normalized = normalize_dialogue_text(text)
+    words = normalized.split()
+    if any(len(word) > max_chars for word in words):
+        raise ValueError("A single uninterrupted word exceeds the speech chunk limit; add a space at a natural word boundary.")
     chunks: list[tuple[str, float]] = []
-    for paragraph in normalized.split("\n\n"):
-        sentences = re.split(r"(?<=[।.!?])\s+", paragraph)
-        current = ""
+    current = ""
 
-        def flush(pause: float) -> None:
-            nonlocal current
-            if current.strip():
-                chunks.append((current.strip(), pause))
-                current = ""
+    def flush() -> None:
+        nonlocal current
+        if current:
+            chunks.append((current, 0.18))
+            current = ""
 
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if not sentence:
-                continue
-            if len(sentence) > max_chars:
-                for word in sentence.split():
-                    if len(word) > max_chars:
-                        if current:
-                            flush(0.12)
-                        for offset in range(0, len(word), max_chars):
-                            part = word[offset:offset + max_chars]
-                            if offset + max_chars < len(word):
-                                chunks.append((part, 0.12))
-                            else:
-                                current = part
-                        continue
-                    candidate = (current + " " + word).strip()
-                    if len(candidate) > max_chars:
-                        flush(0.12)
-                        current = word
-                    else:
-                        current = candidate
-                flush(0.18)
-                continue
-            candidate = (current + " " + sentence).strip()
-            if len(candidate) > max_chars:
-                flush(0.18)
-                current = sentence
-            else:
-                current = candidate
-        flush(0.38)
-    if chunks:
-        chunks[-1] = (chunks[-1][0], 0.0)
+    for word in words:
+        candidate = (current + " " + word).strip()
+        if current and len(candidate) > max_chars:
+            flush()
+            current = word
+        else:
+            current = candidate
+    if current:
+        chunks.append((current, 0.0))
     return chunks
 
 
@@ -381,6 +412,7 @@ def synthesize_dialogue(
                 synthesize(
                     chunk, voice_id, voices_dir, model_root, part,
                     max_voice_bytes, binary_path, settings,
+                    normalize_loudness=False,
                 )
             except Exception as exc:
                 raise RuntimeError(f"Hindi dialogue part {index}/{len(chunks)} failed: {exc}") from exc
@@ -399,6 +431,7 @@ def synthesize_dialogue(
                 silence_frames = int(round(24000 * pause_after))
                 if silence_frames:
                     output.writeframes(silence * silence_frames)
+        _apply_speech_gain(destination)
         return _probe_pcm16_wav(destination)
     except Exception:
         destination.unlink(missing_ok=True)

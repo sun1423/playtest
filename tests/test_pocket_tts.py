@@ -1,4 +1,5 @@
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -39,24 +40,35 @@ class PocketTtsTests(unittest.TestCase):
         return path
 
 
-    def test_dialogue_normalization_preserves_prosody_and_removes_markup_noise(self):
+    def test_dialogue_normalization_removes_punctuation_and_markup_noise(self):
         text = normalize_dialogue_text(
-            "नमस्ते!!!\nआप कैसे हैं???\n\n**मैं ठीक हूँ…** 😊"
+            "नमस्ते!!!\nआप कैसे हैं???\n\n**मैं ठीक हूँ…** 😊 [angry] <laugh>"
         )
-        self.assertIn("नमस्ते!", text)
-        self.assertIn("आप कैसे हैं?", text)
-        self.assertIn("मैं ठीक हूँ।", text)
+        self.assertEqual(text, "नमस्ते आप कैसे हैं मैं ठीक हूँ")
+        self.assertNotRegex(text, r"[,।.!?;:—–…]")
         self.assertNotIn("😊", text)
-        self.assertNotIn("**", text)
-        self.assertIn("\n\n", text)
+        self.assertNotIn("angry", text)
+        self.assertNotIn("laugh", text)
 
-    def test_dialogue_chunking_keeps_chunks_bounded_and_paragraph_pauses(self):
+    def test_punctuation_does_not_split_short_dialogue_into_separate_utterances(self):
+        chunks = split_dialogue_chunks("नमस्ते!!! आप कैसे हैं? मैं ठीक हूँ…")
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0], ("नमस्ते आप कैसे हैं मैं ठीक हूँ", 0.0))
+
+    def test_dialogue_chunking_keeps_chunks_bounded_and_splits_only_at_words(self):
         source = ("यह एक वाक्य है। " * 90) + "\n\n" + ("दूसरा पैराग्राफ है। " * 30)
         chunks = split_dialogue_chunks(source, max_chars=180)
         self.assertGreater(len(chunks), 2)
         self.assertTrue(all(0 < len(chunk) <= 180 for chunk, _ in chunks))
         self.assertEqual(chunks[-1][1], 0.0)
-        self.assertTrue(any(pause >= 0.38 for _, pause in chunks[:-1]))
+        self.assertTrue(all(not re.search(r"[,।.!?;:]", chunk) for chunk, _ in chunks))
+        self.assertTrue(all(pause == 0.18 for _, pause in chunks[:-1]))
+
+    def test_speech_gain_raises_quiet_audio_without_exceeding_peak_headroom(self):
+        from pocket_tts import speech_gain_db
+        self.assertEqual(speech_gain_db(-28.5, -11.4), 8.4)
+        self.assertEqual(speech_gain_db(-28.5, -2.0), 0.0)
+        self.assertEqual(speech_gain_db(-18.0, -8.0), 0.0)
 
     def test_dialogue_normalization_rejects_symbols_without_speech(self):
         with self.assertRaises(ValueError):

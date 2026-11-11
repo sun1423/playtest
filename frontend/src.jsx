@@ -10,11 +10,7 @@ function estimateHindiSpeechSeconds(value) {
   const narration = String(value || '').trim();
   if (!narration) return 0;
   const words = narration.split(/\s+/u).filter(Boolean).length;
-  const sentencePauses = (narration.match(/[।.!?！？]+/gu) || []).length;
-  const phrasePauses = (narration.match(/[,，;；:：]/gu) || []).length;
-  const paragraphPauses = (narration.match(/\n+/g) || []).length;
-  // Conservative planning estimate: 100 words/minute plus short punctuation pauses.
-  return words / (100 / 60) + sentencePauses * 0.35 + phrasePauses * 0.15 + paragraphPauses * 0.2;
+  return words / (100 / 60);
 }
 
 function formatTrimTime(value) {
@@ -1443,9 +1439,9 @@ function App() {
             {!voices.length && <button type="button" className="secondary" onClick={() => setTab('voice')}>Open Voice Studio to save a WAV profile</button>}
             <label>NEW HINDI DIALOGUE
               <textarea rows="6" maxLength="12000" value={dubNarration} onChange={event => setDubNarration(event.target.value)}
-                placeholder="Enter the exact Hindi words your on-screen speaker should say. Punctuation and blank lines guide natural pauses and intonation…" required/>
+                placeholder="Enter the exact Hindi words your on-screen speaker should say. Use plain Hindi words for the cleanest speech…" required/>
             </label>
-            <small className="dub-prosody-note">Comma = short pause · । or . = sentence ending · ? = question intonation · ! = emphasis · blank line = longer pause. Decorative symbols and markup are removed. Pocket TTS does not currently support explicit emotion tags such as [angry] or [sad].</small>
+            <small className="dub-prosody-note">For cleaner Hindi speech, use plain words without punctuation or decorative symbols. This Pocket TTS model was trained without meaningful punctuation coverage: marks do not reliably control pauses, intonation or emotion, so they are removed before synthesis. Emotion tags such as [angry] or [sad] are not supported.</small>
             <div className={'dub-length-meter' + (dubSpeechOverLimit ? ' over-limit' : '')}>
               <div className="dub-length-heading">
                 <b>LIVE SPEECH LENGTH ESTIMATE</b>
@@ -1465,7 +1461,7 @@ function App() {
                       : 'Start typing to see the estimated speech length and remaining allowance.'}
                 </small>
               </> : <small className="dub-length-guidance">Choose a video and let its preview load to calculate the maximum speech length (video duration + 20%).</small>}
-              <small className="dub-length-footnote">Estimate uses approximately 100 words/minute plus punctuation pauses. Pocket TTS output can vary; the renderer still checks the exact generated audio duration.</small>
+              <small className="dub-length-footnote">Estimate uses approximately 100 words/minute. Punctuation is removed before synthesis; Pocket TTS output can vary, so the renderer checks the actual generated duration.</small>
             </div>
             <label className="dub-checkbox"><input type="checkbox" checked={dubKeepAmbience} onChange={event => setDubKeepAmbience(event.target.checked)}/>
               Keep original background ambience quietly under the new voice (original dialogue may also remain audible)
@@ -1592,7 +1588,7 @@ function App() {
               </div>
               <label>HINDI VOICE-OVER SCRIPT
                 <textarea rows="6" maxLength="12000" value={voiceOverNarration} onChange={event => setVoiceOverNarration(event.target.value)} placeholder="यहाँ अपनी हिंदी narration लिखें…" required/>
-                <small className="voice-over-help">Punctuation and paragraph breaks guide pauses and intonation. Speech is never silently trimmed; narration must fit within the remaining video duration.</small>
+                <small className="voice-over-help">Use plain Hindi words for the cleanest vocal. Punctuation, emoji and decorative symbols are removed before synthesis; they do not control emotion or intonation in this model. Speech is never silently trimmed and must fit within the remaining video duration.</small>
               </label>
               <label className="voice-over-checkbox">
                 <input type="checkbox" checked={voiceOverKeepOriginal} onChange={event => setVoiceOverKeepOriginal(event.target.checked)}/>

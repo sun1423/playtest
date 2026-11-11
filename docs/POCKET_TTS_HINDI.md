@@ -44,7 +44,7 @@ An isolated FFmpeg storyboard smoke test then mixed that long narration under a 
 
 A seed sweep with the random/default seed produced 3.84–13.68 seconds for the same short text, so production synthesis now pins seed `1` and EOS `-2.0` to avoid that duration instability. This is a deterministic operating point validated on one saved WAV, not a universal claim about all voices or scripts.
 
-The custom-WAV check proves that this WAV is accepted for conditioning and that audio is generated. It does **not** establish speaker similarity or pronunciation quality: a person must listen to the output and compare it with the reference before using it in a published video. The model is research-grade and has known weaker cases including very short isolated utterances, punctuation-heavy text, numbers, and Latin-script content. Prefer clear, plain Hindi script.
+The custom-WAV check proves that this WAV is accepted for conditioning and that audio is generated. It does **not** establish speaker similarity or pronunciation quality: a person must listen to the output and compare it with the reference before using it in a published video. The model is research-grade and has known weaker cases including very short isolated utterances, punctuation-heavy text, numbers, and Latin-script content. Its training data had effectively no punctuation coverage, so the Studio removes punctuation and decorative characters before synthesis and splits long text only at word boundaries. Prefer clear, plain Hindi script.
 
 ## Model and runtime provenance
 
@@ -137,7 +137,7 @@ Each profile stores temperature, flow steps, EOS threshold and seed in a sidecar
 - Standalone narration: Create Video → Hindi text → saved WAV profile → Generate Hindi narration.
 - Storyboard video: create/edit scenes and attach images, then enable **Add Hindi voiceover from the scene narration** and select a saved profile. The exact editable scene narration is synthesized using that profile's settings.
 - Optional background music is mixed below the narration. The output duration extends by cloning the final video frame if narration runs longer than the storyboard. Shorter narration is padded with silence to the video duration.
-- The generated float WAV is limited with FFmpeg (`level=0`, no auto-makeup), then normalized to mono 24 kHz PCM16 before muxing. The final voice/music mix is limited before AAC encoding.
+- The generated float WAV is measured with FFmpeg; quiet speech receives conservative static gain toward a -20 dBFS mean target, capped by -3 dBFS peak headroom and +9 dB maximum gain. This preserves dynamics without compression or auto-makeup. A peak limiter remains as a safety ceiling, then audio is normalized to mono 24 kHz PCM16 before muxing.
 
 Use only voice recordings you have permission to use. The WAV stays on your Studio server; the transcription model is downloaded once to that server and inference is local.
 

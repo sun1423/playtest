@@ -89,9 +89,9 @@ MuseTalk 1.5 was also evaluated. Its DWPose landmark pass measured about 6.5 sec
 
 ## Lip-sync dialogue text handling
 
-The AI Video · Lip Sync dialogue field keeps Hindi letters, numbers and useful speech punctuation. It removes emoji, hidden formatting marks and decorative markup before sending text to Pocket TTS. Line breaks become sentence pauses; blank lines create longer paragraph pauses. Commas, sentence endings, questions and emphasis marks remain as prosody cues. Long dialogue is split on sentence/word boundaries, generated in bounded sections and joined with controlled silence so one oversized native TTS request is not used.
+The AI Video · Lip Sync and Transform Voice-over fields keep Hindi letters, numbers and words, while removing punctuation, emoji, hidden formatting marks and decorative symbols before Pocket TTS. The Hindi model was trained with effectively no punctuation coverage, so punctuation is not a reliable pause, intonation or emotion control. Long text is split only at word boundaries into bounded sections; a short controlled pause is inserted between sections, not between every punctuation mark.
 
-Pocket TTS Hindi does not expose explicit semantic emotion labels such as [angry] or [sad]. Punctuation can guide timing and intonation, but it cannot reliably command a specific emotion. The renderer still checks the duration of the final generated WAV against the video limit.
+Pocket TTS Hindi does not expose explicit semantic emotion labels such as [angry] or [sad]. Do not include punctuation or stage directions expecting them to control emotion; write only the words that should be spoken. The renderer still checks the duration of the final generated WAV against the video limit.
 
 
 ## Voice-over without lip-sync
