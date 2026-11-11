@@ -27,6 +27,9 @@ from pocket_tts import (
 )
 from pocket_tts import synthesize as synthesize_pocket_tts
 from pocket_tts import synthesize_dialogue as synthesize_pocket_tts_dialogue
+from kitten_tts import engine_ready as kitten_tts_engine_ready
+from kitten_tts import synthesize as synthesize_kitten_tts
+from kitten_tts import remove_voice_profile as remove_kitten_voice_profile
 from voice_profile import prepare_voice_audio, probe_audio, transcribe_hindi
 from voice_reference import analyze_pcm16, decode_pcm16
 
@@ -95,6 +98,27 @@ POCKET_TTS_HINDI_BINARY = Path(
         str(POCKET_TTS_HINDI_ROOT / "onnx" / "runtime" / "pocket-tts"),
     )
 ).expanduser().resolve()
+ENABLE_KITTEN_TTS = os.getenv("ENABLE_KITTEN_TTS", "0") == "1"
+KITTEN_TTS_MODEL_ROOT = Path(os.getenv("KITTEN_TTS_MODEL_ROOT", str(ROOT / "models" / "kitten-tts-2"))).expanduser().resolve()
+KITTEN_TTS_BINARY = Path(os.getenv("KITTEN_TTS_BINARY", "/opt/kitten-tts-2-cpp/build/bin/kitten-tts")).expanduser().resolve()
+KITTEN_TTS_PREP_PYTHON = Path(os.getenv("KITTEN_TTS_PREP_PYTHON", "/opt/kitten-tts-prep-venv/bin/python")).expanduser().resolve()
+KITTEN_TTS_PREP_SCRIPT = Path(os.getenv("KITTEN_TTS_PREP_SCRIPT", "/opt/kitten-tts-2-cpp/tools/kitten-tts/prepare_reference.py")).expanduser().resolve()
+KITTEN_TTS_PYTHON_PACKAGE = Path(os.getenv("KITTEN_TTS_PYTHON_PACKAGE", "/opt/KittenTTS")).expanduser().resolve()
+KITTEN_TTS_PROFILE_ROOT = Path(os.getenv("KITTEN_TTS_PROFILE_ROOT", str(ROOT / "models" / "kitten-tts-2-profiles"))).expanduser().resolve()
+KITTEN_TTS_TORCH_LIB = Path(os.getenv("KITTEN_TTS_TORCH_LIB", "/opt/kitten-tts-prep-venv/lib/python3.12/site-packages/torch/lib")).expanduser().resolve()
+KITTEN_TTS_HF_HOME = Path(os.getenv("KITTEN_TTS_HF_HOME", str(ROOT / "models" / "kitten-tts-2-hf-cache"))).expanduser().resolve()
+KITTEN_TTS_DECODER = os.getenv("KITTEN_TTS_DECODER", "default")
+try:
+    KITTEN_TTS_MODEL_REVISION = os.getenv("KITTEN_TTS_MODEL_REVISION", (KITTEN_TTS_MODEL_ROOT / ".download_revision").read_text(encoding="utf-8").strip())
+except OSError:
+    KITTEN_TTS_MODEL_REVISION = os.getenv("KITTEN_TTS_MODEL_REVISION", "main")
+try:
+    KITTEN_TTS_THREADS = max(1, min(int(os.getenv("KITTEN_TTS_THREADS", "2")), 2))
+except ValueError:
+    KITTEN_TTS_THREADS = 2
+TTS_DEFAULT_ENGINE = os.getenv("TTS_DEFAULT_ENGINE", "pocket")
+if TTS_DEFAULT_ENGINE not in {"pocket", "kitten"}:
+    TTS_DEFAULT_ENGINE = "pocket"
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "0") == "1"
@@ -255,6 +279,44 @@ def pull_state():
 def tts_runtime_ready():
     return pocket_tts_engine_ready(
         ENABLE_TTS, POCKET_TTS_HINDI_ROOT, POCKET_TTS_HINDI_BINARY
+    )
+
+
+def tts_engine_ready(engine: str = "pocket") -> bool:
+    if engine == "pocket":
+        return tts_runtime_ready()
+    if engine == "kitten":
+        return kitten_tts_engine_ready(
+            ENABLE_KITTEN_TTS, KITTEN_TTS_BINARY, KITTEN_TTS_MODEL_ROOT,
+            KITTEN_TTS_PREP_PYTHON, KITTEN_TTS_PREP_SCRIPT,
+            KITTEN_TTS_PYTHON_PACKAGE, KITTEN_TTS_DECODER, KITTEN_TTS_TORCH_LIB,
+        )
+    return False
+
+
+def synthesize_tts(
+    text: str, voice_id: str, destination: Path, engine: str = "pocket",
+    dialogue: bool = False, settings: dict | None = None,
+) -> float:
+    if not tts_engine_ready(engine):
+        raise RuntimeError(f"The selected speech engine ({engine}) is not enabled or installed.")
+    if engine == "kitten":
+        return synthesize_kitten_tts(
+            text, voice_id, VOICES, KITTEN_TTS_MODEL_ROOT, destination,
+            MAX_VOICE, _read_voice_metadata(voice_id), KITTEN_TTS_BINARY,
+            KITTEN_TTS_PREP_PYTHON, KITTEN_TTS_PREP_SCRIPT,
+            KITTEN_TTS_PYTHON_PACKAGE, KITTEN_TTS_PROFILE_ROOT,
+            KITTEN_TTS_TORCH_LIB, KITTEN_TTS_DECODER,
+            KITTEN_TTS_MODEL_REVISION, KITTEN_TTS_THREADS,
+        )
+    if dialogue:
+        return synthesize_pocket_tts_dialogue(
+            text, voice_id, VOICES, POCKET_TTS_HINDI_ROOT, destination,
+            MAX_VOICE, POCKET_TTS_HINDI_BINARY, settings,
+        )
+    return synthesize_pocket_tts(
+        text, voice_id, VOICES, POCKET_TTS_HINDI_ROOT, destination,
+        MAX_VOICE, POCKET_TTS_HINDI_BINARY, settings,
     )
 
 
@@ -449,11 +511,13 @@ class TTS(BaseModel):
     text: str = Field(min_length=1, max_length=12000)
     language: str = Field(default="hi", pattern="^hi$")
     voice_id: str = Field(min_length=1, max_length=48)
+    engine: str = Field(default="pocket", pattern="^(pocket|kitten)$")
 
 
 class ScriptAudioRequest(BaseModel):
     text: str = Field(min_length=1, max_length=100000)
     voice_id: str = Field(min_length=1, max_length=48)
+    engine: str = Field(default="pocket", pattern="^(pocket|kitten)$")
 
 
 class ModelNameRequest(BaseModel):
@@ -467,6 +531,7 @@ class ModelTestRequest(BaseModel):
 class VoicePreviewRequest(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
     settings: dict | None = None
+    engine: str = Field(default="pocket", pattern="^(pocket|kitten)$")
 
 
 class StoryboardRequest(BaseModel):
@@ -494,14 +559,23 @@ def startup():
 @app.get("/api/health")
 def health():
     tts_ready = tts_runtime_ready()
+    kitten_ready = tts_engine_ready("kitten")
     return {
         "ok": True,
         "execution": "Azure server",
         "queue": "SQLite",
         "worker": "separate process",
         "tts_ready": tts_ready,
-        "tts_languages": ["hi"] if tts_ready else [],
-        "tts_engine": "Pocket TTS Hindi · CPU/ONNX" if tts_ready else "disabled",
+        "tts_languages": ["hi"] if (tts_ready or kitten_ready) else [],
+        "tts_engine": (
+            "Pocket TTS Hindi · CPU/ONNX" if tts_ready
+            else "KittenTTS 2 · CPU/C++" if kitten_ready else "disabled"
+        ),
+        "tts_default_engine": TTS_DEFAULT_ENGINE,
+        "tts_engines": {
+            "pocket": {"ready": tts_ready, "name": "Pocket TTS Hindi · CPU/ONNX"},
+            "kitten": {"ready": kitten_ready, "name": "KittenTTS 2 · CPU/C++"},
+        },
         "video_transform_ready": True,
         "authentication": True,
     }
@@ -545,9 +619,10 @@ async def create_video_voice_dub(
     keep_source_ambience: bool = Form(False),
     video_style: str = Form("anime_512"),
     style_strength: float = Form(0.85),
+    engine: str = Form("pocket"),
 ):
-    if not tts_runtime_ready():
-        raise HTTPException(503, "Pocket TTS Hindi is not enabled or its CPU model is unavailable.")
+    if not tts_engine_ready(engine):
+        raise HTTPException(503, f"The selected speech engine ({engine}) is not enabled or installed.")
     if not cpu_lipsync_ready():
         raise HTTPException(503, "CPU lip-sync is not installed. Install requirements.txt and run scripts/install_cpu_lipsync.py.")
     try:
@@ -635,6 +710,7 @@ async def create_video_voice_dub(
         {
             "voice_id": voice_id,
             "narration": narration.strip(),
+            "engine": engine,
             "generation_settings": load_voice_generation_settings(voice_id),
             "keep_source_ambience": bool(keep_source_ambience),
             "video_style": video_style,
@@ -656,9 +732,10 @@ def make_voice_over_payload(
     voice_volume: float,
     source_filename: str,
     source_transform_job_id: str = "",
+    engine: str = "pocket",
 ) -> dict:
-    if not tts_runtime_ready():
-        raise HTTPException(503, "Pocket TTS Hindi is not enabled or its CPU model is unavailable.")
+    if not tts_engine_ready(engine):
+        raise HTTPException(503, f"The selected speech engine ({engine}) is not enabled or installed.")
     try:
         resolve_voice_reference(VOICES, voice_id, MAX_VOICE)
     except ValueError as exc:
@@ -678,6 +755,7 @@ def make_voice_over_payload(
         "retain_source": True,
         "voice_id": voice_id,
         "narration": narration.strip(),
+        "engine": engine,
         "generation_settings": load_voice_generation_settings(voice_id),
         "start_offset": float(start_offset),
         "keep_original_audio": bool(keep_original_audio),
@@ -696,6 +774,7 @@ async def create_video_voice_over(
     keep_original_audio: bool = Form(True),
     original_volume: float = Form(0.25),
     voice_volume: float = Form(1.0),
+    engine: str = Form("pocket"),
 ):
     source_job_id = source_job_id.strip()
     if bool(file) == bool(source_job_id):
@@ -768,6 +847,7 @@ async def create_video_voice_over(
         payload = make_voice_over_payload(
             voice_id, narration, start_offset, keep_original_audio,
             original_volume, voice_volume, source_filename, source_transform_job_id,
+            engine,
         )
         payload["source_duration"] = duration
         result = enqueue("video_voice_over", payload, str(target))
@@ -793,6 +873,7 @@ def rerun_video_voice_over(
     keep_original_audio: bool = Form(True),
     original_volume: float = Form(0.25),
     voice_volume: float = Form(1.0),
+    engine: str = Form("pocket"),
 ):
     original = getjob(job_id)
     if not original or original.get("kind") != "video_voice_over":
@@ -810,6 +891,7 @@ def rerun_video_voice_over(
         original_volume, voice_volume,
         original["payload"].get("source_filename") or old_source.name,
         original["payload"].get("source_transform_job_id") or "",
+        engine,
     )
     folder = UP / str(uuid.uuid4())
     folder.mkdir(parents=True, exist_ok=False)
@@ -1440,8 +1522,8 @@ def create_storyboard(request: StoryboardRequest):
 
 @app.post("/api/tts")
 def tts(payload: TTS):
-    if not tts_runtime_ready():
-        raise HTTPException(503, "Hindi narration is disabled or the Pocket TTS CPU model is not installed.")
+    if not tts_engine_ready(payload.engine):
+        raise HTTPException(503, f"The selected speech engine ({payload.engine}) is not enabled or installed.")
     try:
         resolve_voice_reference(VOICES, payload.voice_id, MAX_VOICE)
     except ValueError as exc:
@@ -1453,8 +1535,8 @@ def tts(payload: TTS):
 
 @app.post("/api/tts/script")
 def create_script_audio(payload: ScriptAudioRequest):
-    if not tts_runtime_ready():
-        raise HTTPException(503, "Hindi narration is disabled or the Pocket TTS CPU model is not installed.")
+    if not tts_engine_ready(payload.engine):
+        raise HTTPException(503, f"The selected speech engine ({payload.engine}) is not enabled or installed.")
     try:
         resolve_voice_reference(VOICES, payload.voice_id, MAX_VOICE)
     except ValueError as exc:
@@ -1902,6 +1984,7 @@ async def render_storyboard(
     narration_text: str = Form("", max_length=12000),
     narration_voice_id: str = Form(""),
     narration_language: str = Form("hi"),
+    narration_engine: str = Form("pocket"),
 ):
     narration_text = narration_text.strip()
     narration_voice_id = narration_voice_id.strip()
@@ -1909,9 +1992,9 @@ async def render_storyboard(
         if not narration_text or not narration_voice_id:
             raise HTTPException(400, "Choose a saved voice profile and provide storyboard narration together.")
         if narration_language != "hi":
-            raise HTTPException(400, "Pocket TTS currently supports Hindi narration only.")
-        if not tts_runtime_ready():
-            raise HTTPException(503, "Hindi narration is disabled or the Pocket TTS CPU model is not installed.")
+            raise HTTPException(400, "The selected CPU speech engine currently supports Hindi narration only.")
+        if not tts_engine_ready(narration_engine):
+            raise HTTPException(503, f"The selected speech engine ({narration_engine}) is not enabled or installed.")
         try:
             resolve_voice_reference(VOICES, narration_voice_id, MAX_VOICE)
         except ValueError as exc:
@@ -1999,6 +2082,7 @@ async def render_storyboard(
         "narration_text": narration_text,
         "narration_voice_id": narration_voice_id,
         "narration_language": narration_language if narration_text else "",
+        "narration_engine": narration_engine if narration_text else "pocket",
     }
     return enqueue("video_transform", payload, saved[0]["image_path"])
 
@@ -2128,13 +2212,16 @@ async def save_prepared_voice(
 
 @app.post("/api/voices/{voice_id}/preview")
 async def preview_voice(voice_id: str, payload: VoicePreviewRequest):
-    if not tts_runtime_ready():
-        raise HTTPException(503, "Hindi narration is disabled or the Pocket TTS CPU model is not installed.")
+    if not tts_engine_ready(payload.engine):
+        raise HTTPException(503, f"The selected speech engine ({payload.engine}) is not enabled or installed.")
     try:
         resolve_voice_reference(VOICES, voice_id, MAX_VOICE)
-        settings = normalize_generation_settings(
-            payload.settings if payload.settings is not None
-            else load_voice_generation_settings(voice_id)
+        settings = (
+            normalize_generation_settings(
+                payload.settings if payload.settings is not None
+                else load_voice_generation_settings(voice_id)
+            )
+            if payload.engine == "pocket" else load_voice_generation_settings(voice_id)
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -2142,23 +2229,30 @@ async def preview_voice(voice_id: str, payload: VoicePreviewRequest):
     destination = VOICE_PREVIEWS / f"{preview_id}.wav"
     try:
         duration = await run_in_threadpool(
-            synthesize_pocket_tts, payload.text, voice_id, VOICES,
-            POCKET_TTS_HINDI_ROOT, destination, MAX_VOICE,
-            POCKET_TTS_HINDI_BINARY, settings,
+            synthesize_tts, payload.text, voice_id, destination,
+            payload.engine, False, settings,
         )
     except Exception as exc:
         destination.unlink(missing_ok=True)
         raise HTTPException(500, str(exc)) from exc
     metadata = _read_voice_metadata(voice_id)
     metadata.update({
-        "generation_settings": settings,
+        "last_preview_engine": payload.engine,
         "last_preview_id": preview_id,
         "last_preview_at": stamp(),
-        "conditioning_initialized": (
-            (VOICES / ".cache" / f"{voice_id}.emb").is_file()
-            or (VOICES / ".cache" / f"{voice_id}.kv").is_file()
-        ),
     })
+    if payload.engine == "pocket":
+        metadata.update({
+            "generation_settings": settings,
+            "conditioning_initialized": (
+                (VOICES / ".cache" / f"{voice_id}.emb").is_file()
+                or (VOICES / ".cache" / f"{voice_id}.kv").is_file()
+            ),
+        })
+    else:
+        metadata["kitten_conditioning_initialized"] = (
+            KITTEN_TTS_PROFILE_ROOT / ".profiles" / f"{voice_id}.json"
+        ).is_file()
     _write_voice_metadata(voice_id, metadata)
     previews = sorted(VOICE_PREVIEWS.glob("*.wav"), key=lambda item: item.stat().st_mtime, reverse=True)
     for stale in previews[20:]:
@@ -2168,7 +2262,12 @@ async def preview_voice(voice_id: str, payload: VoicePreviewRequest):
         "audio_url": f"/api/voices/previews/{preview_id}",
         "duration_seconds": duration,
         "generation_settings": settings,
-        "conditioning_initialized": metadata["conditioning_initialized"],
+        "conditioning_initialized": (
+            metadata.get("conditioning_initialized", False)
+            if payload.engine == "pocket"
+            else metadata.get("kitten_conditioning_initialized", False)
+        ),
+        "engine": payload.engine,
     }
 
 
@@ -2257,6 +2356,7 @@ def voices():
         conditioning_initialized = (
             (VOICES / ".cache" / f"{path.stem}.emb").is_file()
             or (VOICES / ".cache" / f"{path.stem}.kv").is_file()
+            or (KITTEN_TTS_PROFILE_ROOT / ".profiles" / f"{path.stem}.json").is_file()
         )
         metadata.update({
             "voice_id": path.stem,
@@ -2311,6 +2411,9 @@ def voice_profile_audio(voice_id: str):
 def delete_voice(voice_id: str):
     path = resolve_voice_asset(voice_id, "profile")
     path.unlink()
+    remove_kitten_voice_profile(
+        voice_id, KITTEN_TTS_PROFILE_ROOT, KITTEN_TTS_MODEL_ROOT, KITTEN_TTS_DECODER
+    )
     for asset in (
         VOICE_ORIGINALS / f"{voice_id}.wav",
         _voice_metadata_path(voice_id),
@@ -2402,19 +2505,14 @@ def work(job):
     folder.mkdir(parents=True, exist_ok=True)
 
     if job["kind"] == "video_voice_over":
-        if not tts_runtime_ready():
-            raise RuntimeError("Pocket TTS Hindi is not enabled or installed.")
+        engine = payload.get("engine", "pocket")
+        if not tts_engine_ready(engine):
+            raise RuntimeError(f"The selected speech engine ({engine}) is not enabled or installed.")
         voice_id = payload.get("voice_id", "")
-        update(job_id, stage="Generating Hindi voice-over with your saved voice", progress=8)
+        update(job_id, stage=f"Generating Hindi voice-over · {engine}", progress=8)
         narration_path = folder / "voice_over.wav"
-        narration_duration = synthesize_pocket_tts_dialogue(
-            payload["narration"],
-            voice_id,
-            VOICES,
-            POCKET_TTS_HINDI_ROOT,
-            narration_path,
-            MAX_VOICE,
-            POCKET_TTS_HINDI_BINARY,
+        narration_duration = synthesize_tts(
+            payload["narration"], voice_id, narration_path, engine, True,
             payload.get("generation_settings") or load_voice_generation_settings(voice_id),
         )
         source_path = Path(job["input_path"]).resolve()
@@ -2490,21 +2588,16 @@ def work(job):
             raise RuntimeError("Voice-over export must contain both video and mixed narration audio.")
         narration_path.unlink(missing_ok=True)
     elif job["kind"] == "video_voice_dub":
-        if not tts_runtime_ready():
-            raise RuntimeError("Pocket TTS Hindi is not enabled or installed.")
+        engine = payload.get("engine", "pocket")
+        if not tts_engine_ready(engine):
+            raise RuntimeError(f"The selected speech engine ({engine}) is not enabled or installed.")
         if not cpu_lipsync_ready():
             raise RuntimeError("CPU ONNX lip-sync models or dependencies are not installed.")
         voice_id = payload.get("voice_id", "")
-        update(job_id, stage="Generating Hindi speech with your saved voice", progress=8)
+        update(job_id, stage=f"Generating Hindi speech · {engine}", progress=8)
         narration_path = folder / "narration.wav"
-        synthesize_pocket_tts_dialogue(
-            payload["narration"],
-            voice_id,
-            VOICES,
-            POCKET_TTS_HINDI_ROOT,
-            narration_path,
-            MAX_VOICE,
-            POCKET_TTS_HINDI_BINARY,
+        synthesize_tts(
+            payload["narration"], voice_id, narration_path, engine, True,
             payload.get("generation_settings") or load_voice_generation_settings(voice_id),
         )
         lipsync_destination = folder / "video_lipsync.mp4"
@@ -2707,18 +2800,14 @@ def work(job):
         narration_duration = 0.0
         narration_text = payload.get("narration_text", "").strip()
         if narration_text:
-            if not tts_runtime_ready():
-                raise RuntimeError("Hindi narration is disabled or the Pocket TTS CPU model is not installed.")
-            update(job_id, stage="Generating Hindi voice narration", progress=12)
+            engine = payload.get("narration_engine", "pocket")
+            if not tts_engine_ready(engine):
+                raise RuntimeError(f"The selected speech engine ({engine}) is not enabled or installed.")
+            update(job_id, stage=f"Generating Hindi voice narration · {engine}", progress=12)
             narration_path = folder / "narration.wav"
-            narration_duration = synthesize_pocket_tts(
-                narration_text,
-                payload.get("narration_voice_id", ""),
-                VOICES,
-                POCKET_TTS_HINDI_ROOT,
-                narration_path,
-                MAX_VOICE,
-                POCKET_TTS_HINDI_BINARY,
+            narration_duration = synthesize_tts(
+                narration_text, payload.get("narration_voice_id", ""),
+                narration_path, engine, False,
                 load_voice_generation_settings(payload.get("narration_voice_id", "")),
             )
             update(job_id, stage="Narration ready · mixing video and audio", progress=58)
@@ -2870,23 +2959,19 @@ def work(job):
         )
         raw_output.unlink(missing_ok=True)
     elif job["kind"] == "tts":
-        if not tts_runtime_ready():
-            raise RuntimeError("Hindi narration is disabled or the Pocket TTS CPU model is not installed.")
-        update(job_id, stage="Generating Hindi narration with CPU/ONNX", progress=15)
+        engine = payload.get("engine", "pocket")
+        if not tts_engine_ready(engine):
+            raise RuntimeError(f"The selected speech engine ({engine}) is not enabled or installed.")
+        update(job_id, stage=f"Generating Hindi narration · {engine}", progress=15)
         destination = folder / "narration.wav"
-        synthesize_pocket_tts(
-            payload["text"],
-            payload["voice_id"],
-            VOICES,
-            POCKET_TTS_HINDI_ROOT,
-            destination,
-            MAX_VOICE,
-            POCKET_TTS_HINDI_BINARY,
+        synthesize_tts(
+            payload["text"], payload["voice_id"], destination, engine, False,
             payload.get("generation_settings") or load_voice_generation_settings(payload["voice_id"]),
         )
     elif job["kind"] == "tts_script":
-        if not tts_runtime_ready():
-            raise RuntimeError("Hindi narration is disabled or the Pocket TTS CPU model is not installed.")
+        engine = payload.get("engine", "pocket")
+        if not tts_engine_ready(engine):
+            raise RuntimeError(f"The selected speech engine ({engine}) is not enabled or installed.")
         text = payload["text"].strip()
         chunks = []
         while text:
@@ -2907,10 +2992,7 @@ def work(job):
                 progress=10 + int(65 * (index - 1) / len(chunks)),
             )
             part = folder / f"script_part_{index:03d}.wav"
-            synthesize_pocket_tts(
-                chunk, payload["voice_id"], VOICES, POCKET_TTS_HINDI_ROOT,
-                part, MAX_VOICE, POCKET_TTS_HINDI_BINARY, settings,
-            )
+            synthesize_tts(chunk, payload["voice_id"], part, engine, False, settings)
             parts.append(part)
         update(job_id, stage="Combining speech parts", progress=78)
         concat_list = folder / "audio_parts.txt"

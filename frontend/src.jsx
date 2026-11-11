@@ -28,7 +28,9 @@ function App() {
   const [jobs, setJobs] = useState([]);
   const [transformHistory, setTransformHistory] = useState([]);
   const [voices, setVoices] = useState([]);
-  const [ttsInfo, setTtsInfo] = useState({ tts_ready: false, tts_languages: [] });
+  const [ttsInfo, setTtsInfo] = useState({ tts_ready: false, tts_languages: [], tts_engines: {} });
+  const [ttsEngine, setTtsEngine] = useState('pocket');
+  const activeTtsReady = Boolean(ttsInfo.tts_engines?.[ttsEngine]?.ready ?? (ttsEngine === 'pocket' && ttsInfo.tts_ready));
   const [lipsyncInfo, setLipsyncInfo] = useState({ ready: false });
   const [styleInfo, setStyleInfo] = useState({ ready: false, models: [] });
   const [videoStyle, setVideoStyle] = useState('anime_512');
@@ -385,7 +387,7 @@ function App() {
 
   async function run(event) {
     event.preventDefault();
-    if (!ttsInfo.tts_ready) {
+    if (!activeTtsReady) {
       setMsg('Hindi narration is not installed or enabled on Azure yet.');
       return;
     }
@@ -402,7 +404,7 @@ function App() {
       await api('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, language: lang, voice_id: voice })
+        body: JSON.stringify({ text, language: lang, voice_id: voice, engine: ttsEngine })
       });
       setText('');
       setMsg('Narration queued on Azure');
@@ -422,6 +424,7 @@ function App() {
     form.append('keep_source_ambience', String(dubKeepAmbience));
     form.append('video_style', videoStyle);
     form.append('style_strength', String(styleStrength));
+    form.append('engine', ttsEngine);
     setDubBusy(true);
     try {
       const queuedJob = await api('/api/video/voice-dub', { method: 'POST', body: form });
@@ -457,6 +460,7 @@ function App() {
     form.append('keep_original_audio', String(voiceOverKeepOriginal));
     form.append('original_volume', String(voiceOverOriginalVolume));
     form.append('voice_volume', String(voiceOverVoiceVolume));
+    form.append('engine', ttsEngine);
     setVoiceOverBusy(true);
     try {
       const endpoint = editingVoiceOverId
@@ -490,6 +494,7 @@ function App() {
     setVoiceOverFile(null);
     setVoiceOverSourceTransformId('');
     setVoiceOverNarration(options.narration || '');
+    setTtsEngine(options.engine || 'pocket');
     setVoiceOverVoiceId(options.voice_id || voice);
     setVoiceOverStartOffset(String(options.start_offset ?? 0));
     setVoiceOverKeepOriginal(options.keep_original_audio !== false);
@@ -837,7 +842,7 @@ function App() {
       setMsg('Add one image to every storyboard scene before rendering.');
       return;
     }
-    if (storyNarrationEnabled && (storyLanguage !== 'hi' || !ttsInfo.tts_ready || !voice)) {
+    if (storyNarrationEnabled && (storyLanguage !== 'hi' || !activeTtsReady || !voice)) {
       setMsg('Hindi voiceover requires a Hindi storyboard, an enabled CPU voice engine and a saved WAV profile.');
       return;
     }
@@ -857,6 +862,7 @@ function App() {
       form.append('narration_text', storyScenes.map(scene => scene.narration.trim()).filter(Boolean).join(' '));
       form.append('narration_voice_id', voice);
       form.append('narration_language', 'hi');
+      form.append('narration_engine', ttsEngine);
     }
     setStoryRenderBusy(true);
     try {
@@ -1130,7 +1136,7 @@ function App() {
       const result = await api('/api/voices/' + encodeURIComponent(voiceProfileToTest) + '/preview', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: voicePreviewText, settings: voiceGenerationSettings })
+        body: JSON.stringify({ text: voicePreviewText, settings: voiceGenerationSettings, engine: ttsEngine })
       });
       setVoicePreviewUrl(result.audio_url + '?v=' + result.preview_id);
       setVoiceGenerationSettings(result.generation_settings);
@@ -1163,7 +1169,7 @@ function App() {
       const result = await api('/api/tts/script', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: scriptAudioText, voice_id: voiceProfileToTest })
+        body: JSON.stringify({ text: scriptAudioText, voice_id: voiceProfileToTest, engine: ttsEngine })
       });
       setScriptAudioJobId(result.id);
       setMsg('Full script narration queued. It will be generated in parts and exported as MP3.');
@@ -1252,7 +1258,7 @@ function App() {
           <span>AI VIDEO WORKFLOW</span>
           <h1>Make your next story<br/><i>worth watching.</i></h1>
           <p>Generate Hindi narration on the Azure CPU server using your saved WAV voice profile. English synthesis is not included in this engine.</p>
-          {!ttsInfo.tts_ready && <p className="storyboard-note">Hindi voice engine is disabled until the ONNX model is installed and explicitly enabled by the administrator.</p>}
+          {!activeTtsReady && <p className="storyboard-note">Hindi voice engine is disabled until the ONNX model is installed and explicitly enabled by the administrator.</p>}
           <form onSubmit={run}>
             <label>HINDI NARRATION TEXT</label>
             <textarea value={text} onChange={event => setText(event.target.value)} rows="7" placeholder="अपनी हिंदी स्क्रिप्ट यहाँ लिखें…" required/>
@@ -1260,7 +1266,7 @@ function App() {
               <label>LANGUAGE<select value={lang} onChange={event => setLang(event.target.value)}><option value="hi">Hindi</option></select></label>
               <label>VOICE PROFILE<select required value={voice} onChange={event => setVoice(event.target.value)}><option value="" disabled>Select saved WAV profile</option>{voices.map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}</select></label>
             </div>
-            <button className="primary" disabled={busy || !text.trim() || !voice || !ttsInfo.tts_ready}><Play size={16}/> Generate Hindi narration</button>
+            <button className="primary" disabled={busy || !text.trim() || !voice || !activeTtsReady}><Play size={16}/> Generate Hindi narration</button>
           </form>
           <div className="note">● Native ONNX runtime　● CPU-only · two threads　● Custom WAV voice conditioning</div>
         </section>}
@@ -1348,7 +1354,7 @@ function App() {
               <div className="tts-option">
                 <label className="tts-option-check">
                   <input type="checkbox" checked={storyNarrationEnabled}
-                    disabled={storyLanguage !== 'hi' || !ttsInfo.tts_ready || voices.length === 0}
+                    disabled={storyLanguage !== 'hi' || !activeTtsReady || voices.length === 0}
                     onChange={event => setStoryNarrationEnabled(event.target.checked)}/>
                   Add Hindi voiceover from the scene narration
                 </label>
@@ -1359,7 +1365,7 @@ function App() {
                   </select>
                 </label>}
                 <small>{storyLanguage !== 'hi' ? 'Switch storyboard language to Hindi to enable voiceover.' :
-                  !ttsInfo.tts_ready ? 'Hindi CPU voice engine is not installed or enabled.' :
+                  !activeTtsReady ? 'Hindi CPU voice engine is not installed or enabled.' :
                   voices.length === 0 ? 'Save an authorised Hindi WAV profile in Voice Studio first.' :
                   'Uses each scene’s editable narration. The engine is local, Hindi-only and CPU-based.'}</small>
               </div>
@@ -1367,7 +1373,7 @@ function App() {
               {musicFile && <label>MUSIC VOLUME · {Math.round(musicVolume*100)}%<input type="range" min="0" max="1.5" step="0.05" value={musicVolume} onChange={event => setMusicVolume(Number(event.target.value))}/></label>}
               <label>PROJECT TITLE (OPTIONAL)<input value={overlayText} maxLength={160} onChange={event => setOverlayText(event.target.value)}/></label>
               <label>TITLE POSITION<select value={overlayPosition} onChange={event => setOverlayPosition(event.target.value)}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select></label>
-              <button className="primary" disabled={storyRenderBusy || storyScenes.some(scene => !scene.imageFile) || (storyNarrationEnabled && (!ttsInfo.tts_ready || storyLanguage !== 'hi' || !voice))}>{storyRenderBusy ? 'Queueing storyboard video…' : 'Render storyboard video'}</button>
+              <button className="primary" disabled={storyRenderBusy || storyScenes.some(scene => !scene.imageFile) || (storyNarrationEnabled && (!activeTtsReady || storyLanguage !== 'hi' || !voice))}>{storyRenderBusy ? 'Queueing storyboard video…' : 'Render storyboard video'}</button>
             </form>
             <p className="storyboard-note">Images are supplied by you. FRAME / AI adds gentle camera motion, scene transitions and assembles the video. AI image generation is not enabled yet.</p>
           </>}
@@ -1377,11 +1383,11 @@ function App() {
           <h1>Keep the performance.<br/><i>Make it speak your voice.</i></h1>
           <p>Upload a real video, select your saved Hindi voice profile, enter the dialogue and choose an AI visual style. Studio synthesises your speech locally, lip-syncs the source performance, then stylises every frame while preserving the original scene and motion.</p>
           <div className="dub-status">
-            <b>{lipsyncInfo.ready && ttsInfo.tts_ready ? 'CPU voice + lip-sync ready' : 'Setup required before rendering'}</b>
-            <small>Speech: Pocket TTS Hindi · your saved WAV profile</small>
+            <b>{lipsyncInfo.ready && activeTtsReady ? 'CPU voice + lip-sync ready' : 'Setup required before rendering'}</b>
+            <small>Speech: {ttsInfo.tts_engines?.[ttsEngine]?.name || 'Pocket TTS Hindi'} · your saved WAV profile</small>
             <small>Lip-sync: Wav2Lip ONNX · CPUExecutionProvider · no GPU</small>
             <small>Azure hardware: 2 vCPU · 16 GB RAM · videos streamed in batches of 8 frames</small>
-            {!ttsInfo.tts_ready && <small className="voice-warning">Pocket TTS Hindi is not enabled or its model is unavailable.</small>}
+            {!activeTtsReady && <small className="voice-warning">Pocket TTS Hindi is not enabled or its model is unavailable.</small>}
             {!lipsyncInfo.ready && <small className="voice-warning">CPU lip-sync weights/dependencies are not installed yet. Run the installation steps in docs/CPU_VIDEO_DUB.md.</small>}
           </div>
           <form onSubmit={queueVideoDub}>
@@ -1441,7 +1447,7 @@ function App() {
               <textarea rows="6" maxLength="12000" value={dubNarration} onChange={event => setDubNarration(event.target.value)}
                 placeholder="Enter the exact Hindi words your on-screen speaker should say. Use plain Hindi words for the cleanest speech…" required/>
             </label>
-            <small className="dub-prosody-note">For cleaner Hindi speech, use plain words without punctuation or decorative symbols. This Pocket TTS model was trained without meaningful punctuation coverage: marks do not reliably control pauses, intonation or emotion, so they are removed before synthesis. Emotion tags such as [angry] or [sad] are not supported.</small>
+            <small className="dub-prosody-note">{ttsEngine === 'kitten' ? 'Kitten recognises emotion tags ([angry], [joyful], [sad], etc.), vocal events such as <laugh> and <sigh>, and (((emphasis))). Put emotion tags at the beginning of each utterance; expression is beta, not guaranteed.' : 'Pocket TTS was trained without meaningful punctuation coverage. Punctuation and markup are removed before synthesis and do not reliably control pauses, intonation or emotion.'}</small>
             <div className={'dub-length-meter' + (dubSpeechOverLimit ? ' over-limit' : '')}>
               <div className="dub-length-heading">
                 <b>LIVE SPEECH LENGTH ESTIMATE</b>
@@ -1466,7 +1472,7 @@ function App() {
             <label className="dub-checkbox"><input type="checkbox" checked={dubKeepAmbience} onChange={event => setDubKeepAmbience(event.target.checked)}/>
               Keep original background ambience quietly under the new voice (original dialogue may also remain audible)
             </label>
-            <button className="primary" disabled={(!dubFile && !dubSourceTransformId) || !dubVoiceId || !dubNarration.trim() || dubBusy || !lipsyncInfo.ready || !ttsInfo.tts_ready || (videoStyle !== 'none' && !styleInfo.models.some(item => item.id === videoStyle && item.ready)) || dubSpeechOverLimit}>
+            <button className="primary" disabled={(!dubFile && !dubSourceTransformId) || !dubVoiceId || !dubNarration.trim() || dubBusy || !lipsyncInfo.ready || !activeTtsReady || (videoStyle !== 'none' && !styleInfo.models.some(item => item.id === videoStyle && item.ready)) || dubSpeechOverLimit}>
               {dubBusy ? 'Uploading and queueing…' : 'Generate full video with my voice + lip-sync'}
             </button>
           </form>
@@ -1588,7 +1594,7 @@ function App() {
               </div>
               <label>HINDI VOICE-OVER SCRIPT
                 <textarea rows="6" maxLength="12000" value={voiceOverNarration} onChange={event => setVoiceOverNarration(event.target.value)} placeholder="यहाँ अपनी हिंदी narration लिखें…" required/>
-                <small className="voice-over-help">Use plain Hindi words for the cleanest vocal. Punctuation, emoji and decorative symbols are removed before synthesis; they do not control emotion or intonation in this model. Speech is never silently trimmed and must fit within the remaining video duration.</small>
+                <small className="voice-over-help">{ttsEngine === 'kitten' ? 'KittenTTS supports [emotion] tags, inline vocal events such as <laugh> or <sigh>, and (((emphasis))). Speech is never silently trimmed and must fit within the remaining video duration.' : 'Pocket TTS removes punctuation, emoji and decorative symbols; they do not control emotion or intonation in this model. Speech is never silently trimmed and must fit within the remaining video duration.'}</small>
               </label>
               <label className="voice-over-checkbox">
                 <input type="checkbox" checked={voiceOverKeepOriginal} onChange={event => setVoiceOverKeepOriginal(event.target.checked)}/>
@@ -1822,7 +1828,23 @@ function App() {
           </article>}
 
           <article className="voice-step">
-            <b>3 · Generate and listen to a sample with the saved profile</b>
+            <b>3 · Choose the speech engine and generate a sample</b>
+            <label>SPEECH ENGINE
+              <select value={ttsEngine} onChange={event => {setTtsEngine(event.target.value);setVoicePreviewUrl('');}}>
+                <option value="pocket">Pocket TTS Hindi · CPU/ONNX (existing engine)</option>
+                <option value="kitten">KittenTTS 2 · expressive CPU/C++</option>
+              </select>
+            </label>
+            <small className="voice-settings-note">
+              {ttsEngine === 'kitten'
+                ? 'Kitten recognises [angry], [joyful], [sad], [excited], inline vocal events such as <laugh> or <sigh>, and (((emphasis))). Put one emotion tag at the beginning of each utterance. Emotion control is beta.'
+                : 'Pocket TTS remains the unchanged original engine. It strips punctuation and emotion markup; use plain Hindi words.'}
+            </small>
+            {!activeTtsReady && <small className="voice-warning">
+              {ttsEngine === 'kitten'
+                ? 'KittenTTS 2 CPU runtime is not installed/enabled. Install it with scripts/install_kitten_tts.py, then explicitly enable it in both services.'
+                : 'Pocket TTS Hindi is not enabled or its CPU model is not installed on Azure.'}
+            </small>}
             {voices.length === 0 ? <p>Save a prepared voice profile first.</p> : <>
               <label>VOICE PROFILE
                 <select value={voiceProfileToTest} onChange={event => selectVoiceProfile(event.target.value)}>
@@ -1834,7 +1856,7 @@ function App() {
                   onChange={event => setVoicePreviewText(event.target.value)}
                   placeholder="Enter the text you want this voice profile to speak…"/>
               </label>
-              <div className="voice-settings">
+              {ttsEngine === 'pocket' && <div className="voice-settings">
                 <label>TEMPERATURE · {Number(voiceGenerationSettings.temperature).toFixed(2)}
                   <input type="range" min="0.05" max="1" step="0.05" value={voiceGenerationSettings.temperature}
                     onChange={event => setVoiceGenerationSettings(current => ({...current,temperature:Number(event.target.value)}))}/>
@@ -1854,10 +1876,10 @@ function App() {
                     onChange={event => setVoiceGenerationSettings(current => ({...current,seed:Number(event.target.value)}))}/>
                 </label>
               </div>
-              <small className="voice-settings-note">CPU-safe defaults: INT8, two threads, temperature 0.30, one flow step, EOS −2.0 and seed 1. Only the four controls above are changed. Settings are stored with this profile and reused in video narration.</small>
-              <button type="button" className="primary" disabled={!ttsInfo.tts_ready || !voiceProfileToTest || !voicePreviewText.trim() || voiceBusy}
+              <small className="voice-settings-note">CPU-safe defaults: INT8, two threads, temperature 0.30, one flow step, EOS −2.0 and seed 1. Only the four controls above are changed. Settings are stored with this profile and reused in Pocket TTS narration.</small>}
+              <button type="button" className="primary" disabled={!activeTtsReady || !voiceProfileToTest || !voicePreviewText.trim() || voiceBusy}
                 onClick={generateVoicePreview}>{voiceBusy ? 'Generating sample…' : 'Generate voice sample'}</button>
-              {!ttsInfo.tts_ready && <small className="voice-warning">Pocket TTS Hindi is not enabled or its CPU model is not installed on Azure.</small>}
+              {!activeTtsReady && <small className="voice-warning">{ttsEngine === 'kitten' ? 'KittenTTS 2 is not installed/enabled on Azure.' : 'Pocket TTS Hindi is not enabled or its CPU model is not installed on Azure.'}</small>}
               {voicePreviewUrl && <div className="voice-final-sample">
                 <b>Final generated voice sample</b>
                 <audio className="voice-audio" controls preload="metadata" src={voicePreviewUrl}/>
@@ -1881,7 +1903,7 @@ function App() {
                 </select>
               </label>
               <button type="submit" className="primary"
-                disabled={!ttsInfo.tts_ready || !voices.length || !voiceProfileToTest || !scriptAudioText.trim() || scriptAudioBusy}>
+                disabled={!activeTtsReady || !voices.length || !voiceProfileToTest || !scriptAudioText.trim() || scriptAudioBusy}>
                 {scriptAudioBusy ? 'Queuing…' : 'Generate complete MP3'}
               </button>
             </form>
@@ -1898,7 +1920,7 @@ function App() {
               </>}
               {scriptAudioJob.error && <small className="voice-warning">{scriptAudioJob.error}</small>}
             </div>}
-            {!ttsInfo.tts_ready && <small className="voice-warning">Pocket TTS Hindi is not enabled or its CPU model is not installed on Azure.</small>}
+            {!activeTtsReady && <small className="voice-warning">{ttsEngine === 'kitten' ? 'KittenTTS 2 is not installed/enabled on Azure.' : 'Pocket TTS Hindi is not enabled or its CPU model is not installed on Azure.'}</small>}
           </article>
 
           <h3>Saved reusable voice profiles</h3>
