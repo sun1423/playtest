@@ -72,7 +72,7 @@ The Voice Studio engine selector applies to previews, script MP3, storyboard nar
 
 Kitten requires an exact transcript with the saved mono 24 kHz PCM16 reference. It prepares speaker conditioning on first use or after that transcript/WAV changes. Existing profiles with an empty or inaccurate transcript must be corrected in Voice Studio before using Kitten. The original WAV, prepared WAV and transcript remain preserved; Kitten keeps its derived assets in \`models/kitten-tts-2-profiles\`.
 
-A new preparation can take time and use extra CPU/RAM. The engine lock serializes Kitten requests so the shared voice registry is not changed during a concurrent synthesis. No audio-generation smoke test is run by the installer.
+A new preparation can take time and use extra CPU/RAM. The engine lock serializes Kitten requests so the shared voice registry is not changed during a concurrent synthesis. Long Script-to-Audio exports run through one native process, allowing Kitten's sentence-aware chunking to reuse the loaded speech model rather than reloading it for every part. No audio-generation smoke test is run by the installer.
 
 ## Validation and rollback
 

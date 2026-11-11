@@ -78,6 +78,10 @@ def main() -> None:
     env["OMP_NUM_THREADS"] = "2"
     env["MKL_NUM_THREADS"] = "2"
     env["OPENBLAS_NUM_THREADS"] = "1"
+    prep_site_packages = VENV / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    if not prep_site_packages.is_dir():
+        raise RuntimeError(f"Dedicated preparation environment is missing site-packages: {prep_site_packages}")
+    sys.path.insert(0, str(prep_site_packages))
     from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 
     model_revision = HfApi().model_info(MODEL_REPO).sha
@@ -117,8 +121,11 @@ def main() -> None:
     ], env=env)
     run([str(cmake), "--build", str(build_dir), "--target", "kitten-tts", "-j2"], env=env)
     binary = build_dir / "bin" / "kitten-tts"
+    torch_lib = prep_site_packages / "torch" / "lib"
+    env["LD_LIBRARY_PATH"] = str(torch_lib) + (
+        ":" + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else ""
+    )
     run([str(binary), "--help"], env=env)
-    torch_lib = VENV / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages" / "torch" / "lib"
     required = [
         MODEL_ROOT / "cpp/model-tq2_1.gguf",
         MODEL_ROOT / "cpp/default/decoder.pt",
@@ -135,7 +142,10 @@ def main() -> None:
         import pwd
         account = pwd.getpwnam(SERVICE_USER)
         for directory in (HF_HOME, PROFILE_ROOT):
-            shutil.chown(directory, user=account.pw_uid, group=account.pw_gid)
+            for current, subdirs, filenames in os.walk(directory):
+                os.chown(current, account.pw_uid, account.pw_gid)
+                for filename in filenames:
+                    os.chown(Path(current) / filename, account.pw_uid, account.pw_gid, follow_symlinks=False)
     except KeyError as exc:
         raise RuntimeError(
             f"Service account {SERVICE_USER!r} does not exist. Set AI_VIDEO_STUDIO_USER to the actual systemd service user."

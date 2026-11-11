@@ -2973,27 +2973,35 @@ def work(job):
         if not tts_engine_ready(engine):
             raise RuntimeError(f"The selected speech engine ({engine}) is not enabled or installed.")
         text = payload["text"].strip()
-        chunks = []
-        while text:
-            if len(text) <= 1800:
-                chunks.append(text)
-                break
-            window = text[:1800]
-            boundaries = list(re.finditer(r"\n+|(?<=[।.!?])\s+|\s+", window))
-            cut = boundaries[-1].end() if boundaries else 1800
-            chunks.append(text[:cut].strip())
-            text = text[cut:].strip()
         parts = []
         settings = payload.get("generation_settings") or load_voice_generation_settings(payload["voice_id"])
-        for index, chunk in enumerate(chunks, start=1):
-            update(
-                job_id,
-                stage=f"Generating speech · part {index}/{len(chunks)}",
-                progress=10 + int(65 * (index - 1) / len(chunks)),
-            )
-            part = folder / f"script_part_{index:03d}.wav"
-            synthesize_tts(chunk, payload["voice_id"], part, engine, False, settings)
+        if engine == "kitten":
+            # Kitten's native runner performs sentence-aware chunking while the
+            # 1.7B model remains loaded for the complete script.
+            update(job_id, stage="Generating full script with KittenTTS 2", progress=12)
+            part = folder / "script_part_001.wav"
+            synthesize_tts(text, payload["voice_id"], part, engine, False, settings)
             parts.append(part)
+        else:
+            chunks = []
+            while text:
+                if len(text) <= 1800:
+                    chunks.append(text)
+                    break
+                window = text[:1800]
+                boundaries = list(re.finditer(r"\n+|(?<=[।.!?])\s+|\s+", window))
+                cut = boundaries[-1].end() if boundaries else 1800
+                chunks.append(text[:cut].strip())
+                text = text[cut:].strip()
+            for index, chunk in enumerate(chunks, start=1):
+                update(
+                    job_id,
+                    stage=f"Generating speech · part {index}/{len(chunks)}",
+                    progress=10 + int(65 * (index - 1) / len(chunks)),
+                )
+                part = folder / f"script_part_{index:03d}.wav"
+                synthesize_tts(chunk, payload["voice_id"], part, engine, False, settings)
+                parts.append(part)
         update(job_id, stage="Combining speech parts", progress=78)
         concat_list = folder / "audio_parts.txt"
         concat_list.write_text(
