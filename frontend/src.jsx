@@ -71,6 +71,7 @@ function App() {
   const [faceBusy, setFaceBusy] = useState(false);
   const [faceUploadProgress, setFaceUploadProgress] = useState(-1);
   const [faceTargetDuration, setFaceTargetDuration] = useState(0);
+  const [faceFalsePositiveOverride, setFaceFalsePositiveOverride] = useState(false);
   const [sceneFiles, setSceneFiles] = useState([]);
   const [activeScene, setActiveScene] = useState(0);
   const [scenePreviewUrl, setScenePreviewUrl] = useState('');
@@ -499,6 +500,7 @@ function App() {
     const form = new FormData();
     form.append('file', faceTarget);
     form.append('source_image', faceReference);
+    form.append('confirm_non_explicit_override', faceFalsePositiveOverride ? 'true' : 'false');
     setFaceBusy(true);
     setFaceUploadProgress(0);
     setMsg('Uploading video and reference image to Azure…');
@@ -528,6 +530,7 @@ function App() {
       setJobs(current => [queuedJob, ...current.filter(job => job.id !== queuedJob.id)].slice(0, 100));
       setFaceTarget(null);
       setFaceReference(null);
+      setFaceFalsePositiveOverride(false);
       setMsg('Upload complete. Face replacement job queued; CPU processing has started or is waiting for the worker.');
       await refreshJobs();
     } catch (error) {
@@ -1406,6 +1409,10 @@ function App() {
           <div className="facefusion-upload">
             <label className="drop"><Film/><b>{faceTarget?.name || 'Choose target video'}</b><small>MP4, MOV, MKV or WebM · maximum 15 seconds · 100 MB{faceTargetDuration ? ' · ' + faceTargetDuration.toFixed(1) + 's checked' : ''}</small><input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={handleFaceTargetChange}/></label>
             <label className="drop"><Upload/><b>{faceReference?.name || 'Choose reference face image'}</b><small>JPG, PNG or WebP · one clear face · 15 MB maximum. Target face must be visible in its opening frame.</small><input type="file" accept="image/jpeg,image/png,image/webp" onChange={event => setFaceReference(event.target.files?.[0] || null)}/></label>
+            <label className="facefusion-override">
+              <input type="checkbox" checked={faceFalsePositiveOverride} onChange={event => setFaceFalsePositiveOverride(event.target.checked)}/>
+              <span><b>Allow this job if the NSFW detector gives a false positive</b><small>Use only for a non-explicit video. By enabling this, you confirm the video is non-explicit and you have permission from the people shown. This bypass applies only to this job; normal screening remains enabled for all other jobs.</small></span>
+            </label>
             <button type="button" className="primary" disabled={faceBusy} onClick={submitFaceFusion}>{faceBusy ? 'Uploading…' : 'Queue CPU face replacement'}</button>
             {faceBusy && <div className="facefusion-upload-status"><b>Uploading files to Azure · {faceUploadProgress}%</b><progress value={faceUploadProgress} max="100"/><small>Keep this page open until the upload finishes. CPU processing begins after the server accepts both files.</small></div>}
           </div>
