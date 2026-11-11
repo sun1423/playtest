@@ -2534,21 +2534,8 @@ def work(job):
         facefusion_temp.mkdir(parents=True, exist_ok=True)
         facefusion_jobs.mkdir(parents=True, exist_ok=True)
         update(job_id, stage="FaceFusion CPU · preparing models", progress=5)
-        if payload.get("confirm_non_explicit_override") is True:
-            # This override is scoped to this subprocess/job only. It does not
-            # alter FaceFusion's installed files or affect other jobs.
-            runner = (
-                "import runpy,sys; from facefusion import content_analyser; "
-                "content_analyser.analyse_video=lambda *args,**kwargs: False; "
-                "script=sys.argv.pop(1); sys.argv[0]=script; "
-                "runpy.run_path(script,run_name='__main__')"
-            )
-            command = [
-                str(FACEFUSION_PYTHON), "-c", runner, str(FACEFUSION_SCRIPT), "headless-run",
-            ]
-        else:
-            command = [
-                str(FACEFUSION_PYTHON), str(FACEFUSION_SCRIPT), "headless-run",
+        facefusion_args = [
+            "headless-run",
             "--temp-path", str(facefusion_temp),
             "--jobs-path", str(facefusion_jobs),
             "-s", str(reference),
@@ -2567,6 +2554,23 @@ def work(job):
             "--output-video-preset", "veryfast",
             "--output-video-quality", "80",
             "--log-level", "info",
+        ]
+        if payload.get("confirm_non_explicit_override") is True:
+            # This override is scoped to this subprocess/job only. It does not
+            # alter FaceFusion's installed files or affect any other job.
+            runner = (
+                "import runpy,sys; from facefusion import content_analyser; "
+                "content_analyser.analyse_video=lambda *args,**kwargs: False; "
+                "script=sys.argv.pop(1); sys.argv[0]=script; "
+                "runpy.run_path(script,run_name='__main__')"
+            )
+            command = [
+                str(FACEFUSION_PYTHON), "-c", runner, str(FACEFUSION_SCRIPT),
+                *facefusion_args,
+            ]
+        else:
+            command = [
+                str(FACEFUSION_PYTHON), str(FACEFUSION_SCRIPT), *facefusion_args,
             ]
         update(job_id, stage="Replacing faces on CPU", progress=15)
         result = subprocess.run(
