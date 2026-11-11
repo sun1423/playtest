@@ -1525,6 +1525,7 @@ async def rerun_video_transform(
 async def facefusion_video(
     file: UploadFile = File(...),
     source_image: UploadFile = File(...),
+    confirm_non_explicit_override: bool = Form(False),
 ):
     video_extension = Path(file.filename or "").suffix.lower()
     image_extension = Path(source_image.filename or "").suffix.lower()
@@ -1578,7 +1579,11 @@ async def facefusion_video(
     finally:
         await file.close()
         await source_image.close()
-    return enqueue("facefusion", {"reference_path": str(reference), "duration": duration}, str(target))
+    return enqueue("facefusion", {
+        "reference_path": str(reference),
+        "duration": duration,
+        "confirm_non_explicit_override": confirm_non_explicit_override,
+    }, str(target))
 
 
 @app.post("/api/project")
@@ -2529,8 +2534,21 @@ def work(job):
         facefusion_temp.mkdir(parents=True, exist_ok=True)
         facefusion_jobs.mkdir(parents=True, exist_ok=True)
         update(job_id, stage="FaceFusion CPU · preparing models", progress=5)
-        command = [
-            str(FACEFUSION_PYTHON), str(FACEFUSION_SCRIPT), "headless-run",
+        if payload.get("confirm_non_explicit_override") is True:
+            # This override is scoped to this subprocess/job only. It does not
+            # alter FaceFusion's installed files or affect other jobs.
+            runner = (
+                "import runpy,sys; from facefusion import content_analyser; "
+                "content_analyser.analyse_video=lambda *args,**kwargs: False; "
+                "script=sys.argv.pop(1); sys.argv[0]=script; "
+                "runpy.run_path(script,run_name='__main__')"
+            )
+            command = [
+                str(FACEFUSION_PYTHON), "-c", runner, str(FACEFUSION_SCRIPT), "headless-run",
+            ]
+        else:
+            command = [
+                str(FACEFUSION_PYTHON), str(FACEFUSION_SCRIPT), "headless-run",
             "--temp-path", str(facefusion_temp),
             "--jobs-path", str(facefusion_jobs),
             "-s", str(reference),
@@ -2549,7 +2567,7 @@ def work(job):
             "--output-video-preset", "veryfast",
             "--output-video-quality", "80",
             "--log-level", "info",
-        ]
+            ]
         update(job_id, stage="Replacing faces on CPU", progress=15)
         result = subprocess.run(
             command, capture_output=True, text=True, timeout=7200, check=False,
