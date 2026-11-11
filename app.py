@@ -2489,7 +2489,7 @@ def work(job):
         if "video" not in streams or "audio" not in streams:
             raise RuntimeError("Voice-over export must contain both video and mixed narration audio.")
         narration_path.unlink(missing_ok=True)
-    if job["kind"] == "video_voice_dub":
+    elif job["kind"] == "video_voice_dub":
         if not tts_runtime_ready():
             raise RuntimeError("Pocket TTS Hindi is not enabled or installed.")
         if not cpu_lipsync_ready():
