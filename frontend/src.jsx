@@ -58,6 +58,7 @@ function App() {
   const [voiceOverVoiceVolume, setVoiceOverVoiceVolume] = useState(1);
   const [voiceOverBusy, setVoiceOverBusy] = useState(false);
   const [editingVoiceOverId, setEditingVoiceOverId] = useState('');
+  const [voiceOverPendingJobId, setVoiceOverPendingJobId] = useState('');
   const [text, setText] = useState('');
   const [lang, setLang] = useState('hi');
   const [storyScript, setStoryScript] = useState('');
@@ -365,6 +366,27 @@ function App() {
     return () => clearInterval(timer);
   }, [authenticated]);
 
+  useEffect(() => {
+    if (!voiceOverPendingJobId) return;
+    const attempt = voiceOverHistory.find(job => job.id === voiceOverPendingJobId);
+    if (!attempt) return;
+    if (attempt.status === 'failed') {
+      setVoiceOverPendingJobId('');
+      setMsg('Voice-over failed. Your source video, script, voice and mix settings are still here. Correct the issue and retry in this panel.');
+      return;
+    }
+    if (attempt.status === 'completed' && attempt.output_available) {
+      setVoiceOverPendingJobId('');
+      setEditingVoiceOverId('');
+      setVoiceOverFile(null);
+      setVoiceOverSourceTransformId('');
+      setVoiceOverNarration('');
+      setVoiceOverStartOffset('0');
+      setMsg('Voice-over completed successfully. Your finished video is available in the history list.');
+    }
+  }, [voiceOverHistory, voiceOverPendingJobId]);
+
+
   async function run(event) {
     event.preventDefault();
     if (!ttsInfo.tts_ready) {
@@ -450,11 +472,9 @@ function App() {
         ...current.filter(job => job.id !== queuedJob.id)
       ]);
       setVoiceOverSelectedId(queuedJob.id);
-      setEditingVoiceOverId('');
-      setVoiceOverFile(null);
-      setVoiceOverSourceTransformId('');
-      setVoiceOverNarration('');
-      setMsg('Voice-over queued. The source picture and mouth movement will remain unchanged.');
+      setEditingVoiceOverId(queuedJob.id);
+      setVoiceOverPendingJobId(queuedJob.id);
+      setMsg('Voice-over queued. Your source, script and settings stay in this panel so you can retry here if processing fails.');
       refreshVoiceOverHistory();
     } catch (error) {
       setMsg(error.message);
@@ -470,6 +490,7 @@ function App() {
       return;
     }
     setEditingVoiceOverId(job.id);
+    setVoiceOverPendingJobId('');
     setVoiceOverFile(null);
     setVoiceOverSourceTransformId('');
     setVoiceOverNarration(options.narration || '');
@@ -487,6 +508,7 @@ function App() {
 
   function cancelVoiceOverEdit() {
     setEditingVoiceOverId('');
+    setVoiceOverPendingJobId('');
     setVoiceOverFile(null);
     setVoiceOverSourceTransformId('');
     setVoiceOverNarration('');
@@ -1161,6 +1183,7 @@ function App() {
   const transformJobs = transformHistory.filter(job => !(job.payload?.scenes?.length));
   const availableTransformVideos = transformJobs.filter(job => job.status === 'completed' && job.output_available);
   const selectedVoiceOverJob = voiceOverHistory.find(job => job.id === voiceOverSelectedId);
+  const editingVoiceOverJob = voiceOverHistory.find(job => job.id === editingVoiceOverId);
   const dubJobs = jobs.filter(job => job.kind === 'video_voice_dub');
   const dubWordCount = dubNarration.trim() ? dubNarration.trim().split(/\s+/u).filter(Boolean).length : 0;
   const dubEstimatedSpeechSeconds = estimateHindiSpeechSeconds(dubNarration);
@@ -1541,6 +1564,7 @@ function App() {
           <section className="voice-over-panel">
             <div className="voice-over-heading"><div><span>VOICE-OVER · NO LIP-SYNC</span><h2>Add narration to a video.</h2><p>Add your saved Hindi voice to any uploaded video or completed Transform export. The video frames, face and mouth movement are not changed.</p></div></div>
             <form className="voice-over-form" onSubmit={queueVoiceOver}>
+              {editingVoiceOverJob?.status === 'failed' && <div className="voice-over-retry-warning"><b>Previous attempt failed — your inputs are preserved.</b><small>{editingVoiceOverJob.error || 'The worker could not complete this voice-over.'} Correct the script or audio settings below, then retry without uploading the video again.</small></div>}
               {editingVoiceOverId ? <div className="transform-edit-banner voice-over-edit-banner">
                 <b>Editing a saved voice-over</b>
                 <small>{voiceOverHistory.find(job => job.id === editingVoiceOverId)?.payload?.source_filename || 'Original source video'} · the original source will be reused.</small>
@@ -1580,8 +1604,8 @@ function App() {
               <label>VOICE-OVER VOLUME · {Math.round(voiceOverVoiceVolume * 100)}%
                 <input type="range" min="0.1" max="2" step="0.05" value={voiceOverVoiceVolume} onChange={event => setVoiceOverVoiceVolume(Number(event.target.value))}/>
               </label>
-              <button className="primary" disabled={voiceOverBusy || (!voiceOverFile && !voiceOverSourceTransformId && !editingVoiceOverId) || !voiceOverVoiceId || !voiceOverNarration.trim()}>
-                {voiceOverBusy ? 'Queueing voice-over…' : editingVoiceOverId ? 'Create edited voice-over version' : 'Generate voice-over video'}
+              <button className="primary" disabled={voiceOverBusy || ['queued','running'].includes(editingVoiceOverJob?.status) || (!voiceOverFile && !voiceOverSourceTransformId && !editingVoiceOverId) || !voiceOverVoiceId || !voiceOverNarration.trim()}>
+                {voiceOverBusy ? 'Queueing voice-over…' : ['queued','running'].includes(editingVoiceOverJob?.status) ? 'Voice-over processing…' : editingVoiceOverJob?.status === 'failed' ? 'Retry voice-over' : editingVoiceOverId ? 'Create edited voice-over version' : 'Generate voice-over video'}
               </button>
             </form>
             <div className="voice-over-history">
