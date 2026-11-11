@@ -45,6 +45,19 @@ function App() {
   const [dubVoiceId, setDubVoiceId] = useState('');
   const [dubKeepAmbience, setDubKeepAmbience] = useState(false);
   const [dubBusy, setDubBusy] = useState(false);
+
+  const [voiceOverHistory, setVoiceOverHistory] = useState([]);
+  const [voiceOverSelectedId, setVoiceOverSelectedId] = useState('');
+  const [voiceOverFile, setVoiceOverFile] = useState(null);
+  const [voiceOverSourceTransformId, setVoiceOverSourceTransformId] = useState('');
+  const [voiceOverNarration, setVoiceOverNarration] = useState('');
+  const [voiceOverVoiceId, setVoiceOverVoiceId] = useState('');
+  const [voiceOverStartOffset, setVoiceOverStartOffset] = useState('0');
+  const [voiceOverKeepOriginal, setVoiceOverKeepOriginal] = useState(true);
+  const [voiceOverOriginalVolume, setVoiceOverOriginalVolume] = useState(0.25);
+  const [voiceOverVoiceVolume, setVoiceOverVoiceVolume] = useState(1);
+  const [voiceOverBusy, setVoiceOverBusy] = useState(false);
+  const [editingVoiceOverId, setEditingVoiceOverId] = useState('');
   const [text, setText] = useState('');
   const [lang, setLang] = useState('hi');
   const [storyScript, setStoryScript] = useState('');
@@ -240,8 +253,20 @@ function App() {
     }
   }
 
+
+  async function refreshVoiceOverHistory() {
+    try {
+      const history = await api('/api/voice-over/history');
+      setVoiceOverHistory(history);
+      setVoiceOverSelectedId(current => history.some(job => job.id === current) ? current : (history[0]?.id || ''));
+    } catch {
+      // Keep the last known voice-over history if the endpoint is temporarily unavailable.
+    }
+  }
+
   async function refresh() {
     refreshTransformHistory();
+    refreshVoiceOverHistory();
     // Job polling is independent: a failed voice/project/model-status endpoint must
     // never prevent Transform progress and completed outputs from appearing.
     refreshJobs();
@@ -273,6 +298,7 @@ function App() {
           : (styleStatus.models.find(item => item.id === 'anime_512' && item.ready)?.id
             || styleStatus.models.find(item => item.ready)?.id || 'none'));
       setDubVoiceId(current => voiceList.some(item => item.voice_id === current) ? current : selectedVoiceId);
+      setVoiceOverVoiceId(current => voiceList.some(item => item.voice_id === current) ? current : selectedVoiceId);
       setStatus('Azure connected');
     } catch (error) {
       setStatus(error.message === 'Authentication required' ? 'Session expired' : 'Server offline');
@@ -397,6 +423,79 @@ function App() {
     }
   }
 
+
+  async function queueVoiceOver(event) {
+    event.preventDefault();
+    if ((!voiceOverFile && !voiceOverSourceTransformId && !editingVoiceOverId) ||
+        !voiceOverVoiceId || !voiceOverNarration.trim()) return;
+    const form = new FormData();
+    if (!editingVoiceOverId) {
+      if (voiceOverSourceTransformId) form.append('source_job_id', voiceOverSourceTransformId);
+      else form.append('file', voiceOverFile);
+    }
+    form.append('voice_id', voiceOverVoiceId);
+    form.append('narration', voiceOverNarration.trim());
+    form.append('start_offset', String(Number(voiceOverStartOffset) || 0));
+    form.append('keep_original_audio', String(voiceOverKeepOriginal));
+    form.append('original_volume', String(voiceOverOriginalVolume));
+    form.append('voice_volume', String(voiceOverVoiceVolume));
+    setVoiceOverBusy(true);
+    try {
+      const endpoint = editingVoiceOverId
+        ? '/api/jobs/' + encodeURIComponent(editingVoiceOverId) + '/voice-over/rerun'
+        : '/api/video/voice-over';
+      const queuedJob = await api(endpoint, { method: 'POST', body: form });
+      setVoiceOverHistory(current => [
+        { ...queuedJob, source_available: true, output_available: false },
+        ...current.filter(job => job.id !== queuedJob.id)
+      ]);
+      setVoiceOverSelectedId(queuedJob.id);
+      setEditingVoiceOverId('');
+      setVoiceOverFile(null);
+      setVoiceOverSourceTransformId('');
+      setVoiceOverNarration('');
+      setMsg('Voice-over queued. The source picture and mouth movement will remain unchanged.');
+      refreshVoiceOverHistory();
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      setVoiceOverBusy(false);
+    }
+  }
+
+  function editVoiceOver(job) {
+    const options = job.payload || {};
+    if (!job.source_available) {
+      setMsg('The original source is unavailable, so this voice-over cannot be edited.');
+      return;
+    }
+    setEditingVoiceOverId(job.id);
+    setVoiceOverFile(null);
+    setVoiceOverSourceTransformId('');
+    setVoiceOverNarration(options.narration || '');
+    setVoiceOverVoiceId(options.voice_id || voice);
+    setVoiceOverStartOffset(String(options.start_offset ?? 0));
+    setVoiceOverKeepOriginal(options.keep_original_audio !== false);
+    setVoiceOverOriginalVolume(Number(options.original_volume ?? 0.25));
+    setVoiceOverVoiceVolume(Number(options.voice_volume ?? 1));
+    setVoiceOverSelectedId(job.id);
+    setTab('transform');
+    setMsg('Editing voice-over settings for ' + (options.source_filename || 'saved video') +
+      '. A new version will be created from the original source, not the previous export.');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function cancelVoiceOverEdit() {
+    setEditingVoiceOverId('');
+    setVoiceOverFile(null);
+    setVoiceOverSourceTransformId('');
+    setVoiceOverNarration('');
+    setVoiceOverStartOffset('0');
+    setVoiceOverKeepOriginal(true);
+    setVoiceOverOriginalVolume(0.25);
+    setVoiceOverVoiceVolume(1);
+    setMsg('Voice-over edit cancelled. The saved export remains unchanged.');
+  }
   function editTransform(job) {
     const options = job.payload || {};
     if (!job.source_available) {
@@ -1060,6 +1159,8 @@ function App() {
 
   const scriptAudioJob = jobs.find(job => job.id === scriptAudioJobId);
   const transformJobs = transformHistory.filter(job => !(job.payload?.scenes?.length));
+  const availableTransformVideos = transformJobs.filter(job => job.status === 'completed' && job.output_available);
+  const selectedVoiceOverJob = voiceOverHistory.find(job => job.id === voiceOverSelectedId);
   const dubJobs = jobs.filter(job => job.kind === 'video_voice_dub');
   const dubWordCount = dubNarration.trim() ? dubNarration.trim().split(/\s+/u).filter(Boolean).length : 0;
   const dubEstimatedSpeechSeconds = estimateHindiSpeechSeconds(dubNarration);
@@ -1436,6 +1537,78 @@ function App() {
         {tab === 'transform' && <section className="transform-workspace">
           <span>VIDEO TRANSFORMATION</span><h1>{editingTransformId ? 'Edit your export.' : 'Reframe your footage.'}</h1>
           <p>Every export is saved in this workspace. Watch it here, download it, or edit the settings and create another version without losing the previous one.</p>
+
+          <section className="voice-over-panel">
+            <div className="voice-over-heading"><div><span>VOICE-OVER · NO LIP-SYNC</span><h2>Add narration to a video.</h2><p>Add your saved Hindi voice to any uploaded video or completed Transform export. The video frames, face and mouth movement are not changed.</p></div></div>
+            <form className="voice-over-form" onSubmit={queueVoiceOver}>
+              {editingVoiceOverId ? <div className="transform-edit-banner voice-over-edit-banner">
+                <b>Editing a saved voice-over</b>
+                <small>{voiceOverHistory.find(job => job.id === editingVoiceOverId)?.payload?.source_filename || 'Original source video'} · the original source will be reused.</small>
+                <div className="video-preview"><video src={'/api/jobs/' + editingVoiceOverId + '/source'} controls playsInline preload="metadata"/></div>
+                <button type="button" onClick={cancelVoiceOverEdit}>Cancel editing</button>
+              </div> : <div className="voice-over-source-grid">
+                <label className="drop"><Upload/><b>{voiceOverFile?.name || 'Upload a video for voice-over'}</b><small>MP4 / MOV / MKV / WebM · maximum 500 MB</small><input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={event => {setVoiceOverFile(event.target.files?.[0] || null);setVoiceOverSourceTransformId('');}}/></label>
+                <label>OR SELECT AN EXISTING TRANSFORM VIDEO
+                  <select value={voiceOverSourceTransformId} onChange={event => {setVoiceOverSourceTransformId(event.target.value);if(event.target.value)setVoiceOverFile(null);}}>
+                    <option value="">Choose a completed Transform export</option>
+                    {availableTransformVideos.map(job => <option key={job.id} value={job.id}>{job.payload?.source_filename || 'Transform video'} · {new Date(job.created_at).toLocaleString()}</option>)}
+                  </select>
+                </label>
+              </div>}
+              <div className="voice-over-fields">
+                <label>HINDI VOICE PROFILE
+                  <select required value={voiceOverVoiceId} onChange={event => setVoiceOverVoiceId(event.target.value)}>
+                    <option value="" disabled>Select saved WAV profile</option>
+                    {voices.map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}
+                  </select>
+                </label>
+                <label>START VOICE AT (SECONDS)
+                  <input type="number" min="0" max="14400" step="0.1" value={voiceOverStartOffset} onChange={event => setVoiceOverStartOffset(event.target.value)}/>
+                </label>
+              </div>
+              <label>HINDI VOICE-OVER SCRIPT
+                <textarea rows="6" maxLength="12000" value={voiceOverNarration} onChange={event => setVoiceOverNarration(event.target.value)} placeholder="यहाँ अपनी हिंदी narration लिखें…" required/>
+                <small className="voice-over-help">Punctuation and paragraph breaks guide pauses and intonation. Speech is never silently trimmed; narration must fit within the remaining video duration.</small>
+              </label>
+              <label className="voice-over-checkbox">
+                <input type="checkbox" checked={voiceOverKeepOriginal} onChange={event => setVoiceOverKeepOriginal(event.target.checked)}/>
+                <span><b>Keep original video audio underneath</b><small>Turn off to use only the generated voice-over.</small></span>
+              </label>
+              {voiceOverKeepOriginal && <label>ORIGINAL AUDIO VOLUME · {Math.round(voiceOverOriginalVolume * 100)}%
+                <input type="range" min="0" max="1.5" step="0.05" value={voiceOverOriginalVolume} onChange={event => setVoiceOverOriginalVolume(Number(event.target.value))}/>
+              </label>}
+              <label>VOICE-OVER VOLUME · {Math.round(voiceOverVoiceVolume * 100)}%
+                <input type="range" min="0.1" max="2" step="0.05" value={voiceOverVoiceVolume} onChange={event => setVoiceOverVoiceVolume(Number(event.target.value))}/>
+              </label>
+              <button className="primary" disabled={voiceOverBusy || (!voiceOverFile && !voiceOverSourceTransformId && !editingVoiceOverId) || !voiceOverVoiceId || !voiceOverNarration.trim()}>
+                {voiceOverBusy ? 'Queueing voice-over…' : editingVoiceOverId ? 'Create edited voice-over version' : 'Generate voice-over video'}
+              </button>
+            </form>
+            <div className="voice-over-history">
+              <div className="transform-results-heading"><div><h3>Generated voice-over videos</h3><small>Select a saved result to play, download, edit or delete it.</small></div><button type="button" onClick={refresh}><RefreshCw size={15}/> Refresh</button></div>
+              <label>VOICE-OVER VIDEO HISTORY
+                <select value={voiceOverSelectedId} onChange={event => setVoiceOverSelectedId(event.target.value)}>
+                  <option value="">Select a generated video</option>
+                  {voiceOverHistory.map(job => {
+                    const state = job.status === 'completed' && job.output_available ? 'Ready' : job.status === 'failed' ? 'Failed' : job.status === 'running' ? 'Processing' : 'Queued';
+                    return <option key={job.id} value={job.id}>{job.payload?.source_filename || 'Voice-over video'} · {state} · {new Date(job.created_at).toLocaleString()}</option>;
+                  })}
+                </select>
+              </label>
+              {selectedVoiceOverJob ? <article className="transform-job voice-over-result">
+                <div className="transform-job-heading"><div><b>{selectedVoiceOverJob.payload?.source_filename || 'Voice-over video'}</b><small>{new Date(selectedVoiceOverJob.created_at).toLocaleString()} · {selectedVoiceOverJob.stage}</small></div><span className={'transform-status ' + (selectedVoiceOverJob.status === 'completed' ? 'success' : selectedVoiceOverJob.status === 'failed' ? 'failed' : 'pending')}>{selectedVoiceOverJob.status === 'completed' && selectedVoiceOverJob.output_available ? 'Ready' : selectedVoiceOverJob.status === 'failed' ? 'Failed' : selectedVoiceOverJob.status === 'running' ? 'Processing' : 'Queued'}</span></div>
+                <progress value={selectedVoiceOverJob.progress || 0} max="100"/>
+                <small className="transform-progress-label">{selectedVoiceOverJob.status === 'completed' ? 'Export ready · 100%' : (selectedVoiceOverJob.progress || 0) + '% · ' + selectedVoiceOverJob.stage}</small>
+                {selectedVoiceOverJob.status === 'completed' && selectedVoiceOverJob.output_available && <div className="video-preview transform-output-preview"><video src={'/api/jobs/' + selectedVoiceOverJob.id + '/preview-video'} controls playsInline preload="metadata"/></div>}
+                {selectedVoiceOverJob.status === 'failed' && <p className="transform-error">{selectedVoiceOverJob.error || 'The voice-over could not be completed.'}</p>}
+                <div className="transform-job-actions">
+                  {selectedVoiceOverJob.status === 'completed' && selectedVoiceOverJob.output_available && <a className="primary" href={'/api/jobs/' + selectedVoiceOverJob.id + '/output'} download="voice_over.mp4"><Download size={15}/> Download MP4</a>}
+                  {selectedVoiceOverJob.source_available && !['queued','running'].includes(selectedVoiceOverJob.status) && <button type="button" onClick={() => editVoiceOver(selectedVoiceOverJob)}>Edit voice-over</button>}
+                  <button type="button" className="danger" disabled={selectedVoiceOverJob.status === 'running'} onClick={() => deleteMedia('/api/jobs/' + selectedVoiceOverJob.id, 'voice-over video and its source')}><Trash2 size={14}/> {selectedVoiceOverJob.status === 'running' ? 'Processing — cannot delete' : 'Delete'}</button>
+                </div>
+              </article> : <p className="voice-over-empty">Your generated voice-over videos will appear in this list. Select one here to play or manage it.</p>}
+            </div>
+          </section>
           {editingTransformId && <div className="transform-edit-banner">
             <b>Editing a saved transformation</b>
             <small>{jobs.find(job => job.id === editingTransformId)?.payload?.source_filename || 'Original source video'} · original file and saved assets will be reused unless replaced below.</small>

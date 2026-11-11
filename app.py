@@ -647,6 +647,183 @@ async def create_video_voice_dub(
     )
 
 
+def make_voice_over_payload(
+    voice_id: str,
+    narration: str,
+    start_offset: float,
+    keep_original_audio: bool,
+    original_volume: float,
+    voice_volume: float,
+    source_filename: str,
+    source_transform_job_id: str = "",
+) -> dict:
+    if not tts_runtime_ready():
+        raise HTTPException(503, "Pocket TTS Hindi is not enabled or its CPU model is unavailable.")
+    try:
+        resolve_voice_reference(VOICES, voice_id, MAX_VOICE)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if len(narration.strip()) < 2:
+        raise HTTPException(400, "Enter the Hindi narration to be spoken.")
+    if not 0 <= start_offset <= 14400:
+        raise HTTPException(400, "Voice-over start offset must be between 0 and 14,400 seconds.")
+    if not 0 <= original_volume <= 1.5:
+        raise HTTPException(400, "Original audio volume must be between 0 and 150%.")
+    if not 0.1 <= voice_volume <= 2.0:
+        raise HTTPException(400, "Voice-over volume must be between 10% and 200%.")
+    return {
+        "source_ui": "transform_voice_over",
+        "source_filename": Path(source_filename).name[:180],
+        "source_transform_job_id": source_transform_job_id,
+        "retain_source": True,
+        "voice_id": voice_id,
+        "narration": narration.strip(),
+        "generation_settings": load_voice_generation_settings(voice_id),
+        "start_offset": float(start_offset),
+        "keep_original_audio": bool(keep_original_audio),
+        "original_volume": float(original_volume),
+        "voice_volume": float(voice_volume),
+    }
+
+
+@app.post("/api/video/voice-over")
+async def create_video_voice_over(
+    file: UploadFile | None = File(None),
+    source_job_id: str = Form(""),
+    voice_id: str = Form(..., min_length=1, max_length=48),
+    narration: str = Form(..., min_length=1, max_length=12000),
+    start_offset: float = Form(0),
+    keep_original_audio: bool = Form(True),
+    original_volume: float = Form(0.25),
+    voice_volume: float = Form(1.0),
+):
+    source_job_id = source_job_id.strip()
+    if bool(file) == bool(source_job_id):
+        raise HTTPException(400, "Upload a video or select a completed Transform export.")
+    folder = UP / str(uuid.uuid4())
+    folder.mkdir(parents=True, exist_ok=False)
+    source_filename = ""
+    source_transform_job_id = ""
+    queued = False
+    try:
+        if source_job_id:
+            source_job = getjob(source_job_id)
+            if (
+                not source_job or source_job.get("kind") != "video_transform"
+                or source_job.get("status") != "completed" or not source_job.get("output_path")
+                or source_job.get("payload", {}).get("scenes")
+            ):
+                raise HTTPException(404, "Choose a completed video from Transform history.")
+            source_path = Path(source_job["output_path"]).resolve()
+            if (
+                OUT.resolve() not in source_path.parents or not source_path.is_file()
+                or source_path.suffix.lower() not in {".mp4", ".mov", ".mkv", ".webm"}
+            ):
+                raise HTTPException(404, "The selected Transform export is no longer available.")
+            if source_path.stat().st_size > MAX_UPLOAD:
+                raise HTTPException(413, "The selected Transform export exceeds the configured size limit.")
+            extension = source_path.suffix.lower()
+            source_filename = Path(
+                source_job["payload"].get("source_filename") or source_path.name
+            ).name
+            source_transform_job_id = source_job_id
+            target = folder / ("source" + extension)
+            with source_path.open("rb") as source_file, target.open("xb") as output_file:
+                shutil.copyfileobj(source_file, output_file, length=1024 * 1024)
+        else:
+            extension = Path(file.filename or "").suffix.lower()
+            if extension not in {".mp4", ".mov", ".mkv", ".webm"}:
+                raise HTTPException(415, "Use MP4, MOV, MKV or WebM video.")
+            source_filename = Path(file.filename or ("source" + extension)).name
+            target = folder / ("source" + extension)
+            size = 0
+            with target.open("xb") as output_file:
+                while chunk := await file.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > MAX_UPLOAD:
+                        raise HTTPException(413, "Video upload exceeds the configured size limit.")
+                    output_file.write(chunk)
+
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(target)],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        media = json.loads(probe.stdout)
+        video_stream = next(
+            (item for item in media.get("streams", []) if item.get("codec_type") == "video"),
+            None,
+        )
+        duration = float(
+            (video_stream or {}).get("duration")
+            or media.get("format", {}).get("duration")
+            or 0
+        )
+        if not video_stream or duration < 1.0 or duration > 14400:
+            raise HTTPException(413, "Choose a readable video between 1 second and 4 hours.")
+        if int(video_stream.get("width") or 0) < 16 or int(video_stream.get("height") or 0) < 16:
+            raise HTTPException(415, "The source video has invalid dimensions.")
+        if start_offset >= duration:
+            raise HTTPException(400, "Voice-over start time must be before the end of the video.")
+
+        payload = make_voice_over_payload(
+            voice_id, narration, start_offset, keep_original_audio,
+            original_volume, voice_volume, source_filename, source_transform_job_id,
+        )
+        payload["source_duration"] = duration
+        result = enqueue("video_voice_over", payload, str(target))
+        queued = True
+        return result
+    except HTTPException:
+        raise
+    except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        raise HTTPException(415, "The selected file is not a readable video.") from exc
+    finally:
+        if file is not None:
+            await file.close()
+        if not queued:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+@app.post("/api/jobs/{job_id}/voice-over/rerun")
+def rerun_video_voice_over(
+    job_id: str,
+    voice_id: str = Form(..., min_length=1, max_length=48),
+    narration: str = Form(..., min_length=1, max_length=12000),
+    start_offset: float = Form(0),
+    keep_original_audio: bool = Form(True),
+    original_volume: float = Form(0.25),
+    voice_volume: float = Form(1.0),
+):
+    original = getjob(job_id)
+    if not original or original.get("kind") != "video_voice_over":
+        raise HTTPException(404, "Voice-over job not found.")
+    if original["status"] in {"queued", "running"}:
+        raise HTTPException(409, "Wait until this voice-over finishes before editing it.")
+    if not original.get("payload", {}).get("retain_source"):
+        raise HTTPException(409, "This voice-over has no retained source and cannot be edited.")
+    old_source = Path(original.get("input_path") or "").resolve()
+    if UP.resolve() not in old_source.parents or not old_source.is_file():
+        raise HTTPException(404, "The original source video is no longer available.")
+
+    payload = make_voice_over_payload(
+        voice_id, narration, start_offset, keep_original_audio,
+        original_volume, voice_volume,
+        original["payload"].get("source_filename") or old_source.name,
+        original["payload"].get("source_transform_job_id") or "",
+    )
+    folder = UP / str(uuid.uuid4())
+    folder.mkdir(parents=True, exist_ok=False)
+    try:
+        target = folder / ("source" + old_source.suffix.lower())
+        shutil.copy2(old_source, target)
+        payload["source_duration"] = float(original["payload"].get("source_duration") or 0)
+        return enqueue("video_voice_over", payload, str(target))
+    except Exception:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+
+
+
 @app.get("/api/llm/health")
 def llm_health():
     runtime = ollama_runtime_ready()
@@ -847,7 +1024,7 @@ def serialize_job_media_status(row):
     item["source_available"] = False
     item["output_available"] = False
     try:
-        if item["kind"] == "video_transform" and item["payload"].get("retain_source"):
+        if item["kind"] in {"video_transform", "video_voice_over"} and item["payload"].get("retain_source"):
             source = Path(item.get("input_path") or "").resolve()
             item["source_available"] = UP.resolve() in source.parents and source.is_file()
         if item["status"] == "completed" and item.get("output_path"):
@@ -876,6 +1053,17 @@ def transform_history():
         serialize_job_media_status(row) for row in rows
         if not json.loads(row["payload"]).get("scenes")
     ]
+
+
+@app.get("/api/voice-over/history")
+def voice_over_history():
+    """Return the complete saved voice-over history for the Transform selector."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM jobs WHERE kind='video_voice_over' ORDER BY created_at DESC"
+        ).fetchall()
+    return [serialize_job_media_status(row) for row in rows]
+
 
 
 @app.get("/api/saved-projects")
@@ -2164,7 +2352,7 @@ def job_video_preview(job_id: str):
     job = getjob(job_id)
     if (
         not job or job["status"] != "completed"
-        or job["kind"] not in {"video_transform", "video_voice_dub", "facefusion"}
+        or job["kind"] not in {"video_transform", "video_voice_dub", "video_voice_over", "facefusion"}
         or not job.get("output_path")
     ):
         raise HTTPException(404, "Video preview not ready")
@@ -2185,7 +2373,7 @@ def job_video_preview(job_id: str):
 def job_video_source(job_id: str):
     job = getjob(job_id)
     if (
-        not job or job["kind"] != "video_transform"
+        not job or job["kind"] not in {"video_transform", "video_voice_over"}
         or not job.get("payload", {}).get("retain_source")
         or not job.get("input_path")
     ):
@@ -2213,6 +2401,94 @@ def work(job):
     cleanup_failed_output(job_id)
     folder.mkdir(parents=True, exist_ok=True)
 
+    if job["kind"] == "video_voice_over":
+        if not tts_runtime_ready():
+            raise RuntimeError("Pocket TTS Hindi is not enabled or installed.")
+        voice_id = payload.get("voice_id", "")
+        update(job_id, stage="Generating Hindi voice-over with your saved voice", progress=8)
+        narration_path = folder / "voice_over.wav"
+        narration_duration = synthesize_pocket_tts_dialogue(
+            payload["narration"],
+            voice_id,
+            VOICES,
+            POCKET_TTS_HINDI_ROOT,
+            narration_path,
+            MAX_VOICE,
+            POCKET_TTS_HINDI_BINARY,
+            payload.get("generation_settings") or load_voice_generation_settings(voice_id),
+        )
+        source_path = Path(job["input_path"]).resolve()
+        if UP.resolve() not in source_path.parents or not source_path.is_file():
+            raise RuntimeError("The retained source video is missing.")
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(source_path)],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        media = json.loads(probe.stdout)
+        video_stream = next(
+            (item for item in media.get("streams", []) if item.get("codec_type") == "video"),
+            None,
+        )
+        if not video_stream:
+            raise RuntimeError("The source file has no video stream.")
+        video_duration = float(
+            video_stream.get("duration") or media.get("format", {}).get("duration") or 0
+        )
+        if video_duration <= 0:
+            raise RuntimeError("The source video duration could not be determined.")
+        start_offset = max(0.0, float(payload.get("start_offset", 0)))
+        if start_offset + narration_duration > video_duration + 0.15:
+            available = max(0.0, video_duration - start_offset)
+            raise RuntimeError(
+                f"Voice-over is {narration_duration:.1f}s but only {available:.1f}s remain "
+                "in the video. Shorten the narration or choose a longer source video; "
+                "the Studio will not cut off speech or freeze the picture."
+            )
+
+        has_source_audio = any(
+            item.get("codec_type") == "audio" for item in media.get("streams", [])
+        )
+        voice_volume = float(payload.get("voice_volume", 1.0))
+        original_volume = float(payload.get("original_volume", 0.25))
+        delay_ms = int(round(start_offset * 1000))
+        filter_parts = [
+            f"[1:a:0]adelay=delays={delay_ms}:all=1,volume={voice_volume:.3f},"
+            f"apad,atrim=duration={video_duration:.3f}[voice]"
+        ]
+        if payload.get("keep_original_audio", True) and has_source_audio:
+            filter_parts.extend([
+                f"[0:a:0]volume={original_volume:.3f},apad,"
+                f"atrim=duration={video_duration:.3f}[original]",
+                "[original][voice]amix=inputs=2:duration=longest:dropout_transition=0:"
+                "normalize=0,alimiter=limit=0.95:level=0[aout]",
+            ])
+        else:
+            filter_parts.append("[voice]alimiter=limit=0.95:level=0[aout]")
+
+        destination = folder / "video_voice_over.mp4"
+        update(job_id, stage="Mixing narration with the original video audio", progress=68)
+        subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                "-i", str(source_path), "-i", str(narration_path),
+                "-filter_complex", ";".join(filter_parts),
+                "-map", "0:v:0", "-map", "[aout]",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-threads", "2", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k",
+                "-t", f"{video_duration:.3f}", "-movflags", "+faststart",
+                str(destination),
+            ],
+            check=True, capture_output=True, text=True, timeout=7200,
+        )
+        check = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(destination)],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        streams = set(check.stdout.splitlines())
+        if "video" not in streams or "audio" not in streams:
+            raise RuntimeError("Voice-over export must contain both video and mixed narration audio.")
+        narration_path.unlink(missing_ok=True)
     if job["kind"] == "video_voice_dub":
         if not tts_runtime_ready():
             raise RuntimeError("Pocket TTS Hindi is not enabled or installed.")
