@@ -43,6 +43,47 @@ def checkout(url: str, destination: Path, revision: str) -> None:
         raise RuntimeError(f"Unexpected Git revision in {destination}: {actual}")
 
 
+
+def patch_native_cpu_sources() -> None:
+    """Apply required CPU-runtime safeguards to the pinned Kitten C++ source."""
+    main_cpp = CPP_ROOT / "tools" / "kitten-tts" / "main.cpp"
+    sampling_h = CPP_ROOT / "tools" / "kitten-tts" / "sampling.h"
+
+    main_source = main_cpp.read_text(encoding="utf-8")
+    old_context = "cp.n_threads_batch=threads;cp.no_perf=false;"
+    safe_context = (
+        "cp.n_threads_batch=threads;"
+        "cp.flash_attn_type=LLAMA_FLASH_ATTN_TYPE_DISABLED;"
+        "cp.no_perf=false;"
+    )
+    if safe_context not in main_source:
+        if old_context not in main_source:
+            raise RuntimeError("Pinned Kitten source changed: cannot apply CPU Flash Attention safeguard.")
+        main_cpp.write_text(main_source.replace(old_context, safe_context, 1), encoding="utf-8")
+
+    sampling_source = sampling_h.read_text(encoding="utf-8")
+    if "#include <stdexcept>" not in sampling_source:
+        include_anchor = "#include <random>\\n"
+        if include_anchor not in sampling_source:
+            raise RuntimeError("Pinned Kitten source changed: cannot add sampler error handling.")
+        sampling_source = sampling_source.replace(
+            include_anchor, include_anchor + "#include <stdexcept>\\n", 1
+        )
+    old_sampler = "        float peak=scores[order.back()]; double sum=0;"
+    safe_sampler = (
+        '        if(order.empty()) throw std::runtime_error("no finite logits remain after top-k filtering");\\n'
+        "        float peak=scores[order.back()]; double sum=0;"
+    )
+    if safe_sampler not in sampling_source:
+        if old_sampler not in sampling_source:
+            raise RuntimeError("Pinned Kitten source changed: cannot apply empty-sampler guard.")
+        sampling_source = sampling_source.replace(old_sampler, safe_sampler, 1)
+    sampling_h.write_text(sampling_source, encoding="utf-8")
+    print(
+        "Applied CPU safeguards: Flash Attention disabled and empty sampler candidates guarded.",
+        flush=True,
+    )
+
 def main() -> None:
     if os.name != "posix":
         raise SystemExit("This installer targets the Linux CPU server.")
@@ -66,6 +107,7 @@ def main() -> None:
     run([*pip, "install", "cmake==3.31.6", "ninja", "huggingface_hub", "safetensors"])
     checkout("https://github.com/KittenML/KittenTTS.git", PY_PACKAGE, PY_REVISION)
     checkout("https://github.com/KittenML/kitten-tts-2-cpp.git", CPP_ROOT, CPP_REVISION)
+    patch_native_cpu_sources()
     run(["git", "submodule", "update", "--init", "--recursive"], cwd=CPP_ROOT)
     run([*pip, "install", "-e", str(PY_PACKAGE)])
 
