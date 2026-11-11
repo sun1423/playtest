@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kitten_tts import engine_ready, validate_text
+from kitten_tts import engine_ready, is_hindi_text, validate_text
 
 
 class KittenTtsTests(unittest.TestCase):
@@ -44,6 +44,10 @@ class KittenTtsTests(unittest.TestCase):
         (package_dir / "speaker.py").write_text("", encoding="utf-8")
         (package_dir / "vocoder.py").write_text("", encoding="utf-8")
         return binary, model, python, script, package
+
+    def test_hindi_detection_is_devanagari_specific(self):
+        self.assertTrue(is_hindi_text("नमस्ते, दुनिया"))
+        self.assertFalse(is_hindi_text("Namaste, world"))
 
     def test_expression_markup_and_hindi_are_preserved(self):
         value = "[joyful] नमस्ते <laugh> यह (((बहुत))) अच्छा है"
