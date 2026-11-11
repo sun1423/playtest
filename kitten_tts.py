@@ -367,13 +367,13 @@ def synthesize(
                 # The saved reference supplies speaker identity. Its long audio/text
                 # prompt was destabilising Hindi pronunciation, so use timbre only.
                 command.extend([
-                    "--temperature", "0.8",
+                    "--temperature", "0.7",
                     "--top-k", "50",
-                    "--top-p", "0.85",
-                    "--repetition-penalty", "1.18",
+                    "--top-p", "0.8",
+                    "--repetition-penalty", "1.12",
                     "--repetition-window", "50",
-                    "--run-penalty", "2.5",
-                    "--run-grace", "3",
+                    "--run-penalty", "1.8",
+                    "--run-grace", "5",
                     "--chunk-chars", "240",
                     "--chunk-min-chars", "90",
                     "--no-reference",
