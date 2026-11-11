@@ -113,6 +113,9 @@ def main() -> None:
         "-DCMAKE_BUILD_TYPE=Release",
         "-DCMAKE_CXX_STANDARD=20",
         "-DCMAKE_CXX_STANDARD_REQUIRED=ON",
+        # Match PyTorch 2.6 ABI across every native C++ target. Applying
+        # Torch's ABI flag only to kitten-tts creates ABI-incompatible libs.
+        "-DCMAKE_CXX_FLAGS=-D_GLIBCXX_USE_CXX11_ABI=0",
         "-DGGML_CUDA=OFF", "-DGGML_METAL=OFF",
         "-DLLAMA_BUILD_KITTEN_TTS=ON",
         "-DLLAMA_BUILD_SERVER=OFF",
