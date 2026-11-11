@@ -21,6 +21,18 @@ Put one leading emotion tag at the start of each intended utterance, for example
 
 Emotion control is beta: tags steer delivery but do not guarantee a specific emotion. Hindi quality and recognition can vary by voice and sentence. The app passes Hindi text with the upstream-required \`--no-normalize\` setting so its English-focused text normalizer does not rewrite Hindi numbers, dates or abbreviations.
 
+## Hindi quality defaults
+
+When the submitted text contains Devanagari, the backend selects a Hindi-focused path:
+
+- Stable sampling: temperature 0.8, top-k 50 and top-p 0.85.
+- Stronger loop control: repetition penalty 1.18 and codec-token run penalty 2.5 after 3 repeats.
+- Sentence-aware chunks target 240 characters, with a 90-character minimum.
+- Timbre-only cloning: use the saved profile's speaker embedding but omit its reference audio/transcript tokens from the generation prompt. This avoids carrying errors from a long or imperfect Hindi reference transcript into the spoken sentence.
+- A modest +5 dB output gain followed by the existing peak limiter. Non-Devanagari requests retain their previous audio level and generation settings.
+
+The mode is selected automatically from Devanagari text. It does not modify the saved WAV, transcript or prepared voice profile.
+
 ## CPU architecture and isolation
 
 - Native KittenML C++ runner / GGML CPU model; CUDA and Metal builds are disabled.
