@@ -5,9 +5,11 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 import uuid
 import wave
 from contextlib import contextmanager
@@ -111,14 +113,47 @@ def is_hindi_text(text: str) -> bool:
     return any("\u0900" <= char <= "\u097f" for char in text)
 
 
-def validate_text(text: str) -> str:
-    """Keep recognised emotion, vocal-event and emphasis markup intact."""
+# Remove accidental zero-width and bidirectional formatting marks from pasted text.
+# Keep U+200C ZWNJ and U+200D ZWJ: they can be meaningful in Indic shaping.
+_INVISIBLE_INPUT_CONTROLS = re.compile(
+    r"[\u00ad\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]"
+)
+
+
+def normalize_tts_text(text: str) -> str:
+    """Normalize text safely for multilingual TTS without rewriting words or Indic joiners."""
     if not isinstance(text, str) or not text.strip():
         raise ValueError("Enter text for KittenTTS 2 to speak.")
-    value = text.strip()
+
+    value = unicodedata.normalize("NFC", text)
+    value = value.replace("\\r\\n", "\\n").replace("\\r", "\\n")
+    value = value.replace("\\u00a0", " ").replace("\\u202f", " ")
+    value = _INVISIBLE_INPUT_CONTROLS.sub("", value)
+
+    # Replace accidental control characters, but preserve tabs/newlines and Indic joiners.
+    value = "".join(
+        char for char in value
+        if unicodedata.category(char) != "Cc" or char in "\\n\\t"
+    )
+    value = re.sub(r"[ \\t]+", " ", value)
+    value = re.sub(r" *\\n *", "\\n", value)
+    value = unicodedata.normalize("NFC", value).strip()
+
+    if not value:
+        raise ValueError("The supplied text contains no speakable characters.")
+    return value
+
+
+def validate_text(text: str) -> str:
+    """Validate normalized TTS input while preserving emotion and vocal-event markup."""
+    value = normalize_tts_text(text)
     if len(value) > MAX_TEXT_CHARS:
         raise ValueError("KittenTTS text exceeds the 100,000-character limit.")
-    if len(value.encode("utf-8")) > MAX_TEXT_ARG_BYTES:
+    try:
+        encoded_size = len(value.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise ValueError("The text contains invalid Unicode characters.") from exc
+    if encoded_size > MAX_TEXT_ARG_BYTES:
         raise ValueError(
             "This script is too large for one KittenTTS CPU request. "
             "Use shorter sections so expression tags stay with the intended lines."
