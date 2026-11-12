@@ -1,0 +1,101 @@
+# CPU Hindi video dubbing and lip-sync
+
+## What this feature does
+
+The Studio accepts a real source video, a saved Pocket TTS Hindi voice profile, and replacement Hindi dialogue. The worker synthesises the dialogue with the selected speaker profile, then runs Wav2Lip through ONNX Runtime on the CPU. It processes the complete supported clip, not a fixed first-five-second segment.
+
+The original performance supplies the face identity, eyes, expressions, head movement, body motion, camera motion, and background. The lip-sync model regenerates the lower mouth area only. It does **not** invent new emotions, eyebrow movement, eye expression, or new head gestures. The source actor must already perform those things in the source footage.
+
+## Azure hardware and measured baseline
+
+Validated host: Azure x86_64, 2 vCPU, about 16 GiB RAM, no NVIDIA device. The smoke test processed 156 frames (6.27 seconds) through the ONNX CPU provider and produced an MP4 with video and audio. End-to-end time, including model startup and encoding, was 56.4 seconds on this host. This is a slow offline render: do not advertise it as real time. Longer clips take substantially longer; processing time varies with resolution, face detection, video encoding, and the source.
+
+The pipeline caps inference at 2 ONNX threads and eight decoded frames per batch. It does not load an entire uncompressed video into memory. Frames are normalised to a maximum dimension of 1280 before CPU inference.
+
+## One-time installation
+
+From the deployed checkout, install the pinned CPU dependencies into the Studio virtual environment:
+
+\`\`\`bash
+cd /opt/ai-video-studio
+.venv/bin/pip install -r requirements.txt
+\`\`\`
+
+Download the pinned ONNX model files. They are stored under private persistent model storage, not in Git:
+
+\`\`\`bash
+.venv/bin/python scripts/install_cpu_lipsync.py
+\`\`\`
+
+The installer verifies SHA-256 hashes before publishing either model. Default destination:
+
+\`/srv/ai-video-studio/models/wav2lip-cpu\`
+
+The API and worker must use the same model path. Override with \`LIPSYNC_MODELS_ROOT\` only when deliberately moving the model directory. The model is not available until both runtime dependencies and both verified model files are present. Check \`GET /api/lipsync/status\` after installation.
+
+## In-app workflow
+
+1. Open **AI Video · Lip Sync**.
+2. Upload MP4, MOV, MKV, or WebM footage (1–180 seconds, within the existing 500 MB upload cap).
+3. Select a saved Hindi WAV voice profile from Voice Studio.
+4. Enter the replacement Hindi dialogue. Punctuation and paragraph breaks help the TTS engine produce pauses.
+5. Queue the job and monitor it in **Projects → Render queue**.
+6. Download the completed \`video_with_lipsync.mp4\`.
+
+The full speech audio replaces the original dialogue by default. The optional ambience switch mixes the source audio quietly underneath; it can also retain the original dialogue, so leave it off for clean dubbing.
+
+## Timing policy
+
+- When narration is shorter than the source, the video keeps its full duration and the new speech ends naturally.
+- When narration is longer, the source video may be slowed by up to 20% to fit. More than 20% is rejected instead of silently cutting speech or holding a frozen frame for a long time.
+- The speech audio is padded to the output frame duration so the final MP4 has a stable audio/video timeline.
+
+For best results, use one clearly visible, mostly front-facing speaker whose mouth remains visible in at least 80% of frames. Multi-person scenes, fast cuts, profile-only views, hands over the mouth, masks, or heavy occlusion can fail the face-tracking quality gate.
+
+## Known quality and licensing limits
+
+Wav2Lip is a mouth re-animation baseline, not full video-to-video diffusion. It preserves source emotion; it cannot create new facial expressions. A 96×96 face generator can look softer than a modern diffusion lip-sync system. The refined blend keeps the upper face/eyes from the source frame, but the mouth can still show seams or blur. Check the actual footage and generated output before relying on it.
+
+The Wav2Lip pretrained generator weights distributed by the selected model source carry personal/research/non-commercial restrictions. Do not use these weights for a commercial product or monetised production without first obtaining written rights or replacing them with commercially cleared weights. Open-source code does not automatically make pretrained weights commercially licensed.
+
+## Troubleshooting
+
+- **Feature reports not ready:** install \`requirements.txt\` and run the model download script; then restart both API and worker services.
+- **No visible mouth change:** check that the input contains one large, front-facing face and the face-detection ratio passes the 80% gate.
+- **Job rejects speech duration:** shorten the Hindi narration or provide a longer source clip; the worker will not truncate dialogue.
+- **Output mouth is soft or seams are visible:** this is a Wav2Lip quality limitation. Do not assume the source voice profile is the cause.
+
+
+## Full-frame AI video-to-video styles
+
+The second stage stylises every frame after the new voice has been lip-synchronised. It preserves source frame count, aspect ratio, timing, movement and generated speech audio. The style model changes the appearance of the same frames; it does not generate new objects, actions or camera movements.
+
+- **AnimeGANv2 512px**: higher-detail anime conversion; measured at about 0.41 frames/second on this 2-vCPU host.
+- **Candy, Mosaic, Rain Princess and Udnie 224px**: faster painterly styles; measured at about 5.4 frames/second, with softer fine detail because the model input is 224px.
+
+Install the style models once:
+
+```bash
+cd /opt/ai-video-studio
+.venv/bin/python scripts/install_video_style_models.py
+```
+
+The installer SHA-256-verifies all weights into `/srv/ai-video-studio/models/video-style`. Model files total about 36 MB. Inference runs through ONNX Runtime CPUExecutionProvider and streams frames one at a time instead of loading the raw video into RAM.
+
+At 25 fps, AnimeGANv2 512px takes roughly 10 minutes for a 10-second clip based on the measured 0.41 fps. The painterly presets are much faster but blur fine details. Per-frame models can introduce temporal flicker during rapid movement, so review the full export.
+
+MuseTalk 1.5 was also evaluated. Its DWPose landmark pass measured about 6.5 seconds per frame on this 2-vCPU host, so it is not part of the default pipeline. Wav2Lip ONNX is the practical CPU lip-sync engine for full clips. It changes mouth movement and retains the source eyes, expressions, head motion and body performance; it does not generate new eyebrow or eye emotions.
+
+
+## Lip-sync dialogue text handling
+
+The AI Video · Lip Sync and Transform Voice-over fields keep Hindi letters, numbers and words, while removing punctuation, emoji, hidden formatting marks and decorative symbols before Pocket TTS. The Hindi model was trained with effectively no punctuation coverage, so punctuation is not a reliable pause, intonation or emotion control. Long text is split only at word boundaries into bounded sections; a short controlled pause is inserted between sections, not between every punctuation mark.
+
+Pocket TTS Hindi does not expose explicit semantic emotion labels such as [angry] or [sad]. Do not include punctuation or stage directions expecting them to control emotion; write only the words that should be spoken. The renderer still checks the duration of the final generated WAV against the video limit.
+
+
+## Voice-over without lip-sync
+
+The Transform workspace also offers a separate **Voice-over · No Lip-sync** mode. It accepts a new source upload or a completed Transform export, synthesises Hindi speech with a saved Pocket TTS voice profile, and mixes it into the source video's audio. The source picture, mouth movement and frame timing are not passed through a face/lip-sync model. The start offset, generated-voice volume and optional original-audio level are editable.
+
+The full source is retained with each voice-over job so an edit can change the script, voice or mix settings and render a new version from the original source rather than layering audio over a prior export. The result selector shows the complete voice-over history with playback, download, edit and delete controls. Speech is checked against the time remaining after the selected start offset; the Studio rejects narration that would be cut off rather than truncating speech or extending the video with a frozen frame.

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Clapperboard, Film, Mic2, FolderOpen, Upload, Play, RefreshCw,
@@ -6,13 +6,161 @@ import {
 } from 'lucide-react';
 import './style.css';
 
+const VOICE_TEST_SAMPLES = {
+  en: "Hello, this is a short voice quality test.",
+  ar: "مرحباً، هذا اختبار قصير لجودة الصوت.",
+  zh: "你好，这是一个简短的语音质量测试。",
+  fr: "Bonjour, ceci est un court test de qualité vocale.",
+  de: "Hallo, dies ist ein kurzer Sprachqualitätstest.",
+  hi: "नमस्ते, यह मेरी आवाज़ का एक छोटा परीक्षण है।",
+  it: "Ciao, questo è un breve test della qualità della voce.",
+  pt: "Olá, este é um pequeno teste de qualidade de voz.",
+  ru: "Здравствуйте, это короткая проверка качества голоса.",
+  es: "Hola, esta es una breve prueba de calidad de voz.",
+  ja: "こんにちは、これは短い音声品質テストです。",
+  ko: "안녕하세요, 이것은 짧은 음성 품질 테스트입니다.",
+  tr: "Merhaba, bu kısa bir ses kalitesi testidir.",
+  nl: "Hallo, dit is een korte test van de stemkwaliteit.",
+  sv: "Hej, det här är ett kort test av röstkvaliteten.",
+  da: "Hej, dette er en kort test af stemmekvaliteten.",
+  fi: "Hei, tämä on lyhyt äänenlaadun testi.",
+  sw: "Hujambo, huu ni mtihani mfupi wa ubora wa sauti.",
+  el: "Γεια σας, αυτή είναι μια σύντομη δοκιμή ποιότητας φωνής.",
+  he: "שלום, זוהי בדיקה קצרה של איכות הקול."
+};
+
+function estimateSpeechSeconds(value) {
+  const narration = String(value || '').trim();
+  if (!narration) return 0;
+  const words = narration.split(/\s+/u).filter(Boolean).length;
+  return words / (100 / 60);
+}
+
+function countTextCharacters(value) {
+  const text = String(value || '');
+  if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+    return Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)).length;
+  }
+  return Array.from(text).length;
+}
+
+function truncateTextCharacters(value, limit) {
+  const text = String(value || '');
+  const maximum = Math.max(0, Number(limit) || 0);
+  if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+    return Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text))
+      .slice(0, maximum).map(item => item.segment).join('');
+  }
+  return Array.from(text).slice(0, maximum).join('');
+}
+
+function estimateVoiceOverCharacterLimit(seconds, language) {
+  const rate = language === 'hi' ? 7.5
+    : ['zh', 'ja', 'ko'].includes(language) ? 4.5 : 8.5;
+  return Math.max(0, Math.floor(Math.max(0, Number(seconds) || 0) * rate));
+}
+
+function readVideoDuration(source) {
+  return new Promise(resolve => {
+    const video = document.createElement('video');
+    let settled = false;
+    const finish = duration => {
+      if (settled) return;
+      settled = true;
+      video.onloadedmetadata = null;
+      video.onerror = null;
+      video.removeAttribute('src');
+      video.load();
+      resolve(Number.isFinite(duration) && duration > 0 ? duration : 0);
+    };
+    video.preload = 'metadata';
+    video.onloadedmetadata = () => finish(video.duration);
+    video.onerror = () => finish(0);
+    video.src = source;
+    video.load();
+  });
+}
+
+function formatTrimTime(value) {
+  const seconds = Math.max(0, Number(value) || 0);
+  const minutes = Math.floor(seconds / 60);
+  const remainder = (seconds % 60).toFixed(1).padStart(4, '0');
+  return String(minutes).padStart(2, '0') + ':' + remainder;
+}
+
+function SearchableLanguagePicker({ label, value, onChange, languages, search, onSearch }) {
+  const options = Array.isArray(languages) ? languages : [];
+  const query = String(search || '').trim().toLocaleLowerCase();
+  const filtered = options.filter(item =>
+    !query || item.name.toLocaleLowerCase().includes(query) || item.code.toLowerCase().includes(query)
+  );
+  const selected = options.find(item => item.code === value);
+  const visible = selected && !filtered.some(item => item.code === value)
+    ? [selected, ...filtered] : filtered;
+  return <div className="language-picker">
+    <label>{label}
+      <input type="search" value={search || ''} onChange={event => onSearch(event.target.value)}
+        placeholder="Search languages…" aria-label={'Search ' + label.toLowerCase()}/>
+      <select value={value} onChange={event => onChange(event.target.value)} disabled={!options.length}>
+        {visible.map(item => <option key={item.code} value={item.code}>{item.name}</option>)}
+        {!visible.length && <option value="">No matching languages</option>}
+      </select>
+      {!options.length && <small className="voice-warning">No languages are currently available for the selected speech engine.</small>}
+    </label>
+  </div>;
+}
+
 function App() {
   const [authenticated, setAuthenticated] = useState(false);
   const [checking, setChecking] = useState(true);
   const [password, setPassword] = useState('');
   const [tab, setTab] = useState('create');
   const [jobs, setJobs] = useState([]);
+  const [transformHistory, setTransformHistory] = useState([]);
   const [voices, setVoices] = useState([]);
+  const [ttsInfo, setTtsInfo] = useState({ tts_ready: false, tts_languages: [], tts_engines: {} });
+  const [ttsEngine, setTtsEngine] = useState('kitten');
+  const [voiceLanguage, setVoiceLanguage] = useState('hi');
+  const [voiceLanguageSearch, setVoiceLanguageSearch] = useState('');
+  const [languageSearch, setLanguageSearch] = useState('');
+  const [voiceOverLanguage, setVoiceOverLanguage] = useState('hi');
+  const [voiceOverLanguageSearch, setVoiceOverLanguageSearch] = useState('');
+  const [dubLanguage, setDubLanguage] = useState('hi');
+  const [dubLanguageSearch, setDubLanguageSearch] = useState('');
+  const [storyNarrationLanguage, setStoryNarrationLanguage] = useState('hi');
+  const [storyNarrationLanguageSearch, setStoryNarrationLanguageSearch] = useState('');
+  const [storyNarrationVoiceId, setStoryNarrationVoiceId] = useState('');
+  const activeTtsReady = Boolean(ttsInfo.tts_engines?.[ttsEngine]?.ready ?? (ttsEngine === 'pocket' && ttsInfo.tts_ready));
+  const speechLanguages = ttsInfo.tts_engines?.[ttsEngine]?.languages || [];
+  const voicesForLanguage = language => voices.filter(item => (item.language || 'hi') === language);
+  const speechLanguageName = language => speechLanguages.find(item => item.code === language)?.name || language.toUpperCase();
+  const [lipsyncInfo, setLipsyncInfo] = useState({ ready: false });
+  const [styleInfo, setStyleInfo] = useState({ ready: false, models: [] });
+  const [videoStyle, setVideoStyle] = useState('anime_512');
+  const [styleStrength, setStyleStrength] = useState(0.85);
+  const [dubFile, setDubFile] = useState(null);
+  const [dubSourceTransformId, setDubSourceTransformId] = useState('');
+  const [dubPreviewUrl, setDubPreviewUrl] = useState('');
+  const [dubSourceDuration, setDubSourceDuration] = useState(0);
+  const [dubNarration, setDubNarration] = useState('');
+  const [dubVoiceId, setDubVoiceId] = useState('');
+  const [dubKeepAmbience, setDubKeepAmbience] = useState(false);
+  const [dubBusy, setDubBusy] = useState(false);
+
+  const [voiceOverHistory, setVoiceOverHistory] = useState([]);
+  const [voiceOverSelectedId, setVoiceOverSelectedId] = useState('');
+  const [voiceOverFile, setVoiceOverFile] = useState(null);
+  const [voiceOverSourceDuration, setVoiceOverSourceDuration] = useState(0);
+  const [voiceOverSourceTransformId, setVoiceOverSourceTransformId] = useState('');
+  const [voiceOverNarration, setVoiceOverNarration] = useState('');
+  const [voiceOverVoiceId, setVoiceOverVoiceId] = useState('');
+  const [voiceOverStartOffset, setVoiceOverStartOffset] = useState('0');
+  const [voiceOverKeepOriginal, setVoiceOverKeepOriginal] = useState(true);
+  const [voiceOverOriginalVolume, setVoiceOverOriginalVolume] = useState(0.25);
+  const [voiceOverVoiceVolume, setVoiceOverVoiceVolume] = useState(1);
+  const [voiceOverBusy, setVoiceOverBusy] = useState(false);
+  const [editingVoiceOverId, setEditingVoiceOverId] = useState('');
+  const [voiceOverPendingJobId, setVoiceOverPendingJobId] = useState('');
   const [text, setText] = useState('');
   const [lang, setLang] = useState('hi');
   const [storyScript, setStoryScript] = useState('');
@@ -31,8 +179,15 @@ function App() {
   const [storyBusy, setStoryBusy] = useState(false);
   const [storyImageUrls, setStoryImageUrls] = useState({});
   const [storyRenderBusy, setStoryRenderBusy] = useState(false);
+  const [storyNarrationEnabled, setStoryNarrationEnabled] = useState(false);
   const [voice, setVoice] = useState('');
   const [file, setFile] = useState(null);
+  const [faceTarget, setFaceTarget] = useState(null);
+  const [faceReference, setFaceReference] = useState(null);
+  const [faceBusy, setFaceBusy] = useState(false);
+  const [faceUploadProgress, setFaceUploadProgress] = useState(-1);
+  const [faceTargetDuration, setFaceTargetDuration] = useState(0);
+  const [faceFalsePositiveOverride, setFaceFalsePositiveOverride] = useState(false);
   const [sceneFiles, setSceneFiles] = useState([]);
   const [activeScene, setActiveScene] = useState(0);
   const [scenePreviewUrl, setScenePreviewUrl] = useState('');
@@ -46,8 +201,10 @@ function App() {
   const [llmTest, setLlmTest] = useState(null);
 
   const [previewUrl, setPreviewUrl] = useState('');
+  const [editingTransformId, setEditingTransformId] = useState('');
   const [trimStart, setTrimStart] = useState('0');
   const [trimEnd, setTrimEnd] = useState('0');
+  const [trimDuration, setTrimDuration] = useState(0);
   const [musicVolume, setMusicVolume] = useState(0.35);
   const [transitionDuration, setTransitionDuration] = useState('0.5');
   const [preset, setPreset] = useState('reel');
@@ -59,10 +216,22 @@ function App() {
   const [subtitleFile, setSubtitleFile] = useState(null);
   const [name, setName] = useState('');
   const [wav, setWav] = useState(null);
+  const [voicePrepared, setVoicePrepared] = useState(null);
+  const [voiceTranscript, setVoiceTranscript] = useState('');
+  const [voicePreviewText, setVoicePreviewText] = useState('नमस्ते, यह मेरी आवाज़ का परीक्षण है।');
+  const [voicePreviewUrl, setVoicePreviewUrl] = useState('');
+  const [voiceProfileToTest, setVoiceProfileToTest] = useState('');
+  const voiceProfileToTestRef = useRef('');
+  const voiceOverDurationProbeRef = useRef(0);
+  const jobsRefreshSequenceRef = useRef(0);
+  const jobsMutationVersionRef = useRef(0);
+  const [voiceGenerationSettings, setVoiceGenerationSettings] = useState({
+    temperature: 0.3, flow_steps: 1, eos_threshold: -2.0, seed: 1
+  });
   const [voiceBusy, setVoiceBusy] = useState(false);
-  const [voiceOptions, setVoiceOptions] = useState({ trim_silence: false, normalize_loudness: false, noise_reduction: false, highpass_hz: 0, lowpass_hz: 0 });
-  const [lastVoiceUpload, setLastVoiceUpload] = useState(null);
-  const [reprocessVoice, setReprocessVoice] = useState('');
+  const [scriptAudioText, setScriptAudioText] = useState('');
+  const [scriptAudioJobId, setScriptAudioJobId] = useState('');
+  const [scriptAudioBusy, setScriptAudioBusy] = useState(false);
   const [msg, setMsg] = useState('');
   const [status, setStatus] = useState('Connecting…');
   const [busy, setBusy] = useState(false);
@@ -72,6 +241,18 @@ function App() {
     const data = await response.json();
     if (!response.ok) throw Error(data.detail || 'Request failed');
     return data;
+  }
+
+  function changeSpeechEngine(engine) {
+    const available = ttsInfo.tts_engines?.[engine]?.languages || [];
+    const nextLanguage = available.some(item => item.code === 'hi') ? 'hi' : (available[0]?.code || 'hi');
+    setTtsEngine(engine);
+    setVoiceLanguage(nextLanguage); setLang(nextLanguage);
+    setVoiceOverLanguage(nextLanguage); setDubLanguage(nextLanguage); setStoryNarrationLanguage(nextLanguage);
+    setVoice(''); setVoiceProfileToTest(''); voiceProfileToTestRef.current = '';
+    setVoiceOverVoiceId(''); setDubVoiceId(''); setStoryNarrationVoiceId('');
+    setVoicePreviewUrl('');
+    setMsg('Speech engine changed. Select a supported language and matching voice profile.');
   }
 
   async function checkSession() {
@@ -159,14 +340,105 @@ function App() {
     finally { setLlmBusy(false); }
   }
 
-  async function refresh() {
+  async function refreshJobs() {
+    const requestId = ++jobsRefreshSequenceRef.current;
+    const mutationVersion = jobsMutationVersionRef.current;
     try {
-      const [jobList, voiceList, savedList] = await Promise.all([
-        api('/api/jobs'), api('/api/voices'), api('/api/saved-projects')
+      const jobList = await api('/api/jobs');
+      if (requestId === jobsRefreshSequenceRef.current &&
+          mutationVersion === jobsMutationVersionRef.current) {
+        setJobs(jobList);
+      }
+      return true;
+    } catch (error) {
+      if (requestId === jobsRefreshSequenceRef.current) {
+        setStatus(error.message === 'Authentication required' ? 'Session expired' : 'Job status unavailable');
+        if (error.message === 'Authentication required') setAuthenticated(false);
+      }
+      return false;
+    }
+  }
+
+  async function refreshTransformHistory() {
+    try {
+      const history = await api('/api/transform/history');
+      setTransformHistory(history);
+      setDubSourceTransformId(current => history.some(job => job.id === current && job.status === 'completed' && job.output_available) ? current : '');
+    } catch {
+      // Keep the last known history if the endpoint is temporarily unavailable.
+    }
+  }
+
+
+  async function refreshVoiceOverHistory() {
+    try {
+      const history = await api('/api/voice-over/history');
+      setVoiceOverHistory(history);
+      setVoiceOverSelectedId(current => history.some(job => job.id === current) ? current : (history[0]?.id || ''));
+    } catch {
+      // Keep the last known voice-over history if the endpoint is temporarily unavailable.
+    }
+  }
+
+  async function inspectVoiceOverSource(source, revokeObjectUrl = false) {
+    const probeId = ++voiceOverDurationProbeRef.current;
+    setVoiceOverSourceDuration(0);
+    if (!source) return;
+    let duration = 0;
+    try {
+      duration = await readVideoDuration(source);
+    } finally {
+      if (revokeObjectUrl) URL.revokeObjectURL(source);
+    }
+    if (probeId === voiceOverDurationProbeRef.current) setVoiceOverSourceDuration(duration);
+  }
+
+  async function refresh() {
+    refreshTransformHistory();
+    refreshVoiceOverHistory();
+    // Job polling is independent: a failed voice/project/model-status endpoint must
+    // never prevent Transform progress and completed outputs from appearing.
+    refreshJobs();
+    try {
+      const [voiceList, savedList, health, lipStatus, styleStatus] = await Promise.all([
+        api('/api/voices'), api('/api/saved-projects'), api('/api/health'),
+        api('/api/lipsync/status'), api('/api/video-style/status')
       ]);
-      setJobs(jobList);
       setVoices(voiceList);
+      const profileLanguage = item => item.language || 'hi';
+      const currentVoiceId = voiceProfileToTestRef.current;
+      const selectedVoiceId = voiceList.some(item => item.voice_id === currentVoiceId)
+        ? currentVoiceId : (voiceList[0]?.voice_id || '');
+      if (selectedVoiceId !== currentVoiceId) {
+        voiceProfileToTestRef.current = selectedVoiceId;
+        setVoiceProfileToTest(selectedVoiceId);
+        const selectedProfile = voiceList.find(item => item.voice_id === selectedVoiceId);
+        if (selectedProfile) {
+          setVoiceLanguage(profileLanguage(selectedProfile));
+          setLang(profileLanguage(selectedProfile));
+          setVoicePreviewText(VOICE_TEST_SAMPLES[profileLanguage(selectedProfile)] || '');
+        }
+        setVoiceGenerationSettings(selectedProfile?.generation_settings || {
+          temperature: 0.3, flow_steps: 1, eos_threshold: -2.0, seed: 1
+        });
+      }
+      setVoice(current => voiceList.some(item => item.voice_id === current && profileLanguage(item) === lang)
+        ? current : (voiceList.find(item => profileLanguage(item) === lang)?.voice_id || ''));
       setSavedProjects(savedList);
+      setTtsInfo(health);
+      setLipsyncInfo(lipStatus);
+      setStyleInfo(styleStatus);
+      setVideoStyle(current => current === 'none' ||
+        styleStatus.models.some(item => item.id === current && item.ready)
+          ? current
+          : (styleStatus.models.find(item => item.id === 'anime_512' && item.ready)?.id
+            || styleStatus.models.find(item => item.ready)?.id || 'none'));
+      setDubVoiceId(current => voiceList.some(item => item.voice_id === current && profileLanguage(item) === dubLanguage)
+        ? current : (voiceList.find(item => profileLanguage(item) === dubLanguage)?.voice_id || ''));
+      setVoiceOverVoiceId(current => voiceList.some(item => item.voice_id === current && profileLanguage(item) === voiceOverLanguage)
+        ? current : (voiceList.find(item => profileLanguage(item) === voiceOverLanguage)?.voice_id || ''));
+      setStoryNarrationVoiceId(current => voiceList.some(item => item.voice_id === current && profileLanguage(item) === storyNarrationLanguage)
+        ? current : (voiceList.find(item => profileLanguage(item) === storyNarrationLanguage)?.voice_id || ''));
       setStatus('Azure connected');
     } catch (error) {
       setStatus(error.message === 'Authentication required' ? 'Session expired' : 'Server offline');
@@ -218,32 +490,333 @@ function App() {
     return () => URL.revokeObjectURL(url);
   }, [file]);
   useEffect(() => {
+    if (!dubFile) {
+      setDubPreviewUrl('');
+      return undefined;
+    }
+    const url = URL.createObjectURL(dubFile);
+    setDubPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [dubFile]);
+  useEffect(() => {
     if (!authenticated) return;
     refresh();
     const timer = setInterval(refresh, 5000);
     return () => clearInterval(timer);
   }, [authenticated]);
 
+  useEffect(() => {
+    if (!voiceOverPendingJobId) return;
+    const attempt = voiceOverHistory.find(job => job.id === voiceOverPendingJobId);
+    if (!attempt) return;
+    if (attempt.status === 'failed') {
+      setVoiceOverPendingJobId('');
+      setMsg('Voice-over failed. Your source video, script, voice and mix settings are still here. Correct the issue and retry in this panel.');
+      return;
+    }
+    if (attempt.status === 'completed' && attempt.output_available) {
+      setVoiceOverPendingJobId('');
+      setEditingVoiceOverId('');
+      setVoiceOverFile(null);
+      setVoiceOverSourceTransformId('');
+      setVoiceOverNarration('');
+      setVoiceOverStartOffset('0');
+      setMsg('Voice-over completed successfully. Your finished video is available in the history list.');
+    }
+  }, [voiceOverHistory, voiceOverPendingJobId]);
+
+
   async function run(event) {
     event.preventDefault();
+    if (!activeTtsReady) {
+      setMsg('The selected speech engine is not installed or enabled on Azure yet.');
+      return;
+    }
+    if (!voice || !voicesForLanguage(lang).some(item => item.voice_id === voice)) {
+      setMsg('Choose a saved voice profile matching the selected language.');
+      return;
+    }
     setBusy(true);
     try {
       await api('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, language: lang, voice_id: voice })
+        body: JSON.stringify({ text, language: lang, voice_id: voice, engine: ttsEngine })
       });
       setText('');
-      setMsg('Narration queued on Azure');
+      setMsg(speechLanguageName(lang) + ' narration queued on Azure');
     } catch (error) { setMsg(error.message); }
     setBusy(false);
     refresh();
   }
 
+  async function queueVideoDub(event) {
+    event.preventDefault();
+    if ((!dubFile && !dubSourceTransformId) || !dubVoiceId || !dubNarration.trim()) return;
+    const form = new FormData();
+    if (dubSourceTransformId) form.append('source_job_id', dubSourceTransformId);
+    else form.append('file', dubFile);
+    form.append('voice_id', dubVoiceId);
+    form.append('narration', dubNarration.trim());
+    form.append('language', dubLanguage);
+    form.append('keep_source_ambience', String(dubKeepAmbience));
+    form.append('video_style', videoStyle);
+    form.append('style_strength', String(styleStrength));
+    form.append('engine', ttsEngine);
+    setDubBusy(true);
+    try {
+      const queuedJob = await api('/api/video/voice-dub', { method: 'POST', body: form });
+      jobsMutationVersionRef.current += 1;
+      jobsRefreshSequenceRef.current += 1;
+      setJobs(current => [queuedJob, ...current.filter(job => job.id !== queuedJob.id)]);
+      setMsg('Full video voice-dub and lip-sync job queued on the Azure CPU worker.');
+      setDubFile(null);
+      setDubSourceTransformId('');
+      setDubSourceDuration(0);
+      setDubNarration('');
+      refresh();
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      setDubBusy(false);
+    }
+  }
+
+
+  async function queueVoiceOver(event) {
+    event.preventDefault();
+    if ((!voiceOverFile && !voiceOverSourceTransformId && !editingVoiceOverId) ||
+        !voiceOverVoiceId || !voiceOverNarration.trim()) return;
+    if (voiceOverScriptOverLimit) {
+      setMsg('Shorten the narration to fit the remaining video duration.');
+      return;
+    }
+    const form = new FormData();
+    if (!editingVoiceOverId) {
+      if (voiceOverSourceTransformId) form.append('source_job_id', voiceOverSourceTransformId);
+      else form.append('file', voiceOverFile);
+    }
+    form.append('voice_id', voiceOverVoiceId);
+    form.append('narration', voiceOverNarration.trim());
+    form.append('language', voiceOverLanguage);
+    form.append('start_offset', String(Number(voiceOverStartOffset) || 0));
+    form.append('keep_original_audio', String(voiceOverKeepOriginal));
+    form.append('original_volume', String(voiceOverOriginalVolume));
+    form.append('voice_volume', String(voiceOverVoiceVolume));
+    form.append('engine', ttsEngine);
+    setVoiceOverBusy(true);
+    try {
+      const endpoint = editingVoiceOverId
+        ? '/api/jobs/' + encodeURIComponent(editingVoiceOverId) + '/voice-over/rerun'
+        : '/api/video/voice-over';
+      const queuedJob = await api(endpoint, { method: 'POST', body: form });
+      setVoiceOverHistory(current => [
+        { ...queuedJob, source_available: true, output_available: false },
+        ...current.filter(job => job.id !== queuedJob.id)
+      ]);
+      setVoiceOverSelectedId(queuedJob.id);
+      setEditingVoiceOverId(queuedJob.id);
+      setVoiceOverPendingJobId(queuedJob.id);
+      setMsg('Voice-over queued. Your source, script and settings stay in this panel so you can retry here if processing fails.');
+      refreshVoiceOverHistory();
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      setVoiceOverBusy(false);
+    }
+  }
+
+  function editVoiceOver(job) {
+    const options = job.payload || {};
+    if (!job.source_available) {
+      setMsg('The original source is unavailable, so this voice-over cannot be edited.');
+      return;
+    }
+    setEditingVoiceOverId(job.id);
+    setVoiceOverPendingJobId('');
+    setVoiceOverFile(null);
+    setVoiceOverSourceTransformId('');
+    inspectVoiceOverSource('/api/jobs/' + encodeURIComponent(job.id) + '/source');
+    setVoiceOverNarration(options.narration || '');
+    setTtsEngine(options.engine || 'kitten');
+    setVoiceOverLanguage(options.language || 'hi');
+    setVoiceOverVoiceId(options.voice_id || voice);
+    setVoiceOverStartOffset(String(options.start_offset ?? 0));
+    setVoiceOverKeepOriginal(options.keep_original_audio !== false);
+    setVoiceOverOriginalVolume(Number(options.original_volume ?? 0.25));
+    setVoiceOverVoiceVolume(Number(options.voice_volume ?? 1));
+    setVoiceOverSelectedId(job.id);
+    setTab('transform');
+    setMsg('Editing voice-over settings for ' + (options.source_filename || 'saved video') +
+      '. A new version will be created from the original source, not the previous export.');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function cancelVoiceOverEdit() {
+    setEditingVoiceOverId('');
+    setVoiceOverPendingJobId('');
+    setVoiceOverFile(null);
+    setVoiceOverSourceTransformId('');
+    inspectVoiceOverSource('');
+    setVoiceOverNarration('');
+    setVoiceOverStartOffset('0');
+    setVoiceOverKeepOriginal(true);
+    setVoiceOverOriginalVolume(0.25);
+    setVoiceOverVoiceVolume(1);
+    setMsg('Voice-over edit cancelled. The saved export remains unchanged.');
+  }
+  function editTransform(job) {
+    const options = job.payload || {};
+    if (!job.source_available) {
+      setMsg('The original source is not available for editing this older job.');
+      return;
+    }
+    setEditingTransformId(job.id);
+    setFile(null);
+    setTrimStart(String(options.trim_start ?? 0));
+    setTrimEnd(String(options.trim_end ?? 0));
+    setTrimDuration(0);
+    setPreset(options.preset || 'reel');
+    setFraming(options.framing || 'fill');
+    setAudioMode(options.audio || 'keep');
+    setMusicVolume(Number(options.music_volume ?? 0.35));
+    setOverlayText(options.overlay_text || '');
+    setOverlayPosition(options.overlay_position || 'bottom');
+    setMusicFile(null);
+    setSubtitleFile(null);
+    setTab('transform');
+    setMsg('Editing ' + (options.source_filename || 'saved video') +
+      '. The original and saved music/subtitles will be reused unless you replace them.');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function handleTrimDurationLoaded(event) {
+    const duration = Number(event.currentTarget.duration);
+    if (!Number.isFinite(duration) || duration <= 0) return;
+    setTrimDuration(duration);
+    const safeStart = Math.min(Math.max(0, Number(trimStart) || 0), Math.max(0, duration - 0.1));
+    if (safeStart !== Number(trimStart)) setTrimStart(safeStart.toFixed(1));
+    const currentEnd = Number(trimEnd) || 0;
+    if (currentEnd > 0 && (currentEnd <= safeStart || currentEnd > duration)) setTrimEnd('0');
+  }
+
+  function cancelTransformEdit() {
+    setEditingTransformId('');
+    setFile(null);
+    setMusicFile(null);
+    setSubtitleFile(null);
+    setTrimDuration(0);
+    setTrimStart('0');
+    setTrimEnd('0');
+    setMsg('Edit cancelled. Original saved transformation remains unchanged.');
+  }
+
+  async function readFaceVideoDuration(file) {
+    const url = URL.createObjectURL(file);
+    try {
+      const video = document.createElement('video');
+      video.preload = 'metadata';
+      video.src = url;
+      await new Promise((resolve, reject) => {
+        video.onloadedmetadata = resolve;
+        video.onerror = () => reject(new Error('Could not read this video duration. Try an MP4 or MOV file.'));
+      });
+      if (!Number.isFinite(video.duration) || video.duration <= 0) {
+        throw new Error('Could not determine the video duration.');
+      }
+      return video.duration;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async function handleFaceTargetChange(event) {
+    const selected = event.target.files?.[0] || null;
+    setFaceTarget(null);
+    setFaceTargetDuration(0);
+    if (!selected) return;
+    setMsg('Checking video duration before upload…');
+    try {
+      const duration = await readFaceVideoDuration(selected);
+      if (duration > 15) {
+        setMsg('Video is ' + duration.toFixed(1) + ' seconds. Face Replacement currently accepts videos up to 15 seconds. Please trim the video and select it again. Nothing was uploaded.');
+        event.target.value = '';
+        return;
+      }
+      setFaceTarget(selected);
+      setFaceTargetDuration(duration);
+      setMsg('Video checked: ' + duration.toFixed(1) + ' seconds. It is within the 15-second limit.');
+    } catch (error) {
+      event.target.value = '';
+      setMsg(error.message || 'Could not validate the selected video.');
+    }
+  }
+
+  async function submitFaceFusion() {
+    if (!faceTarget || !faceReference) {
+      setMsg('Select both the target video and the reference face image first.');
+      return;
+    }
+    const checkedDuration = await readFaceVideoDuration(faceTarget).catch(error => { setMsg(error.message); return 0; });
+    if (!checkedDuration) return;
+    if (checkedDuration > 15) {
+      setFaceTarget(null);
+      setFaceTargetDuration(0);
+      setMsg('This video is ' + checkedDuration.toFixed(1) + ' seconds. The maximum is 15 seconds. Select a shorter video; no upload was started.');
+      return;
+    }
+    const form = new FormData();
+    form.append('file', faceTarget);
+    form.append('source_image', faceReference);
+    form.append('confirm_non_explicit_override', faceFalsePositiveOverride ? 'true' : 'false');
+    setFaceBusy(true);
+    setFaceUploadProgress(0);
+    setMsg('Uploading video and reference image to Azure…');
+    try {
+      const queuedJob = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/facefusion');
+        xhr.withCredentials = true;
+        xhr.timeout = 15 * 60 * 1000;
+        xhr.upload.onprogress = event => {
+          if (event.lengthComputable) setFaceUploadProgress(Math.round(event.loaded / event.total * 100));
+        };
+        xhr.onload = () => {
+          let result;
+          try { result = JSON.parse(xhr.responseText || '{}'); }
+          catch { reject(new Error('Azure returned an unreadable response.')); return; }
+          if (xhr.status >= 200 && xhr.status < 300) resolve(result);
+          else reject(new Error(result.detail || 'Upload failed with HTTP ' + xhr.status));
+        };
+        xhr.onerror = () => reject(new Error('Network error while uploading. Check your connection and try again.'));
+        xhr.ontimeout = () => reject(new Error('Upload timed out. Try a smaller video.'));
+        xhr.onabort = () => reject(new Error('Upload was cancelled.'));
+        xhr.send(form);
+      });
+      jobsMutationVersionRef.current += 1;
+      jobsRefreshSequenceRef.current += 1;
+      setJobs(current => [queuedJob, ...current.filter(job => job.id !== queuedJob.id)].slice(0, 100));
+      setFaceTarget(null);
+      setFaceReference(null);
+      setFaceFalsePositiveOverride(false);
+      setMsg('Upload complete. Face replacement job queued; CPU processing has started or is waiting for the worker.');
+      await refreshJobs();
+    } catch (error) {
+      setMsg(error.message || 'Could not queue face replacement.');
+    } finally {
+      setFaceBusy(false);
+      setFaceUploadProgress(-1);
+    }
+  }
+
   async function upload(event) {
     event.preventDefault();
+    if (!file && !editingTransformId) {
+      setMsg('Choose a video file first.');
+      return;
+    }
     const form = new FormData();
-    form.append('file', file);
+    if (file) form.append('file', file);
     form.append('preset', preset);
     form.append('framing', framing);
     form.append('audio', audioMode);
@@ -256,11 +829,33 @@ function App() {
     if (subtitleFile) form.append('subtitle_file', subtitleFile);
     setBusy(true);
     try {
-      await api('/api/video', { method: 'POST', body: form });
-      setMsg('Video queued on Azure');
-    } catch (error) { setMsg(error.message); }
-    setBusy(false);
-    refresh();
+      const isEdit = Boolean(editingTransformId);
+      const queuedJob = await api(isEdit
+        ? '/api/jobs/' + encodeURIComponent(editingTransformId) + '/rerun'
+        : '/api/video', { method: 'POST', body: form });
+      // Show the returned job immediately; invalidate any older in-flight poll so
+      // it cannot overwrite this new card with a stale job list.
+      jobsMutationVersionRef.current += 1;
+      jobsRefreshSequenceRef.current += 1;
+      setJobs(current => [{
+        ...queuedJob,
+        source_available: Boolean(queuedJob.input_path && queuedJob.payload?.retain_source),
+        output_available: false
+      }, ...current.filter(job => job.id !== queuedJob.id)].slice(0, 100));
+      setEditingTransformId('');
+      setFile(null);
+      setMusicFile(null);
+      setSubtitleFile(null);
+      setMsg(isEdit
+        ? 'Edited version queued. The previous export is preserved.'
+        : 'Video transformation queued. Its source will remain available for future edits.');
+      setTab('transform');
+      refreshJobs();
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      setBusy(false);
+    }
   }
 
   function addScenes(event) {
@@ -393,6 +988,11 @@ function App() {
       setMsg('Add one image to every storyboard scene before rendering.');
       return;
     }
+    if (storyNarrationEnabled && (!activeTtsReady || !storyNarrationVoiceId ||
+        !voicesForLanguage(storyNarrationLanguage).some(item => item.voice_id === storyNarrationVoiceId))) {
+      setMsg('Choose an enabled speech engine and a saved voice profile matching the narration language.');
+      return;
+    }
     const form = new FormData();
     storyScenes.forEach(scene => form.append('images', scene.imageFile));
     form.append('scene_data', JSON.stringify(storyScenes.map(scene => ({
@@ -405,6 +1005,12 @@ function App() {
     form.append('overlay_text', overlayText);
     form.append('overlay_position', overlayPosition);
     if (musicFile) form.append('music_file', musicFile);
+    if (storyNarrationEnabled) {
+      form.append('narration_text', storyScenes.map(scene => scene.narration.trim()).filter(Boolean).join(' '));
+      form.append('narration_voice_id', storyNarrationVoiceId);
+      form.append('narration_language', storyNarrationLanguage);
+      form.append('narration_engine', ttsEngine);
+    }
     setStoryRenderBusy(true);
     try {
       await api('/api/storyboard/render', { method: 'POST', body: form });
@@ -619,24 +1225,53 @@ function App() {
     }
   }
 
-  async function addVoice(event) {
+  async function prepareVoice(event) {
     event.preventDefault();
-    if (!wav) return setMsg('Choose a WAV reference first.');
-    const form = new FormData();
-    form.append('name', name);
-    form.append('file', wav);
-    Object.entries(voiceOptions).forEach(([key, value]) => form.append(key, String(value)));
+    if (!wav) return;
     setVoiceBusy(true);
+    setVoicePrepared(null);
+    setVoicePreviewUrl('');
+    setMsg('Inspecting WAV, selecting the cleanest 20-second segment and extracting its script…');
+    const form = new FormData();
+    form.append('file', wav);
+    form.append('language', voiceLanguage);
+    form.append('engine', ttsEngine);
     try {
-      const result = await api('/api/voices', { method: 'POST', body: form });
-      setLastVoiceUpload(result);
-      setReprocessVoice(result.voice_id);
-      setMsg(result.conditioning_status === 'engine_disabled'
-        ? 'Original WAV saved. Prepared profile is ready for inspection; voice conditioning is disabled.'
-        : 'Original WAV saved and prepared profile created. Voice conditioning has not been tested.');
+      const result = await api('/api/voices/prepare', { method: 'POST', body: form });
+      setVoicePrepared(result);
+      setVoiceTranscript(result.transcript || '');
+      setMsg(result.transcription_error
+        ? 'Clip prepared. Automatic transcription unavailable: ' + result.transcription_error + ' You can type the script below.'
+        : '20-second reference prepared. Listen to it and review the extracted script.');
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      setVoiceBusy(false);
+    }
+  }
+
+  async function savePreparedVoice(event) {
+    event.preventDefault();
+    if (!voicePrepared?.prepared_id || !name.trim()) return;
+    setVoiceBusy(true);
+    const form = new FormData();
+    form.append('prepared_id', voicePrepared.prepared_id);
+    form.append('name', name);
+    form.append('transcript', voiceTranscript);
+    form.append('language', voicePrepared.language || voiceLanguage);
+    form.append('engine', voicePrepared.engine || ttsEngine);
+    form.append('generation_settings', JSON.stringify(voiceGenerationSettings));
+    try {
+      const result = await api('/api/voices/save-prepared', { method: 'POST', body: form });
+      voiceProfileToTestRef.current = result.voice_id;
+      setVoiceProfileToTest(result.voice_id);
+      setVoice(result.voice_id);
+      setLang(result.language || voiceLanguage);
+      setVoicePrepared(null);
       setWav(null);
       setName('');
       await refresh();
+      setMsg('Voice profile saved. The original WAV is preserved separately; the prepared 20-second reference, editable script and settings are ready for testing.');
     } catch (error) {
       setMsg(error.message);
     } finally {
@@ -644,17 +1279,22 @@ function App() {
     }
   }
 
-  async function reprocessVoiceProfile() {
-    if (!reprocessVoice) return setMsg('Choose a saved profile to rebuild.');
-    const form = new FormData();
-    Object.entries(voiceOptions).forEach(([key, value]) => form.append(key, String(value)));
+  async function generateVoicePreview(event) {
+    event.preventDefault();
+    if (!voiceProfileToTest || !voicePreviewText.trim()) return;
     setVoiceBusy(true);
+    setVoicePreviewUrl('');
     try {
-      const result = await api('/api/voices/' + encodeURIComponent(reprocessVoice) + '/prepare', {
-        method: 'POST', body: form
+      const result = await api('/api/voices/' + encodeURIComponent(voiceProfileToTest) + '/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: voicePreviewText, language: voiceLanguage, settings: voiceGenerationSettings, engine: ttsEngine })
       });
-      setLastVoiceUpload(result);
-      setMsg('Prepared profile rebuilt from the preserved original WAV. Original file was not changed.');
+      setVoicePreviewUrl(result.audio_url + '?v=' + result.preview_id);
+      setVoiceGenerationSettings(result.generation_settings);
+      setMsg(result.conditioning_initialized
+        ? 'Sample generated. Reusable voice conditioning is initialised and saved.'
+        : 'Sample generated and profile settings saved.');
       await refresh();
     } catch (error) {
       setMsg(error.message);
@@ -663,11 +1303,66 @@ function App() {
     }
   }
 
+  function selectVoiceProfile(voiceId) {
+    voiceProfileToTestRef.current = voiceId;
+    setVoiceProfileToTest(voiceId);
+    setVoice(voiceId);
+    setVoicePreviewUrl('');
+    const profile = voices.find(item => item.voice_id === voiceId);
+    if (profile?.language) { setVoiceLanguage(profile.language); setLang(profile.language); setVoicePreviewText(VOICE_TEST_SAMPLES[profile.language] || ''); }
+    if (profile?.generation_settings) setVoiceGenerationSettings(profile.generation_settings);
+  }
+
+  async function generateScriptAudio(event) {
+    event.preventDefault();
+    if (!voiceProfileToTest || !scriptAudioText.trim()) return;
+    setScriptAudioBusy(true);
+    setScriptAudioJobId('');
+    try {
+      const result = await api('/api/tts/script', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: scriptAudioText, language: voiceLanguage, voice_id: voiceProfileToTest, engine: ttsEngine })
+      });
+      setScriptAudioJobId(result.id);
+      setMsg('Full script narration queued. It will be generated in parts and exported as MP3.');
+      await refresh();
+    } catch (error) {
+      setMsg(error.message);
+    } finally {
+      setScriptAudioBusy(false);
+    }
+  }
+
+  const scriptAudioJob = jobs.find(job => job.id === scriptAudioJobId);
+  const transformJobs = transformHistory.filter(job => !(job.payload?.scenes?.length));
+  const availableTransformVideos = transformJobs.filter(job => job.status === 'completed' && job.output_available);
+  const selectedVoiceOverJob = voiceOverHistory.find(job => job.id === voiceOverSelectedId);
+  const editingVoiceOverJob = voiceOverHistory.find(job => job.id === editingVoiceOverId);
+  const voiceOverAvailableSeconds = voiceOverSourceDuration > 0
+    ? Math.max(0, voiceOverSourceDuration - Math.max(0, Number(voiceOverStartOffset) || 0)) : 0;
+  const voiceOverMaxCharacters = voiceOverSourceDuration > 0
+    ? estimateVoiceOverCharacterLimit(voiceOverAvailableSeconds, voiceOverLanguage) : 12000;
+  const voiceOverCharacterCount = countTextCharacters(voiceOverNarration);
+  const voiceOverScriptOverLimit = voiceOverSourceDuration > 0 &&
+    voiceOverCharacterCount > voiceOverMaxCharacters;
+  const dubJobs = jobs.filter(job => job.kind === 'video_voice_dub');
+  const dubWordCount = dubNarration.trim() ? dubNarration.trim().split(/\s+/u).filter(Boolean).length : 0;
+  const dubEstimatedSpeechSeconds = estimateSpeechSeconds(dubNarration);
+  const dubMaximumSpeechSeconds = dubSourceDuration > 0 ? dubSourceDuration * 1.2 : 0;
+  const dubSpeechOverLimit = dubMaximumSpeechSeconds > 0 && dubEstimatedSpeechSeconds > dubMaximumSpeechSeconds + 0.5;
+  const editingTransformJob = jobs.find(job => job.id === editingTransformId);
+  const trimEndValue = Number(trimEnd) > 0 ? Math.min(Number(trimEnd), trimDuration) : trimDuration;
+  const trimStartValue = Math.min(Math.max(0, Number(trimStart) || 0), Math.max(0, trimEndValue - 0.1));
+  const trimStartMax = trimDuration > 0 ? Math.max(0, trimEndValue - 0.1) : 0;
+  const trimEndMin = trimDuration > 0 ? Math.min(trimDuration, trimStartValue + 0.1) : 0;
   const nav = [
     ['create', 'Create video', WandSparkles],
     ['writer', 'Script Writer', WandSparkles],
     ['storyboard', 'Storyboard', Film],
+    ['ai-video', 'AI Video · Lip Sync', Film],
     ['transform', 'Transform', Film],
+    ['facefusion', 'Face replacement', Film],
     ['timeline', 'Timeline', Film],
     ['voice', 'Voice studio', Mic2],
     ['projects', 'Projects', FolderOpen],
@@ -722,17 +1417,26 @@ function App() {
         {tab === 'create' && <section>
           <span>AI VIDEO WORKFLOW</span>
           <h1>Make your next story<br/><i>worth watching.</i></h1>
-          <p>Generate Hindi or English narration on Azure. Prompt-to-video scenes will be enabled after CPU image generation is benchmarked.</p>
+          <p>Generate narration with the selected local CPU speech engine and a saved language-matched WAV voice profile.</p>
+          <label>SPEECH ENGINE · SHARED WITH OTHER SPEECH TOOLS
+            <select value={ttsEngine} onChange={event => changeSpeechEngine(event.target.value)}>
+              <option value="kitten">KittenTTS 2 · Multilingual (20 languages)</option>
+              <option value="pocket">Pocket TTS · Hindi only</option>
+            </select>
+          </label>
+          {!activeTtsReady && <p className="storyboard-note">The selected speech engine is not installed or enabled on Azure.</p>}
           <form onSubmit={run}>
-            <label>NARRATION TEXT</label>
-            <textarea value={text} onChange={event => setText(event.target.value)} rows="7" placeholder="Write your Hindi or English narration…" required/>
+            <label>{speechLanguageName(lang).toUpperCase()} NARRATION TEXT</label>
+            <textarea value={text} onChange={event => setText(event.target.value)} rows="7" placeholder="Enter your narration…" required/>
             <div className="row">
-              <label>LANGUAGE<select value={lang} onChange={event => setLang(event.target.value)}><option value="hi">Hindi</option><option value="en">English</option></select></label>
-              <label>VOICE PROFILE<select value={voice} onChange={event => setVoice(event.target.value)}><option value="">Default</option>{voices.map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}</select></label>
+              <SearchableLanguagePicker label="LANGUAGE" value={lang}
+                onChange={value => {setLang(value);setVoice(voicesForLanguage(value)[0]?.voice_id || '');}}
+                languages={speechLanguages} search={languageSearch} onSearch={setLanguageSearch}/>
+              <label>VOICE PROFILE<select required value={voice} onChange={event => setVoice(event.target.value)}><option value="" disabled>Select matching WAV profile</option>{voicesForLanguage(lang).map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}</select></label>
             </div>
-            <button className="primary" disabled={busy || !text.trim()}><Play size={16}/> Generate narration</button>
+            <button className="primary" disabled={busy || !text.trim() || !voice || !activeTtsReady}><Play size={16}/> Generate {speechLanguageName(lang)} narration</button>
           </form>
-          <div className="note">● Single neural worker　● CPU inference　● Azure jobs</div>
+          <div className="note">● Local CPU speech engine　● Saved language-matched voice profile</div>
         </section>}
         {tab === 'writer' && <section className="script-writer-workspace">
           <span>PRIVATE LOCAL SCRIPT WRITER</span><h1>Start with an idea.</h1>
@@ -815,28 +1519,379 @@ function App() {
                 <label>FRAMING<select value={framing} onChange={event => setFraming(event.target.value)}><option value="fill">Fill · crop edges</option><option value="fit">Fit · black bars</option></select></label>
               </div>
               <label>FADE DURATION<select value={transitionDuration} onChange={event => setTransitionDuration(event.target.value)}><option value="0.5">0.5 seconds</option><option value="1">1 second</option></select></label>
+              <div className="tts-option">
+                <label className="tts-option-check">
+                  <input type="checkbox" checked={storyNarrationEnabled}
+                    disabled={!activeTtsReady || voices.length === 0}
+                    onChange={event => setStoryNarrationEnabled(event.target.checked)}/>
+                  Add voiceover from the scene narration
+                </label>
+                {storyNarrationEnabled && <>
+                  <SearchableLanguagePicker label="VOICEOVER LANGUAGE" value={storyNarrationLanguage}
+                    onChange={value => {setStoryNarrationLanguage(value);setStoryNarrationVoiceId(voicesForLanguage(value)[0]?.voice_id || '');}}
+                    languages={speechLanguages} search={storyNarrationLanguageSearch} onSearch={setStoryNarrationLanguageSearch}/>
+                  <label>VOICE PROFILE
+                    <select required value={storyNarrationVoiceId} onChange={event => setStoryNarrationVoiceId(event.target.value)}>
+                      <option value="" disabled>Select matching WAV profile</option>
+                      {voicesForLanguage(storyNarrationLanguage).map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}
+                    </select>
+                  </label>
+                </>}
+                <small>{!activeTtsReady ? 'Selected speech engine is not installed or enabled.' :
+                  voices.length === 0 ? 'Save an authorised WAV voice profile in Voice Studio first.' :
+                  'Choose a language supported by the selected engine. Uses each scene’s editable narration.'}</small>
+              </div>
               <label>BACKGROUND MUSIC (OPTIONAL)<small> {musicFile?.name || 'No music selected; export will be silent'}</small><input type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,audio/*" onChange={event => setMusicFile(event.target.files?.[0] || null)}/></label>
               {musicFile && <label>MUSIC VOLUME · {Math.round(musicVolume*100)}%<input type="range" min="0" max="1.5" step="0.05" value={musicVolume} onChange={event => setMusicVolume(Number(event.target.value))}/></label>}
               <label>PROJECT TITLE (OPTIONAL)<input value={overlayText} maxLength={160} onChange={event => setOverlayText(event.target.value)}/></label>
               <label>TITLE POSITION<select value={overlayPosition} onChange={event => setOverlayPosition(event.target.value)}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select></label>
-              <button className="primary" disabled={storyRenderBusy || storyScenes.some(scene => !scene.imageFile)}>{storyRenderBusy ? 'Queueing storyboard video…' : 'Render storyboard video'}</button>
+              <button className="primary" disabled={storyRenderBusy || storyScenes.some(scene => !scene.imageFile) || (storyNarrationEnabled && (!activeTtsReady || !storyNarrationVoiceId || !voicesForLanguage(storyNarrationLanguage).some(item => item.voice_id === storyNarrationVoiceId)))}>{storyRenderBusy ? 'Queueing storyboard video…' : 'Render storyboard video'}</button>
             </form>
             <p className="storyboard-note">Images are supplied by you. FRAME / AI adds gentle camera motion, scene transitions and assembles the video. AI image generation is not enabled yet.</p>
           </>}
         </section>}
-        {tab === 'transform' && <section>
-          <span>UPLOAD WORKFLOW</span><h1>Reframe your footage.</h1>
-          <p>Original video stays untouched. New export rendered with FFmpeg on Azure.</p>
-          <form onSubmit={upload}>
-            <label className="drop"><Upload/><b>{file?.name || 'Choose a video file'}</b><small>MP4 / MOV / MKV / WebM</small><input type="file" accept="video/*" onChange={event => setFile(event.target.files[0])}/></label>
-            {previewUrl && <div className="video-preview">
-              <video src={previewUrl} controls playsInline preload="metadata"/>
-              {overlayText && <div className={"preview-title preview-" + overlayPosition}>{overlayText}</div>}
-              <small>Local preview · original file is not uploaded until you queue the export</small>
+        {tab === 'ai-video' && <section className="dub-workspace">
+          <span>CPU VIDEO-TO-VIDEO · VOICE REPLACEMENT</span>
+          <h1>Keep the performance.<br/><i>Make it speak your voice.</i></h1>
+          <p>Upload a real video, select a language-matched saved voice profile, enter the dialogue and choose an AI visual style. Studio synthesises your speech locally, lip-syncs the source performance, then stylises every frame while preserving the original scene and motion.</p>
+          <div className="dub-status">
+            <b>{lipsyncInfo.ready && activeTtsReady ? 'CPU voice + lip-sync ready' : 'Setup required before rendering'}</b>
+            <small>Speech: {ttsInfo.tts_engines?.[ttsEngine]?.name || 'Selected engine'} · language-matched WAV profile</small>
+            <small>Lip-sync: Wav2Lip ONNX · CPUExecutionProvider · no GPU</small>
+            <small>Azure hardware: 2 vCPU · 16 GB RAM · videos streamed in batches of 8 frames</small>
+            {!activeTtsReady && <small className="voice-warning">Pocket TTS Hindi is not enabled or its model is unavailable.</small>}
+            {!lipsyncInfo.ready && <small className="voice-warning">CPU lip-sync weights/dependencies are not installed yet. Run the installation steps in docs/CPU_VIDEO_DUB.md.</small>}
+          </div>
+          <label>SPEECH ENGINE · SHARED WITH OTHER SPEECH TOOLS
+            <select value={ttsEngine} onChange={event => changeSpeechEngine(event.target.value)}>
+              <option value="kitten">KittenTTS 2 · Multilingual (20 languages)</option>
+              <option value="pocket">Pocket TTS · Hindi only</option>
+            </select>
+          </label>
+          <form onSubmit={queueVideoDub}>
+            <label className="drop"><Upload/><b>{dubFile?.name || 'Upload a new performance video'}</b><small>MP4 / MOV / MKV / WebM · up to 500 MB · 1–180 seconds · one clearly visible main face</small>
+              <input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={event => { setDubFile(event.target.files?.[0] || null); setDubSourceTransformId(''); setDubSourceDuration(0); }}/>
+            </label>
+            {dubFile && <div className="dub-video-preview"><video src={dubPreviewUrl} controls playsInline preload="metadata" onLoadedMetadata={event => setDubSourceDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}/><small>Original video preview · upload only begins when you queue the job</small></div>}
+            <label>OR SELECT A VIDEO ALREADY CREATED IN TRANSFORM
+              <select value={dubSourceTransformId} onChange={event => {
+                setDubSourceTransformId(event.target.value);
+                if (event.target.value) { setDubFile(null); setDubSourceDuration(0); }
+              }}>
+                <option value="">Choose from Transform history</option>
+                {transformHistory.filter(job => job.status === 'completed' && job.output_available).map(job => (
+                  <option key={job.id} value={job.id}>
+                    {(job.payload?.source_filename || 'Transformed video') + ' · ' + new Date(job.created_at).toLocaleString()}
+                  </option>
+                ))}
+              </select>
+              <small>{transformHistory.some(job => job.status === 'completed' && job.output_available)
+                ? 'The selected export is copied into this Lip Sync job. Its Transform original remains untouched.'
+                : 'No completed Transform videos are available yet.'}</small>
+            </label>
+            {dubSourceTransformId && <div className="dub-video-preview">
+              <video src={'/api/jobs/' + dubSourceTransformId + '/preview-video'} controls playsInline preload="metadata"
+                onLoadedMetadata={event => setDubSourceDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}/>
+              <small>Selected Transform export · source duration is used for dialogue length guidance</small>
             </div>}
-            <div className="row">
-              <label>TRIM START (SECONDS)<input type="number" min="0" max="14400" step="0.1" value={trimStart} onChange={event => setTrimStart(event.target.value)}/></label>
-              <label>TRIM END (SECONDS · 0 = FULL LENGTH)<input type="number" min="0" max="14400" step="0.1" value={trimEnd} onChange={event => setTrimEnd(event.target.value)}/></label>
+            <label>FULL-FRAME AI VIDEO STYLE
+              <select value={videoStyle} onChange={event => setVideoStyle(event.target.value)}>
+                <option value="none">Keep original look · lip-sync only</option>
+                {styleInfo.models.map(item => <option key={item.id} value={item.id} disabled={!item.ready}>
+                  {item.label}{item.ready ? '' : ' · model not installed'}
+                </option>)}
+              </select>
+            </label>
+            {videoStyle !== 'none' && <>
+              <label>STYLE INTENSITY · {Math.round(styleStrength * 100)}%
+                <input type="range" min="0.25" max="1" step="0.05" value={styleStrength}
+                  onChange={event => setStyleStrength(Number(event.target.value))}/>
+              </label>
+              <small className="dub-style-note">
+                {videoStyle === 'anime_512'
+                  ? 'Highest-detail anime look · measured about 0.41 frames/sec on this 2-vCPU server.'
+                  : 'Faster painterly look · measured about 5.4 frames/sec on this 2-vCPU server; detail is softer at 224px.'}
+              </small>
+            </>}
+            {!styleInfo.ready && <small className="voice-warning">AI style models are not installed yet. Run scripts/install_video_style_models.py on Azure.</small>}
+            <SearchableLanguagePicker label="DIALOGUE LANGUAGE" value={dubLanguage}
+              onChange={value => {setDubLanguage(value);setDubVoiceId(voicesForLanguage(value)[0]?.voice_id || '');}}
+              languages={speechLanguages} search={dubLanguageSearch} onSearch={setDubLanguageSearch}/>
+            <label>SAVED VOICE PROFILE
+              <select required value={dubVoiceId} onChange={event => setDubVoiceId(event.target.value)}>
+                <option value="">Choose your saved WAV voice</option>
+                {voicesForLanguage(dubLanguage).map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}
+              </select>
+            </label>
+            {!voices.length && <button type="button" className="secondary" onClick={() => setTab('voice')}>Open Voice Studio to save a WAV profile</button>}
+            <label>NEW {speechLanguageName(dubLanguage).toUpperCase()} DIALOGUE
+              <textarea rows="6" maxLength="12000" value={dubNarration} onChange={event => setDubNarration(event.target.value)}
+                placeholder="Enter the exact dialogue your on-screen speaker should say…" required/>
+            </label>
+            <small className="dub-prosody-note">{ttsEngine === 'kitten' ? 'Kitten recognises emotion tags ([angry], [joyful], [sad], etc.), vocal events such as <laugh> and <sigh>, and (((emphasis))). Put emotion tags at the beginning of each utterance; expression is beta, not guaranteed.' : 'Pocket TTS was trained without meaningful punctuation coverage. Punctuation and markup are removed before synthesis and do not reliably control pauses, intonation or emotion.'}</small>
+            <div className={'dub-length-meter' + (dubSpeechOverLimit ? ' over-limit' : '')}>
+              <div className="dub-length-heading">
+                <b>LIVE SPEECH LENGTH ESTIMATE</b>
+                <small>{dubWordCount.toLocaleString()} words · {dubNarration.length.toLocaleString()} / 12,000 characters · {speechLanguageName(dubLanguage)}</small>
+              </div>
+              {dubSourceDuration > 0 ? <>
+                <div className="dub-length-values">
+                  <span>Estimated narration <b>{formatTrimTime(dubEstimatedSpeechSeconds)}</b></span>
+                  <span>Maximum allowed <b>{formatTrimTime(dubMaximumSpeechSeconds)}</b></span>
+                </div>
+                <progress value={Math.min(dubEstimatedSpeechSeconds, dubMaximumSpeechSeconds)} max={dubMaximumSpeechSeconds || 1}/>
+                <small className={dubSpeechOverLimit ? 'dub-length-warning' : 'dub-length-guidance'}>
+                  {dubSpeechOverLimit
+                    ? 'Estimated speech is over the 20% limit. Shorten the dialogue or choose a longer video before generating.'
+                    : dubNarration.trim()
+                      ? 'Within the estimated limit · ' + formatTrimTime(Math.max(0, dubMaximumSpeechSeconds - dubEstimatedSpeechSeconds)) + ' estimated time remaining.'
+                      : 'Start typing to see the estimated speech length and remaining allowance.'}
+                </small>
+              </> : <small className="dub-length-guidance">Choose a video and let its preview load to calculate the maximum speech length (video duration + 20%).</small>}
+              <small className="dub-length-footnote">Estimate uses approximately 100 words/minute. Punctuation is removed before synthesis; Pocket TTS output can vary, so the renderer checks the actual generated duration.</small>
+            </div>
+            <label className="dub-checkbox"><input type="checkbox" checked={dubKeepAmbience} onChange={event => setDubKeepAmbience(event.target.checked)}/>
+              Keep original background ambience quietly under the new voice (original dialogue may also remain audible)
+            </label>
+            <button className="primary" disabled={(!dubFile && !dubSourceTransformId) || !dubVoiceId || !dubNarration.trim() || dubBusy || !lipsyncInfo.ready || !activeTtsReady || (videoStyle !== 'none' && !styleInfo.models.some(item => item.id === videoStyle && item.ready)) || dubSpeechOverLimit}>
+              {dubBusy ? 'Uploading and queueing…' : 'Generate full video with my voice + lip-sync'}
+            </button>
+          </form>
+          <div className="transform-results dub-results">
+            <div className="transform-results-heading">
+              <div><h2>Recent AI Video generations</h2><small>Progress refreshes automatically · completed videos stay here to play or download</small></div>
+              <button type="button" onClick={refresh}><RefreshCw size={15}/> Refresh</button>
+            </div>
+            {dubJobs.length === 0 ? <p>No AI videos yet. Queue a generation above and its progress and finished video will appear here.</p> :
+              dubJobs.slice(0, 8).map(job => {
+                const ready = job.status === 'completed' && job.output_available;
+                const label = ready ? 'Completed' : job.status === 'failed' ? 'Failed' :
+                  job.status === 'running' ? 'Processing' : job.status === 'queued' ? 'Queued' : job.status;
+                return <article className="transform-job" key={job.id}>
+                  <div className="transform-job-heading">
+                    <div><b>{job.payload?.source_filename || ('Lip-sync · ' + (job.payload?.voice_id || 'Saved voice profile'))}</b>
+                      <small>{new Date(job.created_at).toLocaleString()} · {job.stage}</small></div>
+                    <span className={'transform-status ' + (ready ? 'success' : job.status === 'failed' ? 'failed' : 'pending')}>{label}</span>
+                  </div>
+                  <progress value={job.progress || 0} max="100"/>
+                  <small className="transform-progress-label">{ready ? 'Video ready · 100%' : (job.progress || 0) + '% · ' + job.stage}</small>
+                  {ready && <>
+                    <div className="transform-success-note">Your generated video is ready. Play it below or download the MP4.</div>
+                    <div className="video-preview transform-output-preview">
+                      <video src={'/api/jobs/' + job.id + '/preview-video'} controls playsInline preload="metadata"/>
+                    </div>
+                    <div className="transform-job-actions">
+                      <a className="primary" href={'/api/jobs/' + job.id + '/output'} download="ai_video_with_lipsync.mp4">
+                        <Download size={15}/> Download finished video
+                      </a>
+                    </div>
+                  </>}
+                  {job.status === 'completed' && !job.output_available &&
+                    <small className="transform-warning">The job completed, but the video file is not available in storage.</small>}
+                  {job.status === 'failed' && <p className="transform-error">{job.error || 'The video could not be generated.'}</p>}
+                  <div className="transform-job-footer">
+                    <small>Job {job.id.slice(0, 8)} · {job.payload?.video_style === 'none' ? 'Lip-sync only' : 'Lip-sync + ' + (job.payload?.video_style || 'video style')}</small>
+                    <button type="button" className="danger" disabled={job.status === 'running' || job.status === 'queued'}
+                      onClick={() => deleteMedia('/api/jobs/' + job.id, 'AI video and its files')}>
+                      <Trash2 size={14}/> {job.status === 'running' || job.status === 'queued' ? 'Processing — cannot delete' : 'Delete'}
+                    </button>
+                  </div>
+                </article>;
+              })}
+          </div>
+          <article className="dub-expectations">
+            <b>What is preserved and what changes</b>
+            <ul>
+              <li>Preserved: the original person, face identity, eyes, expressions, head turns, body movement, camera motion and background.</li>
+              <li>Changed: the mouth region is re-rendered to match your new Hindi speech, frame by frame for the complete clip.</li>
+              <li>Timing: if speech is shorter, the video keeps its original duration and the voice ends naturally. If speech is up to 20% longer, the source video slows slightly. Longer scripts are rejected rather than silently cut or frozen.</li>
+            </ul>
+            <small>Important: AI style transfer changes the appearance of the same source frames; it does not invent new objects or camera actions. Lip-sync changes the mouth while retaining source eyes, expressions, head motion and body performance. It does not synthesize new eyebrow or eye emotions. These weights are intended for your personal, non-commercial workflow.</small>
+          </article>
+        </section>}
+        {tab === 'facefusion' && <section className="facefusion-workspace">
+          <span>CPU VIDEO PROCESSING</span>
+          <h1>Face replacement.</h1>
+          <p>Replace the face in a short target video using a reference image. FaceFusion runs locally on this server using CPU inference; no GPU or paid video API is used. Original video audio is restored after processing.</p>
+          <div className="facefusion-upload">
+            <label className="drop"><Film/><b>{faceTarget?.name || 'Choose target video'}</b><small>MP4, MOV, MKV or WebM · maximum 15 seconds · 100 MB{faceTargetDuration ? ' · ' + faceTargetDuration.toFixed(1) + 's checked' : ''}</small><input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={handleFaceTargetChange}/></label>
+            <label className="drop"><Upload/><b>{faceReference?.name || 'Choose reference face image'}</b><small>JPG, PNG or WebP · one clear face · 15 MB maximum. Target face must be visible in its opening frame.</small><input type="file" accept="image/jpeg,image/png,image/webp" onChange={event => setFaceReference(event.target.files?.[0] || null)}/></label>
+            <label className="facefusion-override">
+              <input type="checkbox" checked={faceFalsePositiveOverride} onChange={event => setFaceFalsePositiveOverride(event.target.checked)}/>
+              <span><b>Allow this job if the NSFW detector gives a false positive</b><small>Use only for a non-explicit video. By enabling this, you confirm the video is non-explicit and you have permission from the people shown. This bypass applies only to this job; normal screening remains enabled for all other jobs.</small></span>
+            </label>
+            <button type="button" className="primary" disabled={faceBusy} onClick={submitFaceFusion}>{faceBusy ? 'Uploading…' : 'Queue CPU face replacement'}</button>
+            {faceBusy && <div className="facefusion-upload-status"><b>Uploading files to Azure · {faceUploadProgress}%</b><progress value={faceUploadProgress} max="100"/><small>Keep this page open until the upload finishes. CPU processing begins after the server accepts both files.</small></div>}
+          </div>
+          <div className="facefusion-note">
+            <b>Important limitations</b>
+            <small>This is face replacement, not full character transformation. It does not change hairstyle, clothing, body or background from a text prompt. Results depend on face visibility, angle, lighting and occlusion.</small>
+            <small>During CPU inference, the progress bar is indeterminate because FaceFusion does not expose a reliable frame percentage through this integration. Job status and errors are refreshed automatically.</small>
+          </div>
+          <h2>Face replacement jobs</h2>
+          {jobs.filter(job => job.kind === 'facefusion').length === 0 ? <p>No face replacement jobs yet. After upload, your job will appear here.</p> : jobs.filter(job => job.kind === 'facefusion').map(job =>
+            <article key={job.id}>
+              <b>CPU face replacement</b>
+              <small>{job.stage} · {job.status === 'running' ? 'Processing on CPU' : job.status} · {job.progress}%</small>
+              {job.status === 'running' ? <progress className="facefusion-indeterminate"/> : <progress value={job.progress} max="100"/>}
+              {job.status === 'completed' && <><video className="facefusion-result" src={'/api/jobs/' + job.id + '/preview-video'} controls playsInline preload="metadata"/><a href={'/api/jobs/' + job.id + '/output'}>Download processed video</a></>}
+              {job.status === 'failed' && <p className="validation-error">{job.error || 'Processing failed. Check the worker logs.'}</p>}
+              <button type="button" className="danger" disabled={job.status === 'running'} onClick={() => deleteMedia('/api/jobs/' + job.id, 'face replacement job and its media')}>{job.status === 'running' ? 'Processing — cannot delete' : 'Delete job and media'}</button>
+            </article>
+          )}
+        </section>}
+        {tab === 'transform' && <section className="transform-workspace">
+          <span>VIDEO TRANSFORMATION</span><h1>{editingTransformId ? 'Edit your export.' : 'Reframe your footage.'}</h1>
+          <p>Every export is saved in this workspace. Watch it here, download it, or edit the settings and create another version without losing the previous one.</p>
+
+          <section className="voice-over-panel">
+            <label>SPEECH ENGINE · SHARED WITH OTHER SPEECH TOOLS
+              <select value={ttsEngine} onChange={event => changeSpeechEngine(event.target.value)}>
+                <option value="kitten">KittenTTS 2 · Multilingual (20 languages)</option>
+                <option value="pocket">Pocket TTS · Hindi only</option>
+              </select>
+            </label>
+            <div className="voice-over-heading"><div><span>VOICE-OVER · NO LIP-SYNC</span><h2>Add narration to a video.</h2><p>Add a saved voice in the selected language to any uploaded video or completed Transform export. The video frames, face and mouth movement are not changed.</p></div></div>
+            <form className="voice-over-form" onSubmit={queueVoiceOver}>
+              {editingVoiceOverJob?.status === 'failed' && <div className="voice-over-retry-warning"><b>Previous attempt failed — your inputs are preserved.</b><small>{editingVoiceOverJob.error || 'The worker could not complete this voice-over.'} Correct the script or audio settings below, then retry without uploading the video again.</small></div>}
+              {editingVoiceOverId ? <div className="transform-edit-banner voice-over-edit-banner">
+                <b>Editing a saved voice-over</b>
+                <small>{voiceOverHistory.find(job => job.id === editingVoiceOverId)?.payload?.source_filename || 'Original source video'} · the original source will be reused.</small>
+                <div className="video-preview"><video src={'/api/jobs/' + editingVoiceOverId + '/source'} controls playsInline preload="metadata"/></div>
+                <button type="button" onClick={cancelVoiceOverEdit}>Cancel editing</button>
+              </div> : <div className="voice-over-source-grid">
+                <label className="drop"><Upload/><b>{voiceOverFile?.name || 'Upload a video for voice-over'}</b><small>MP4 / MOV / MKV / WebM · maximum 500 MB</small><input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={event => {
+                  const selectedFile = event.target.files?.[0] || null;
+                  setVoiceOverFile(selectedFile);
+                  setVoiceOverSourceTransformId('');
+                  inspectVoiceOverSource(selectedFile ? URL.createObjectURL(selectedFile) : '', Boolean(selectedFile));
+                }}/></label>
+                <label>OR SELECT AN EXISTING TRANSFORM VIDEO
+                  <select value={voiceOverSourceTransformId} onChange={event => {
+                    const sourceId = event.target.value;
+                    setVoiceOverSourceTransformId(sourceId);
+                    if (sourceId) setVoiceOverFile(null);
+                    inspectVoiceOverSource(sourceId
+                      ? '/api/jobs/' + encodeURIComponent(sourceId) + '/preview-video' : '');
+                  }}>
+                    <option value="">Choose a completed Transform export</option>
+                    {availableTransformVideos.map(job => <option key={job.id} value={job.id}>{job.payload?.source_filename || 'Transform video'} · {new Date(job.created_at).toLocaleString()}</option>)}
+                  </select>
+                </label>
+              </div>}
+              <div className="voice-over-fields">
+                <SearchableLanguagePicker label="VOICE-OVER LANGUAGE" value={voiceOverLanguage}
+                  onChange={value => {setVoiceOverLanguage(value);setVoiceOverVoiceId(voicesForLanguage(value)[0]?.voice_id || '');}}
+                  languages={speechLanguages} search={voiceOverLanguageSearch} onSearch={setVoiceOverLanguageSearch}/>
+                <label>VOICE PROFILE
+                  <select required value={voiceOverVoiceId} onChange={event => setVoiceOverVoiceId(event.target.value)}>
+                    <option value="" disabled>Select saved WAV profile</option>
+                    {voicesForLanguage(voiceOverLanguage).map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}
+                  </select>
+                </label>
+                <label>START VOICE AT (SECONDS)
+                  <input type="number" min="0" max="14400" step="0.1" value={voiceOverStartOffset} onChange={event => setVoiceOverStartOffset(event.target.value)}/>
+                </label>
+              </div>
+              <label>{speechLanguageName(voiceOverLanguage).toUpperCase()} VOICE-OVER SCRIPT
+                <textarea rows="6" value={voiceOverNarration}
+                  onChange={event => setVoiceOverNarration(truncateTextCharacters(event.target.value, voiceOverMaxCharacters))}
+                  placeholder="Enter your voice-over narration…" required/>
+                <small className="voice-over-help">
+                  {voiceOverSourceDuration > 0
+                    ? 'Remaining video time: ' + voiceOverAvailableSeconds.toFixed(1) + 's · Script: ' +
+                      voiceOverCharacterCount + ' / ' + voiceOverMaxCharacters + ' characters'
+                    : 'Select a video to calculate the narration character limit.'}
+                </small>
+                {voiceOverScriptOverLimit && <small className="voice-warning">Your current script is over the estimated limit. Shorten it or choose a longer video.</small>}
+                <small className="voice-over-help">{ttsEngine === 'kitten' ? 'KittenTTS supports [emotion] tags, inline vocal events such as <laugh> or <sigh>, and (((emphasis))). Speech is never silently trimmed; final timing is checked before export.' : 'Pocket TTS removes punctuation, emoji and decorative symbols; they do not control emotion or intonation in this model. Speech is never silently trimmed; final timing is checked before export.'}</small>
+              </label>
+              <label className="voice-over-checkbox">
+                <input type="checkbox" checked={voiceOverKeepOriginal} onChange={event => setVoiceOverKeepOriginal(event.target.checked)}/>
+                <span><b>Keep original video audio underneath</b><small>Turn off to use only the generated voice-over.</small></span>
+              </label>
+              {voiceOverKeepOriginal && <label>ORIGINAL AUDIO VOLUME · {Math.round(voiceOverOriginalVolume * 100)}%
+                <input type="range" min="0" max="1.5" step="0.05" value={voiceOverOriginalVolume} onChange={event => setVoiceOverOriginalVolume(Number(event.target.value))}/>
+              </label>}
+              <label>VOICE-OVER VOLUME · {Math.round(voiceOverVoiceVolume * 100)}%
+                <input type="range" min="0.1" max="2" step="0.05" value={voiceOverVoiceVolume} onChange={event => setVoiceOverVoiceVolume(Number(event.target.value))}/>
+              </label>
+              <button className="primary" disabled={voiceOverBusy || voiceOverScriptOverLimit || ['queued','running'].includes(editingVoiceOverJob?.status) || (!voiceOverFile && !voiceOverSourceTransformId && !editingVoiceOverId) || !voiceOverVoiceId || !voiceOverNarration.trim()}>
+                {voiceOverBusy ? 'Queueing voice-over…' : ['queued','running'].includes(editingVoiceOverJob?.status) ? 'Voice-over processing…' : editingVoiceOverJob?.status === 'failed' ? 'Retry voice-over' : editingVoiceOverId ? 'Create edited voice-over version' : 'Generate voice-over video'}
+              </button>
+            </form>
+            <div className="voice-over-history">
+              <div className="transform-results-heading"><div><h3>Generated voice-over videos</h3><small>Select a saved result to play, download, edit or delete it.</small></div><button type="button" onClick={refresh}><RefreshCw size={15}/> Refresh</button></div>
+              <label>VOICE-OVER VIDEO HISTORY
+                <select value={voiceOverSelectedId} onChange={event => setVoiceOverSelectedId(event.target.value)}>
+                  <option value="">Select a generated video</option>
+                  {voiceOverHistory.map(job => {
+                    const state = job.status === 'completed' && job.output_available ? 'Ready' : job.status === 'failed' ? 'Failed' : job.status === 'running' ? 'Processing' : 'Queued';
+                    return <option key={job.id} value={job.id}>{job.payload?.source_filename || 'Voice-over video'} · {state} · {new Date(job.created_at).toLocaleString()}</option>;
+                  })}
+                </select>
+              </label>
+              {selectedVoiceOverJob ? <article className="transform-job voice-over-result">
+                <div className="transform-job-heading"><div><b>{selectedVoiceOverJob.payload?.source_filename || 'Voice-over video'}</b><small>{new Date(selectedVoiceOverJob.created_at).toLocaleString()} · {selectedVoiceOverJob.stage}</small></div><span className={'transform-status ' + (selectedVoiceOverJob.status === 'completed' ? 'success' : selectedVoiceOverJob.status === 'failed' ? 'failed' : 'pending')}>{selectedVoiceOverJob.status === 'completed' && selectedVoiceOverJob.output_available ? 'Ready' : selectedVoiceOverJob.status === 'failed' ? 'Failed' : selectedVoiceOverJob.status === 'running' ? 'Processing' : 'Queued'}</span></div>
+                <progress value={selectedVoiceOverJob.progress || 0} max="100"/>
+                <small className="transform-progress-label">{selectedVoiceOverJob.status === 'completed' ? 'Export ready · 100%' : (selectedVoiceOverJob.progress || 0) + '% · ' + selectedVoiceOverJob.stage}</small>
+                {selectedVoiceOverJob.status === 'completed' && selectedVoiceOverJob.output_available && <div className="video-preview transform-output-preview"><video src={'/api/jobs/' + selectedVoiceOverJob.id + '/preview-video'} controls playsInline preload="metadata"/></div>}
+                {selectedVoiceOverJob.status === 'failed' && <p className="transform-error">{selectedVoiceOverJob.error || 'The voice-over could not be completed.'}</p>}
+                <div className="transform-job-actions">
+                  {selectedVoiceOverJob.status === 'completed' && selectedVoiceOverJob.output_available && <a className="primary" href={'/api/jobs/' + selectedVoiceOverJob.id + '/output'} download="voice_over.mp4"><Download size={15}/> Download MP4</a>}
+                  {selectedVoiceOverJob.source_available && !['queued','running'].includes(selectedVoiceOverJob.status) && <button type="button" onClick={() => editVoiceOver(selectedVoiceOverJob)}>Edit voice-over</button>}
+                  <button type="button" className="danger" disabled={selectedVoiceOverJob.status === 'running'} onClick={() => deleteMedia('/api/jobs/' + selectedVoiceOverJob.id, 'voice-over video and its source')}><Trash2 size={14}/> {selectedVoiceOverJob.status === 'running' ? 'Processing — cannot delete' : 'Delete'}</button>
+                </div>
+              </article> : <p className="voice-over-empty">Your generated voice-over videos will appear in this list. Select one here to play or manage it.</p>}
+            </div>
+          </section>
+          {editingTransformId && <div className="transform-edit-banner">
+            <b>Editing a saved transformation</b>
+            <small>{jobs.find(job => job.id === editingTransformId)?.payload?.source_filename || 'Original source video'} · original file and saved assets will be reused unless replaced below.</small>
+            <div className="video-preview">
+              {!file && <video src={'/api/jobs/' + editingTransformId + '/source'} controls playsInline preload="metadata" onLoadedMetadata={handleTrimDurationLoaded}/>}
+              <small>{file ? 'Replacement selected below' : 'Saved original source · choose a replacement above to use a different clip'}</small>
+            </div>
+            <button type="button" onClick={cancelTransformEdit}>Cancel editing</button>
+          </div>}
+          <form onSubmit={upload}>
+            <label className="drop"><Upload/><b>{file?.name || (editingTransformId ? 'Keep saved original video or choose a replacement' : 'Choose a video file')}</b><small>MP4 / MOV / MKV / WebM · max 500 MB</small><input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={event => {
+              const selectedFile = event.target.files?.[0] || null;
+              setFile(selectedFile);
+              setTrimDuration(0);
+              setTrimStart('0');
+              setTrimEnd('0');
+            }}/></label>
+            {previewUrl && <div className="video-preview">
+              <video src={previewUrl} controls playsInline preload="metadata" onLoadedMetadata={handleTrimDurationLoaded}/>
+              {overlayText && <div className={"preview-title preview-" + overlayPosition}>{overlayText}</div>}
+              <small>Selected source preview · the upload is stored separately from previous exports</small>
+            </div>}
+            {editingTransformId && !file && <small className="transform-source-note">No replacement file selected: the saved original will be used.</small>}
+            <div className="transform-trim-controls">
+              <div className="transform-trim-heading">
+                <div><b>CHOOSE THE CLIP RANGE</b><small>Drag either slider. The time boxes update automatically.</small></div>
+                <small>{trimDuration > 0 ? 'Video length · ' + formatTrimTime(trimDuration) : 'Upload a video to enable trimming'}</small>
+              </div>
+              <div className="transform-trim-readouts">
+                <label><span>START TIME</span><output>{formatTrimTime(trimStartValue)}</output></label>
+                <label><span>END TIME</span><output>{trimDuration > 0 ? formatTrimTime(trimEndValue) : '00:00.0'}</output></label>
+              </div>
+              <label className="transform-trim-slider">
+                <span><b>START</b><output>{formatTrimTime(trimStartValue)}</output></span>
+                <input type="range" min="0" max={trimStartMax} step="0.1" value={trimStartValue}
+                  disabled={!trimDuration || trimDuration <= 0.1}
+                  onChange={event => setTrimStart(Number(event.target.value).toFixed(1))}/>
+              </label>
+              <label className="transform-trim-slider">
+                <span><b>END</b><output>{trimDuration > 0 ? formatTrimTime(trimEndValue) : '00:00.0'}</output></span>
+                <input type="range" min={trimEndMin} max={trimDuration || 0} step="0.1" value={trimEndValue}
+                  disabled={!trimDuration || trimDuration <= 0.1}
+                  onChange={event => {
+                    const nextEnd = Number(event.target.value);
+                    setTrimEnd(nextEnd >= trimDuration - 0.05 ? '0' : nextEnd.toFixed(1));
+                  }}/>
+              </label>
             </div>
             <div className="row">
               <label>EXPORT FORMAT<select value={preset} onChange={event => setPreset(event.target.value)}><option value="reel">Reels / Shorts · 9:16</option><option value="landscape">YouTube · 16:9</option><option value="square">Square · 1:1</option></select></label>
@@ -844,7 +1899,8 @@ function App() {
             </div>
             <label>AUDIO<select value={audioMode} onChange={event => setAudioMode(event.target.value)}><option value="keep">Keep original audio</option><option value="mute">Remove audio</option><option value="music">Replace with background music</option></select></label>
             {audioMode === 'music' && <>
-              <label className="drop"><Upload/><b>{musicFile?.name || 'Choose background music'}</b><small>MP3 / WAV / M4A / AAC / OGG · 30 MB max</small><input type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,audio/*" onChange={event => setMusicFile(event.target.files[0])}/></label>
+              <label className="drop"><Upload/><b>{musicFile?.name || (editingTransformId ? 'Keep saved background music or replace it' : 'Choose background music')}</b><small>MP3 / WAV / M4A / AAC / OGG · 30 MB max</small><input type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,audio/*" onChange={event => setMusicFile(event.target.files?.[0] || null)}/></label>
+              {editingTransformId && !musicFile && <small className="transform-source-note">Saved background music will be reused when available.</small>}
               <label>MUSIC VOLUME · {Math.round(musicVolume * 100)}%
                 <input type="range" min="0" max="1.5" step="0.05" value={musicVolume} onChange={event => setMusicVolume(Number(event.target.value))}/>
               </label>
@@ -853,9 +1909,49 @@ function App() {
               <input value={overlayText} maxLength={160} onChange={event => setOverlayText(event.target.value)} placeholder="Add a title or short message (160 characters max)"/>
             </label>
             <label>TEXT POSITION<select value={overlayPosition} onChange={event => setOverlayPosition(event.target.value)}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select></label>
-            <label className="drop"><Upload/><b>{subtitleFile?.name || 'Optional SRT subtitles'}</b><small>UTF-8 SRT · Hindi and English · 2 MB max</small><input type="file" accept=".srt,application/x-subrip" onChange={event => setSubtitleFile(event.target.files[0])}/></label>
-            <button className="primary" disabled={!file || busy || (audioMode === 'music' && !musicFile) || (trimEnd !== '0' && Number(trimEnd) <= Number(trimStart))}>Queue video transform</button>
+            <label className="drop"><Upload/><b>{subtitleFile?.name || (editingTransformId ? 'Keep saved subtitles or replace them' : 'Optional SRT subtitles')}</b><small>UTF-8 SRT · Hindi and English · 2 MB max</small><input type="file" accept=".srt,application/x-subrip" onChange={event => setSubtitleFile(event.target.files?.[0] || null)}/></label>
+            <button className="primary" disabled={busy || (!file && !editingTransformId) || (audioMode === 'music' && !musicFile && !editingTransformJob?.payload?.music_path) || (trimEnd !== '0' && Number(trimEnd) <= Number(trimStart))}>
+              {busy ? 'Queueing export…' : editingTransformId ? 'Create edited version' : 'Queue video transformation'}
+            </button>
           </form>
+          <div className="transform-results">
+            <div className="transform-results-heading"><div><h2>Transform history</h2><small>All saved Transform videos · preview, download or delete any completed export</small></div><button type="button" onClick={refresh}><RefreshCw size={15}/> Refresh</button></div>
+            {transformJobs.length === 0 ? <p>No transformations yet. Queue a video above to see its progress and final export here.</p> : transformJobs.map(job => {
+              const label = job.status === 'completed' && job.output_available ? 'Completed' :
+                job.status === 'failed' ? 'Failed' :
+                job.status === 'running' ? 'Processing' : job.status === 'queued' ? 'Queued' : job.status;
+              return <article className="transform-job" key={job.id}>
+                <div className="transform-job-heading">
+                  <div><b>{job.payload?.source_filename || 'Video transformation'}</b><small>{new Date(job.created_at).toLocaleString()} · {job.stage}</small></div>
+                  <span className={'transform-status ' + (job.status === 'completed' ? 'success' : job.status === 'failed' ? 'failed' : 'pending')}>{label}</span>
+                </div>
+                <progress value={job.progress || 0} max="100"/>
+                <small className="transform-progress-label">{job.status === 'completed' ? 'Export ready · 100%' : (job.progress || 0) + '% · ' + job.stage}</small>
+                {job.status === 'completed' && job.output_available && <>
+                  <div className="transform-success-note">Export completed successfully. Preview or download your MP4 below.</div>
+                  <div className="video-preview transform-output-preview">
+                    <video src={'/api/jobs/' + job.id + '/preview-video'} controls playsInline preload="metadata"/>
+                  </div>
+                  <div className="transform-job-actions">
+                    <a className="primary" href={'/api/jobs/' + job.id + '/output'} download={(job.payload?.source_filename || 'video').replace(/\.[^.]+$/, '') + '_transformed.mp4'}><Download size={15}/> Download MP4</a>
+                    {job.source_available && <button type="button" onClick={() => editTransform(job)}>Edit / create version</button>}
+                  </div>
+                </>}
+                {job.status === 'completed' && !job.output_available && <small className="transform-warning">The job completed, but its output file is missing from storage.</small>}
+                {job.status === 'failed' && <p className="transform-error">{job.error || 'The worker could not complete this transformation.'}</p>}
+                {(job.status !== 'completed' || !job.output_available) && job.source_available && <div className="transform-job-actions">
+                  <button type="button" disabled={job.status === 'queued' || job.status === 'running'} onClick={() => editTransform(job)}>Edit / try again</button>
+                </div>}
+                {!job.source_available && job.status !== 'queued' && job.status !== 'running' && <small className="transform-warning">Original source was not retained for this older job. Download and delete are still available.</small>}
+                <div className="transform-job-footer">
+                  <small>{job.source_available ? 'Original retained for editing' : 'Source unavailable'} · Job {job.id.slice(0,8)}</small>
+                  <button type="button" className="danger" disabled={job.status === 'running'} onClick={() => deleteMedia('/api/jobs/' + job.id, 'transformation and all its files')}>
+                    <Trash2 size={14}/> {job.status === 'running' ? 'Processing — cannot delete yet' : 'Delete'}
+                  </button>
+                </div>
+              </article>;
+            })}
+          </div>
         </section>}
         {tab === 'timeline' && <section className="timeline-workspace">
           <span>MULTI-SCENE EDITOR</span><h1>Build your story.</h1>
@@ -901,93 +1997,164 @@ function App() {
             </form>
           </>}
         </section>}
-        {tab === 'voice' && <section>
-          <span>VOICE LIBRARY</span><h1>Your voice profiles.</h1>
-          <p>Upload a clean WAV reference for Chatterbox voice conditioning.</p>
-          <article className="voice-preview">
-            <div className="voice-preview-copy">
-              <b>Original long narration</b>
-              <small>Previous generated test sample using the full 20-second reference.</small>
-              <audio controls preload="none" src="/api/tts/preview-sample?variant=original"
-                aria-label="Original long Hindi voice sample"/>
-            </div>
-            <div className="voice-preview-copy">
-              <b>A · Current settings / full reference</b>
-              <small>Same Hindi test sentence, 1 flow step, EOS -2.0, 20-second reference.</small>
-              <audio controls preload="none" src="/api/tts/preview-sample?variant=current"
-                aria-label="Current Hindi synthesis settings sample"/>
-            </div>
-            <div className="voice-preview-copy">
-              <b>B · Higher decode steps / full reference</b>
-              <small>Same sentence and reference, 2 flow steps, EOS -1.0.</small>
-              <audio controls preload="none" src="/api/tts/preview-sample?variant=recommended"
-                aria-label="Two-step Hindi synthesis settings sample"/>
-            </div>
-            <div className="voice-preview-copy">
-              <b>C · Cleaned 8-second reference</b>
-              <small>Same sentence and current settings, using a separate cropped/levelled copy. The saved source WAV was not changed.</small>
-              <audio controls preload="none" src="/api/tts/preview-sample?variant=clean-reference"
-                aria-label="Cleaned reference Hindi voice sample"/>
-            </div>
-            <small>Diagnostic A/B clips use the same test sentence and matched playback peak. These are comparisons, not final production settings.</small>
+        {tab === 'voice' && <section className="voice-workspace">
+          <span>VOICE PROFILE WORKFLOW</span><h1>Prepare, review and reuse a voice.</h1>
+          <p>Upload a WAV from a speaker who has authorised voice synthesis. Studio selects the cleanest 20-second segment and transcribes it using the selected language’s local recognizer.</p>
+
+          <article className="voice-step">
+            <b>1 · Select language and prepare the recording</b>
+            <label>SPEECH ENGINE
+              <select value={ttsEngine} onChange={event => changeSpeechEngine(event.target.value)}>
+                <option value="kitten">KittenTTS 2 · Multilingual CPU/C++ (default)</option>
+                <option value="pocket">Pocket TTS · Hindi only · CPU/ONNX</option>
+              </select>
+            </label>
+            <SearchableLanguagePicker label="VOICE PROFILE LANGUAGE" value={voiceLanguage}
+              onChange={value => {
+                setVoiceLanguage(value); setLang(value); setVoicePreviewUrl(''); setVoiceTranscript(''); setVoicePreviewText(VOICE_TEST_SAMPLES[value] || '');
+                const first = voicesForLanguage(value)[0]?.voice_id || '';
+                setVoiceProfileToTest(first); voiceProfileToTestRef.current = first; setVoice(first);
+              }}
+              languages={speechLanguages} search={voiceLanguageSearch} onSearch={setVoiceLanguageSearch}/>
+            <small className="voice-settings-note">Only languages supported by the selected speech engine are shown. Automatic transcription uses the matching local language recognizer.</small>
+            <form onSubmit={prepareVoice}>
+              <label className="drop"><Mic2/><b>{wav?.name || 'Choose original WAV recording'}</b><small>WAV only · up to 30 MB · original file is never modified</small>
+                <input type="file" accept=".wav,audio/wav" onChange={event => { setWav(event.target.files?.[0] || null); setVoicePrepared(null); setVoiceTranscript(''); }}/>
+              </label>
+              <button className="primary" disabled={!wav || voiceBusy}>{voiceBusy ? 'Preparing recording…' : 'Inspect and prepare 20-second clip'}</button>
+            </form>
           </article>
-          <form onSubmit={addVoice}>
-            <label>PROFILE NAME<input value={name} onChange={event => setName(event.target.value)} required maxLength={48}/></label>
-            <label className="drop"><Mic2/><b>{wav?.name || 'Choose reference WAV'}</b><small>WAV only · 30 MB max · original bytes are preserved</small><input type="file" accept=".wav,audio/wav" onChange={event => setWav(event.target.files[0])}/></label>
-            <div className="voice-options">
-              <b>Prepare the working copy</b>
-              <small>The uploaded original is stored separately and never modified. The model copy is always converted to WAV PCM16, mono, 24 kHz.</small>
-              <div className="row voice-option-row">
-                <label className="voice-check"><input type="checkbox" checked={voiceOptions.trim_silence} onChange={event => setVoiceOptions(value => ({...value, trim_silence: event.target.checked}))}/> Remove long silence gaps</label>
-                <label className="voice-check"><input type="checkbox" checked={voiceOptions.normalize_loudness} onChange={event => setVoiceOptions(value => ({...value, normalize_loudness: event.target.checked}))}/> Normalize loudness</label>
-                <label className="voice-check"><input type="checkbox" checked={voiceOptions.noise_reduction} onChange={event => setVoiceOptions(value => ({...value, noise_reduction: event.target.checked}))}/> Gentle noise reduction</label>
-              </div>
-              <div className="row">
-                <label>HIGH-PASS FILTER<select value={voiceOptions.highpass_hz} onChange={event => setVoiceOptions(value => ({...value, highpass_hz: Number(event.target.value)}))}><option value="0">Off (preserve bass)</option><option value="60">60 Hz</option><option value="80">80 Hz</option><option value="100">100 Hz</option></select></label>
-                <label>LOW-PASS FILTER<select value={voiceOptions.lowpass_hz} onChange={event => setVoiceOptions(value => ({...value, lowpass_hz: Number(event.target.value)}))}><option value="0">Off (preserve highs)</option><option value="8000">8 kHz</option><option value="10000">10 kHz</option><option value="12000">12 kHz</option></select></label>
-              </div>
-              <small>All cleanup options are off by default. Use them only when the recording needs it; aggressive denoising can damage voice tone.</small>
+
+          {voicePrepared && <article className="voice-step">
+            <b>2 · Listen to the prepared clip and review its script</b>
+            <div className="voice-inspection">
+              <span>Original: {voicePrepared.inspection.original.duration_seconds}s · {voicePrepared.inspection.original.sample_rate} Hz · {voicePrepared.inspection.original.channels} channel(s) · {voicePrepared.inspection.original.codec}</span>
+              <span>Prepared: {voicePrepared.inspection.prepared.duration_seconds}s · 24 kHz · mono · PCM16</span>
+              <span>Selected from {voicePrepared.inspection.clip_start_seconds}s · Non-silent audio {Math.round(voicePrepared.inspection.non_silent_audio_ratio * 100)}%</span>
+              <span>{voicePrepared.inspection.processing_note}</span>
+              {voicePrepared.inspection.source_analysis && <span>Original level: peak {voicePrepared.inspection.source_analysis.peak_dbfs} dBFS · RMS {voicePrepared.inspection.source_analysis.rms_dbfs} dBFS · near-silence {voicePrepared.inspection.source_analysis.near_silence_percent}%</span>}
+              {voicePrepared.inspection.prepared_analysis && <span>Prepared level: peak {voicePrepared.inspection.prepared_analysis.peak_dbfs} dBFS · RMS {voicePrepared.inspection.prepared_analysis.rms_dbfs} dBFS · near-silence {voicePrepared.inspection.prepared_analysis.near_silence_percent}%</span>}
+              {voicePrepared.inspection.warnings?.map((warning,index) => <small className="voice-warning" key={'clip-'+index}>{warning}</small>)}
+              {(voicePrepared.inspection.prepared_analysis?.warnings || []).map((warning,index) => <small className="voice-warning" key={'prepared-'+index}>{warning}</small>)}
             </div>
-            <button className="primary" disabled={voiceBusy || !wav || !name.trim()}>{voiceBusy ? 'Inspecting and preparing…' : 'Inspect WAV and save voice profile'}</button>
-          </form>
-          {lastVoiceUpload && <article className="voice-inspection">
-            <b>Latest WAV inspection · {lastVoiceUpload.voice_id}</b>
-            <small>Original: {lastVoiceUpload.source?.codec || 'WAV'} · {lastVoiceUpload.source?.sample_rate_hz || 'unknown'} Hz · {lastVoiceUpload.source?.channels || 'unknown'} channel(s) · {lastVoiceUpload.source?.bits_per_sample || 'unknown'} bit · {lastVoiceUpload.source?.duration_seconds || '—'} sec</small>
-            <small>Prepared: {lastVoiceUpload.prepared?.codec || 'PCM16'} · {lastVoiceUpload.prepared?.sample_rate_hz || 24000} Hz · {lastVoiceUpload.prepared?.channels || 1} channel · {lastVoiceUpload.prepared?.duration_seconds || '—'} sec</small>
-            <small>Original WAV format: {lastVoiceUpload.source?.container || 'unknown'} · {lastVoiceUpload.source?.sample_format || 'unknown'} sample format · {lastVoiceUpload.source?.bits_per_sample || 'unknown'} bit</small>
-            <small>Original preserved: {lastVoiceUpload.source_preserved ? 'Yes' : 'No'} · Conditioning: {lastVoiceUpload.conditioning_status === 'engine_disabled' ? 'Not run — TTS engine disabled' : 'Not tested'}</small>
-            {lastVoiceUpload.conditioning_note && <small>{lastVoiceUpload.conditioning_note}</small>}
-            <div className="voice-file-previews">
-              <label>Uploaded original<audio controls preload="none" src={'/api/voices/' + encodeURIComponent(lastVoiceUpload.voice_id) + '/source'}/></label>
-              <label>Prepared model copy<audio controls preload="none" src={'/api/voices/' + encodeURIComponent(lastVoiceUpload.voice_id) + '/profile'}/></label>
-            </div>
-            {(lastVoiceUpload.source_analysis?.warnings || []).map((warning, index) => <small className="voice-warning" key={'source-' + index}>Original: {warning}</small>)}
-            {(lastVoiceUpload.prepared_analysis?.warnings || []).map((warning, index) => <small className="voice-warning" key={'prepared-' + index}>Prepared: {warning}</small>)}
-            <small>Original loudness: peak {lastVoiceUpload.source_analysis?.peak_dbfs ?? '—'} dBFS · RMS {lastVoiceUpload.source_analysis?.rms_dbfs ?? '—'} dBFS · near-silence {lastVoiceUpload.source_analysis?.near_silence_percent ?? '—'}%</small>
-            <small>Prepared loudness: peak {lastVoiceUpload.prepared_analysis?.peak_dbfs ?? '—'} dBFS · RMS {lastVoiceUpload.prepared_analysis?.rms_dbfs ?? '—'} dBFS · near-silence {lastVoiceUpload.prepared_analysis?.near_silence_percent ?? '—'}%</small>
+            <audio className="voice-audio" controls preload="metadata" src={voicePrepared.audio_url}/>
+            {voicePrepared.transcription_info?.script_warning && <small className="voice-warning">{voicePrepared.transcription_info.script_warning}</small>}
+            <label>EXTRACTED {(voicePrepared.language_name || speechLanguageName(voicePrepared.language || voiceLanguage)).toUpperCase()} SCRIPT · EDIT BEFORE SAVING
+              <textarea rows="5" maxLength="12000" value={voiceTranscript}
+                onChange={event => setVoiceTranscript(event.target.value)}
+                placeholder="The transcript appears here. Correct it, or type the exact words spoken in the reference clip."/>
+            </label>
+            <label>VOICE PROFILE NAME
+              <input value={name} maxLength="48" onChange={event => setName(event.target.value)} placeholder="e.g. My voice profile" required/>
+            </label>
+            <button type="button" className="primary" disabled={!name.trim() || voiceBusy}
+              onClick={savePreparedVoice}>{voiceBusy ? 'Saving profile…' : 'Save prepared clip and voice profile'}</button>
           </article>}
-          <h3>Saved voice references</h3>
-          {voices.length === 0 ? <p>No saved voice references.</p> : voices.map(item =>
+
+          <article className="voice-step">
+            <b>3 · Test the saved voice profile</b>
+            <small className="voice-settings-note">
+              {ttsEngine === 'kitten'
+                ? 'Kitten recognises [angry], [joyful], [sad], [excited], inline vocal events such as <laugh> or <sigh>, and (((emphasis))). Put one emotion tag at the beginning of each utterance. Emotion control is beta.'
+                : 'Pocket TTS remains the unchanged original engine. It strips punctuation and emotion markup; use plain Hindi words.'}
+            </small>
+            {!activeTtsReady && <small className="voice-warning">
+              {ttsEngine === 'kitten'
+                ? 'KittenTTS 2 CPU runtime is not installed/enabled. Install it with scripts/install_kitten_tts.py, then explicitly enable it in both services.'
+                : 'Pocket TTS Hindi is not enabled or its CPU model is not installed on Azure.'}
+            </small>}
+            {voicesForLanguage(voiceLanguage).length === 0 ? <p>No saved {speechLanguageName(voiceLanguage)} voice profile yet. Prepare and save one above.</p> : <>
+              <label>VOICE PROFILE
+                <select value={voiceProfileToTest} onChange={event => selectVoiceProfile(event.target.value)}>
+                  {voicesForLanguage(voiceLanguage).map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}
+                </select>
+              </label>
+              <label>TEST TEXT · ENTER {speechLanguageName(voiceLanguage).toUpperCase()} TEXT
+                <textarea rows="4" maxLength="2000" value={voicePreviewText}
+                  onChange={event => setVoicePreviewText(event.target.value)}
+                  placeholder={'Enter ' + speechLanguageName(voiceLanguage) + ' text for this voice profile…'}/>
+              </label>
+              {ttsEngine === 'pocket' && <>
+                <div className="voice-settings">
+                  <label>TEMPERATURE · {Number(voiceGenerationSettings.temperature).toFixed(2)}
+                    <input type="range" min="0.05" max="1" step="0.05" value={voiceGenerationSettings.temperature}
+                      onChange={event => setVoiceGenerationSettings(current => ({...current,temperature:Number(event.target.value)}))}/>
+                  </label>
+                  <label>FLOW STEPS
+                    <select value={voiceGenerationSettings.flow_steps}
+                      onChange={event => setVoiceGenerationSettings(current => ({...current,flow_steps:Number(event.target.value)}))}>
+                      {[1,2,3,4,5,6,7,8].map(value => <option key={value} value={value}>{value}</option>)}
+                    </select>
+                  </label>
+                  <label>EOS THRESHOLD · {Number(voiceGenerationSettings.eos_threshold).toFixed(1)}
+                    <input type="range" min="-6" max="0" step="0.1" value={voiceGenerationSettings.eos_threshold}
+                      onChange={event => setVoiceGenerationSettings(current => ({...current,eos_threshold:Number(event.target.value)}))}/>
+                  </label>
+                  <label>SEED
+                    <input type="number" min="0" max="2147483647" step="1" value={voiceGenerationSettings.seed}
+                      onChange={event => setVoiceGenerationSettings(current => ({...current,seed:Number(event.target.value)}))}/>
+                  </label>
+                </div>
+                <small className="voice-settings-note">CPU-safe defaults: INT8, two threads, temperature 0.30, one flow step, EOS −2.0 and seed 1. Only the four controls above are changed. Settings are stored with this profile and reused in Pocket TTS narration.</small>
+              </>}
+              <button type="button" className="primary" disabled={!activeTtsReady || !voiceProfileToTest || !voicePreviewText.trim() || voiceBusy}
+                onClick={generateVoicePreview}>{voiceBusy ? 'Generating sample…' : 'Generate voice sample'}</button>
+              {!activeTtsReady && <small className="voice-warning">{ttsEngine === 'kitten' ? 'KittenTTS 2 is not installed/enabled on Azure.' : 'Pocket TTS Hindi is not enabled or its CPU model is not installed on Azure.'}</small>}
+              {voicePreviewUrl && <div className="voice-final-sample">
+                <b>Final generated voice sample</b>
+                <audio className="voice-audio" controls preload="metadata" src={voicePreviewUrl}/>
+              </div>}
+            </>}
+          </article>
+
+          <article className="voice-step script-audio-step">
+            <b>4 · Script to Audio · full-length MP3</b>
+            <p>Paste a complete script in the selected language, choose its saved voice profile, and generate one continuous MP3 without creating a video. Long scripts are synthesised in CPU-safe parts and joined automatically.</p>
+            <form onSubmit={generateScriptAudio}>
+              <label>FULL SCRIPT
+                <textarea rows="9" maxLength="100000" value={scriptAudioText}
+                  onChange={event => setScriptAudioText(event.target.value)}
+                  placeholder={'Paste your complete ' + speechLanguageName(voiceLanguage) + ' script here…'}/>
+              </label>
+              <small>{scriptAudioText.length.toLocaleString()} / 100,000 characters · {speechLanguageName(voiceLanguage)} · {ttsInfo.tts_engines?.[ttsEngine]?.name || ttsEngine}</small>
+              <label>VOICE PROFILE
+                <select value={voiceProfileToTest} onChange={event => selectVoiceProfile(event.target.value)}>
+                  {voicesForLanguage(voiceLanguage).map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}
+                </select>
+              </label>
+              <button type="submit" className="primary"
+                disabled={!activeTtsReady || !voicesForLanguage(voiceLanguage).length || !voiceProfileToTest || !scriptAudioText.trim() || scriptAudioBusy}>
+                {scriptAudioBusy ? 'Queuing…' : 'Generate complete MP3'}
+              </button>
+            </form>
+            {scriptAudioJob && <div className="voice-final-sample">
+              <b>Script audio · {scriptAudioJob.status}</b>
+              <small>{scriptAudioJob.stage} · {scriptAudioJob.progress}%</small>
+              <progress value={scriptAudioJob.progress} max="100"/>
+              {scriptAudioJob.status === 'completed' && <>
+                <audio className="voice-audio" controls preload="metadata"
+                  src={'/api/jobs/' + scriptAudioJob.id + '/preview'}/>
+                <a className="primary" href={'/api/jobs/' + scriptAudioJob.id + '/output'} download="script_narration.mp3">
+                  <Download size={16}/> Download MP3 · 192 kbps
+                </a>
+              </>}
+              {scriptAudioJob.error && <small className="voice-warning">{scriptAudioJob.error}</small>}
+            </div>}
+            {!activeTtsReady && <small className="voice-warning">{ttsEngine === 'kitten' ? 'KittenTTS 2 is not installed/enabled on Azure.' : 'Pocket TTS Hindi is not enabled or its CPU model is not installed on Azure.'}</small>}
+          </article>
+
+          <h3>Saved reusable voice profiles</h3>
+          {voices.length === 0 ? <p>No saved profiles yet.</p> : voices.map(item =>
             <article key={item.voice_id} className="media-row voice-profile-row">
-              <div>
-                <b>🎙 {item.voice_id}</b>
-                <small>{item.prepared?.sample_rate_hz || 'Legacy'} Hz · {item.prepared?.channels || '—'} channel · {item.conditioning_status === 'engine_disabled' ? 'Conditioning disabled' : item.conditioning_status === 'legacy_uninspected' ? 'Legacy / not inspected' : 'Prepared / not tested'}</small>
-                {(item.source_analysis?.warnings || []).slice(0, 2).map((warning, index) => <small className="voice-warning" key={index}>{warning}</small>)}
+              <div><b>🎙 {item.voice_id}</b>
+                <small>{item.language_name || speechLanguageName(item.language || 'hi')} · {item.profile_engine || 'Existing profile'} · {item.reference?.duration_seconds ? item.reference.duration_seconds + 's reference · ' : ''}{item.source_file_available ? 'Original preserved · ' : ''}{item.conditioning_initialized ? 'Conditioning initialised' : 'Ready for first sample'}</small>
+                {item.transcript && <small>{item.transcript}</small>}
               </div>
               <button className="danger" onClick={() => deleteMedia('/api/voices/' + encodeURIComponent(item.voice_id), 'Voice profile ' + item.voice_id)}>
                 <Trash2 size={15}/> Delete
               </button>
             </article>
           )}
-          {voices.some(item => item.source_file_available) && <div className="voice-reprocess">
-            <h3>Adjust an existing profile</h3>
-            <p>Change the cleanup controls above, then rebuild only the prepared model copy from the original upload.</p>
-            <div className="row">
-              <label>PROFILE<select value={reprocessVoice} onChange={event => setReprocessVoice(event.target.value)}><option value="">Select profile</option>{voices.filter(item => item.source_file_available).map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}</select></label>
-              <button type="button" disabled={voiceBusy || !reprocessVoice} onClick={reprocessVoiceProfile}>{voiceBusy ? 'Preparing…' : 'Rebuild prepared copy'}</button>
-            </div>
-            <small>The original recording, its sample rate, channels, bit depth and embedded metadata are retained separately.</small>
-          </div>}
         </section>}
         {tab === 'models' && <section className="llm-workspace">
           <span>PRIVATE LOCAL INFERENCE</span><h1>Local AI models.</h1>

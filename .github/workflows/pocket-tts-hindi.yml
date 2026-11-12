@@ -1,0 +1,54 @@
+name: Pocket TTS Hindi integration checks
+
+on:
+  push:
+    branches:
+      - feature/pocket-tts-hindi-voiceover
+      - feature/cpu-video-dub-lipsync
+      - feature/indicconformer-hindi-asr
+      - feature/facefusion-cpu-current
+  pull_request:
+    branches:
+      - main
+      - feature/pocket-tts-hindi-voiceover
+      - feature/facefusion-cpu-current
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Install FFmpeg tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pinned application and CPU lip-sync dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Compile backend and run voice/lip-sync tests
+        run: |
+          python -m py_compile app.py pocket_tts.py kitten_tts.py voice_profile.py indicconformer_asr.py voice_reference.py cpu_lipsync.py cpu_video_style.py scripts/install_cpu_lipsync.py scripts/install_video_style_models.py scripts/install_indicconformer_asr.py scripts/install_kitten_tts.py tests/test_cpu_lipsync.py tests/test_cpu_video_style.py tests/test_pocket_tts.py tests/test_kitten_tts.py tests/test_voice_profile.py tests/test_voice_reference.py tests/test_indicconformer_asr.py
+          python -m unittest discover -s tests -v
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm install --no-audit --no-fund
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build

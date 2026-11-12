@@ -20,13 +20,30 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
-from voice_reference import VoiceAudioError, prepare_wav
+from starlette.concurrency import run_in_threadpool
+from pocket_tts import (
+    DEFAULT_GENERATION_SETTINGS, clear_voice_cache, engine_ready as pocket_tts_engine_ready,
+    normalize_generation_settings, normalize_voice_id, resolve_voice_reference, valid_voice_id,
+)
+from pocket_tts import synthesize as synthesize_pocket_tts
+from pocket_tts import synthesize_dialogue as synthesize_pocket_tts_dialogue
+from kitten_tts import engine_ready as kitten_tts_engine_ready
+from kitten_tts import synthesize as synthesize_kitten_tts
+from kitten_tts import remove_voice_profile as remove_kitten_voice_profile
+from voice_profile import prepare_voice_audio, probe_audio, transcribe_hindi, transcribe_language
+from voice_reference import analyze_pcm16, decode_pcm16
+from tts_languages import language_options_for_engine, language_name, validate_tts_language
 
 ROOT = Path(os.getenv("STUDIO_ROOT", "/srv/ai-video-studio"))
 DB = ROOT / "studio.sqlite3"
 UP = ROOT / "uploads"
 OUT = ROOT / "outputs"
 VOICES = ROOT / "voices"
+VOICE_ORIGINALS = VOICES / ".originals"
+VOICE_PROFILES = VOICES / ".profiles"
+VOICE_STAGING = VOICES / ".staging"
+VOICE_PREVIEWS = VOICES / ".previews"
+VOICE_ASR_CACHE = ROOT / "models" / "whisper"
 PROJECTS = ROOT / "projects"
 LLM_LOGS = ROOT / "logs"
 LLM_CONFIG = ROOT / "llm_config.json"
@@ -35,9 +52,74 @@ OLLAMA_API = "http://127.0.0.1:11434"
 OLLAMA_INFERENCE_LOCK = threading.Lock()
 MAX_UPLOAD = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
 MAX_VOICE = int(os.getenv("MAX_VOICE_MB", "30")) * 1024 * 1024
-VOICE_PREVIEW_SAMPLE = Path(os.getenv("VOICE_PREVIEW_SAMPLE", "/tmp/ai-video-studio-review/hindi-custom-voice.wav")).expanduser()
-VOICE_PREVIEW_DIAGNOSTICS = VOICE_PREVIEW_SAMPLE.parent / "ab"
+FACEFUSION_ROOT = Path(os.getenv("FACEFUSION_ROOT", "/opt/facefusion-cpu"))
+FACEFUSION_PYTHON = FACEFUSION_ROOT / ".venv" / "bin" / "python"
+FACEFUSION_SCRIPT = FACEFUSION_ROOT / "facefusion.py"
+MAX_FACE_VIDEO_SECONDS = 15
 ENABLE_TTS = os.getenv("ENABLE_TTS", "0") == "1"
+
+
+LIPSYNC_MODELS_ROOT = Path(
+    os.getenv("LIPSYNC_MODELS_ROOT", str(ROOT / "models" / "wav2lip-cpu"))
+).expanduser().resolve()
+VIDEO_STYLE_MODELS_ROOT = Path(
+    os.getenv("VIDEO_STYLE_MODELS_ROOT", str(ROOT / "models" / "video-style"))
+).expanduser().resolve()
+
+
+def cpu_lipsync_ready():
+    try:
+        from cpu_lipsync import engine_ready
+        return engine_ready(LIPSYNC_MODELS_ROOT)
+    except (ImportError, OSError, ValueError):
+        return False
+
+
+def cpu_video_style_catalog():
+    try:
+        from cpu_video_style import style_catalog
+        return style_catalog(VIDEO_STYLE_MODELS_ROOT)
+    except (ImportError, OSError, ValueError):
+        return []
+
+
+def cpu_video_style_ready(style):
+    try:
+        from cpu_video_style import engine_ready
+        return engine_ready(VIDEO_STYLE_MODELS_ROOT, style)
+    except (ImportError, OSError, ValueError):
+        return False
+
+POCKET_TTS_HINDI_ROOT = Path(
+    os.getenv("POCKET_TTS_HINDI_ROOT", str(ROOT / "models" / "pocket-tts-hindi"))
+).expanduser().resolve()
+POCKET_TTS_HINDI_BINARY = Path(
+    os.getenv(
+        "POCKET_TTS_HINDI_BINARY",
+        str(POCKET_TTS_HINDI_ROOT / "onnx" / "runtime" / "pocket-tts"),
+    )
+).expanduser().resolve()
+ENABLE_KITTEN_TTS = os.getenv("ENABLE_KITTEN_TTS", "0") == "1"
+KITTEN_TTS_MODEL_ROOT = Path(os.getenv("KITTEN_TTS_MODEL_ROOT", str(ROOT / "models" / "kitten-tts-2"))).expanduser().resolve()
+KITTEN_TTS_BINARY = Path(os.getenv("KITTEN_TTS_BINARY", "/opt/kitten-tts-2-cpp/build/bin/kitten-tts")).expanduser().resolve()
+KITTEN_TTS_PREP_PYTHON = Path(os.getenv("KITTEN_TTS_PREP_PYTHON", "/opt/kitten-tts-prep-venv/bin/python")).expanduser().resolve()
+KITTEN_TTS_PREP_SCRIPT = Path(os.getenv("KITTEN_TTS_PREP_SCRIPT", "/opt/kitten-tts-2-cpp/tools/kitten-tts/prepare_reference.py")).expanduser().resolve()
+KITTEN_TTS_PYTHON_PACKAGE = Path(os.getenv("KITTEN_TTS_PYTHON_PACKAGE", "/opt/KittenTTS")).expanduser().resolve()
+KITTEN_TTS_PROFILE_ROOT = Path(os.getenv("KITTEN_TTS_PROFILE_ROOT", str(ROOT / "models" / "kitten-tts-2-profiles"))).expanduser().resolve()
+KITTEN_TTS_TORCH_LIB = Path(os.getenv("KITTEN_TTS_TORCH_LIB", "/opt/kitten-tts-prep-venv/lib/python3.12/site-packages/torch/lib")).expanduser().resolve()
+KITTEN_TTS_HF_HOME = Path(os.getenv("KITTEN_TTS_HF_HOME", str(ROOT / "models" / "kitten-tts-2-hf-cache"))).expanduser().resolve()
+KITTEN_TTS_DECODER = os.getenv("KITTEN_TTS_DECODER", "default")
+try:
+    KITTEN_TTS_MODEL_REVISION = os.getenv("KITTEN_TTS_MODEL_REVISION", (KITTEN_TTS_MODEL_ROOT / ".download_revision").read_text(encoding="utf-8").strip())
+except OSError:
+    KITTEN_TTS_MODEL_REVISION = os.getenv("KITTEN_TTS_MODEL_REVISION", "main")
+try:
+    KITTEN_TTS_THREADS = max(1, min(int(os.getenv("KITTEN_TTS_THREADS", "2")), 2))
+except ValueError:
+    KITTEN_TTS_THREADS = 2
+TTS_DEFAULT_ENGINE = os.getenv("TTS_DEFAULT_ENGINE", "kitten")
+if TTS_DEFAULT_ENGINE not in {"pocket", "kitten"}:
+    TTS_DEFAULT_ENGINE = "kitten"
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "0") == "1"
@@ -46,7 +128,7 @@ LOGIN_ATTEMPTS = {}
 LOGIN_WINDOW = 15 * 60
 MAX_LOGIN_ATTEMPTS = 8
 
-for path in (ROOT, UP, OUT, VOICES, PROJECTS, LLM_LOGS):
+for path in (ROOT, UP, OUT, VOICES, VOICE_ORIGINALS, VOICE_PROFILES, VOICE_STAGING, VOICE_PREVIEWS, VOICE_ASR_CACHE, PROJECTS, LLM_LOGS):
     path.mkdir(parents=True, exist_ok=True)
 
 
@@ -196,12 +278,186 @@ def pull_state():
 
 
 def tts_runtime_ready():
-    if not ENABLE_TTS:
-        return False
+    return pocket_tts_engine_ready(
+        ENABLE_TTS, POCKET_TTS_HINDI_ROOT, POCKET_TTS_HINDI_BINARY
+    )
+
+
+def tts_engine_ready(engine: str = TTS_DEFAULT_ENGINE) -> bool:
+    if engine == "pocket":
+        return tts_runtime_ready()
+    if engine == "kitten":
+        return kitten_tts_engine_ready(
+            ENABLE_KITTEN_TTS, KITTEN_TTS_BINARY, KITTEN_TTS_MODEL_ROOT,
+            KITTEN_TTS_PREP_PYTHON, KITTEN_TTS_PREP_SCRIPT,
+            KITTEN_TTS_PYTHON_PACKAGE, KITTEN_TTS_DECODER, KITTEN_TTS_TORCH_LIB,
+        )
+    return False
+
+
+def voice_profile_language(voice_id: str) -> str:
+    """Legacy profiles were created by the Hindi-only workflow."""
+    return str(_read_voice_metadata(voice_id).get("language") or "hi").strip().lower()
+
+
+def validate_profile_language(voice_id: str, engine: str, language: str) -> str:
+    """Reject unsupported language and mismatched saved profile combinations."""
+    language = validate_tts_language(engine, language)
+    saved_language = voice_profile_language(voice_id)
+    if saved_language != language:
+        raise ValueError(
+            f"Voice profile '{voice_id}' is saved for {language_name(saved_language)}, "
+            f"not {language_name(language)}. Choose a matching voice profile."
+        )
+    return language
+
+
+def synthesize_tts(
+    text: str, voice_id: str, destination: Path, engine: str = TTS_DEFAULT_ENGINE,
+    dialogue: bool = False, settings: dict | None = None, language: str = "hi",
+) -> float:
+    if not tts_engine_ready(engine):
+        raise RuntimeError(f"The selected speech engine ({engine}) is not enabled or installed.")
+    validate_profile_language(voice_id, engine, language)
+    if engine == "kitten":
+        return synthesize_kitten_tts(
+            text, voice_id, VOICES, KITTEN_TTS_MODEL_ROOT, destination,
+            MAX_VOICE, _read_voice_metadata(voice_id), KITTEN_TTS_BINARY,
+            KITTEN_TTS_PREP_PYTHON, KITTEN_TTS_PREP_SCRIPT,
+            KITTEN_TTS_PYTHON_PACKAGE, KITTEN_TTS_PROFILE_ROOT,
+            KITTEN_TTS_TORCH_LIB, KITTEN_TTS_DECODER,
+            KITTEN_TTS_MODEL_REVISION, KITTEN_TTS_THREADS,
+        )
+    if dialogue:
+        return synthesize_pocket_tts_dialogue(
+            text, voice_id, VOICES, POCKET_TTS_HINDI_ROOT, destination,
+            MAX_VOICE, POCKET_TTS_HINDI_BINARY, settings,
+        )
+    return synthesize_pocket_tts(
+        text, voice_id, VOICES, POCKET_TTS_HINDI_ROOT, destination,
+        MAX_VOICE, POCKET_TTS_HINDI_BINARY, settings,
+    )
+
+
+def _voice_metadata_path(voice_id: str) -> Path:
+    if not valid_voice_id(voice_id):
+        raise ValueError("Invalid voice profile ID.")
+    return VOICE_PROFILES / f"{voice_id}.json"
+
+
+def _read_voice_metadata(voice_id: str) -> dict:
+    for path in (_voice_metadata_path(voice_id), VOICES / f"{voice_id}.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except (OSError, ValueError):
+            continue
+    return {}
+
+
+def _write_voice_metadata(voice_id: str, data: dict) -> None:
+    path = _voice_metadata_path(voice_id)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        return all(importlib.util.find_spec(name) for name in ("torch", "torchaudio", "chatterbox"))
-    except (ImportError, ModuleNotFoundError, ValueError):
-        return False
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+
+def _store_voice_profile(
+    voice_id: str,
+    original: Path,
+    prepared: Path,
+    metadata: dict,
+) -> dict:
+    """Atomically save original WAV, Pocket TTS reference and profile metadata."""
+    if not valid_voice_id(voice_id):
+        raise ValueError("Invalid voice profile ID.")
+    VOICE_ORIGINALS.mkdir(parents=True, exist_ok=True)
+    VOICE_PROFILES.mkdir(parents=True, exist_ok=True)
+    original_final = VOICE_ORIGINALS / f"{voice_id}.wav"
+    prepared_final = VOICES / f"{voice_id}.wav"
+    metadata_final = _voice_metadata_path(voice_id)
+    lock_path = VOICE_STAGING / f"{voice_id}.lock"
+    try:
+        with lock_path.open("x", encoding="utf-8") as lock:
+            lock.write("profile save in progress")
+    except FileExistsError as exc:
+        raise FileExistsError("A profile with this name is already being saved.") from exc
+    if original_final.exists() or prepared_final.exists() or metadata_final.exists():
+        lock_path.unlink(missing_ok=True)
+        raise FileExistsError("A voice profile with this name already exists.")
+
+    token = uuid.uuid4().hex
+    original_temp = VOICE_STAGING / f".{voice_id}.{token}.original.tmp"
+    prepared_temp = VOICE_STAGING / f".{voice_id}.{token}.prepared.tmp"
+    metadata_temp = VOICE_STAGING / f".{voice_id}.{token}.json.tmp"
+    published = []
+    try:
+        shutil.copyfile(original, original_temp)
+        shutil.copyfile(prepared, prepared_temp)
+        metadata.update({
+            "version": 2,
+            "voice_id": voice_id,
+            "source_file_available": True,
+            "source_preserved": True,
+        })
+        metadata_temp.write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        with original_temp.open("rb") as handle:
+            os.fsync(handle.fileno())
+        with prepared_temp.open("rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(original_temp, original_final)
+        published.append(original_final)
+        os.replace(prepared_temp, prepared_final)
+        published.append(prepared_final)
+        os.replace(metadata_temp, metadata_final)
+        published.append(metadata_final)
+    except Exception:
+        for path in published:
+            path.unlink(missing_ok=True)
+        raise
+    finally:
+        original_temp.unlink(missing_ok=True)
+        prepared_temp.unlink(missing_ok=True)
+        metadata_temp.unlink(missing_ok=True)
+        lock_path.unlink(missing_ok=True)
+    return metadata
+
+
+def load_voice_generation_settings(voice_id: str) -> dict:
+    metadata = _read_voice_metadata(voice_id)
+    try:
+        return normalize_generation_settings(metadata.get("generation_settings"))
+    except ValueError:
+        return normalize_generation_settings()
+
+
+def cleanup_stale_voice_staging(max_age_seconds: int = 24 * 60 * 60) -> None:
+    """Remove abandoned original and prepared uploads after one day."""
+    now = time.time()
+    for folder in VOICE_STAGING.iterdir():
+        try:
+            if folder.is_dir() and now - folder.stat().st_mtime > max_age_seconds:
+                resolved = folder.resolve()
+                if VOICE_STAGING.resolve() in resolved.parents:
+                    shutil.rmtree(resolved, ignore_errors=True)
+        except OSError:
+            continue
+
+
+def _voice_stage_path(stage_id: str) -> Path:
+    if not isinstance(stage_id, str) or not re.fullmatch(r"[a-f0-9]{32}", stage_id):
+        raise ValueError("Invalid prepared recording ID.")
+    folder = (VOICE_STAGING / stage_id).resolve()
+    if VOICE_STAGING.resolve() not in folder.parents:
+        raise ValueError("Invalid prepared recording path.")
+    return folder
 
 
 def getjob(job_id):
@@ -272,8 +528,16 @@ class LoginRequest(BaseModel):
 
 class TTS(BaseModel):
     text: str = Field(min_length=1, max_length=12000)
-    language: str = "hi"
-    voice_id: str = ""
+    language: str = Field(default="hi", pattern="^(en|ar|zh|fr|de|hi|it|pt|ru|es|ja|ko|tr|nl|sv|da|fi|sw|el|he)$")
+    voice_id: str = Field(min_length=1, max_length=48)
+    engine: str = Field(default=TTS_DEFAULT_ENGINE, pattern="^(pocket|kitten)$")
+
+
+class ScriptAudioRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=100000)
+    language: str = Field(default="hi", pattern="^(en|ar|zh|fr|de|hi|it|pt|ru|es|ja|ko|tr|nl|sv|da|fi|sw|el|he)$")
+    voice_id: str = Field(min_length=1, max_length=48)
+    engine: str = Field(default=TTS_DEFAULT_ENGINE, pattern="^(pocket|kitten)$")
 
 
 class ModelNameRequest(BaseModel):
@@ -282,6 +546,13 @@ class ModelNameRequest(BaseModel):
 
 class ModelTestRequest(BaseModel):
     model: str = Field(min_length=1, max_length=128)
+
+
+class VoicePreviewRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
+    language: str = Field(default="hi", pattern="^(en|ar|zh|fr|de|hi|it|pt|ru|es|ja|ko|tr|nl|sv|da|fi|sw|el|he)$")
+    settings: dict | None = None
+    engine: str = Field(default=TTS_DEFAULT_ENGINE, pattern="^(pocket|kitten)$")
 
 
 class StoryboardRequest(BaseModel):
@@ -308,15 +579,361 @@ def startup():
 
 @app.get("/api/health")
 def health():
+    tts_ready = tts_runtime_ready()
+    kitten_ready = tts_engine_ready("kitten")
     return {
         "ok": True,
         "execution": "Azure server",
         "queue": "SQLite",
         "worker": "separate process",
-        "tts_ready": tts_runtime_ready(),
+        "tts_ready": tts_ready,
+        "tts_languages": (language_options_for_engine(TTS_DEFAULT_ENGINE) if (kitten_ready if TTS_DEFAULT_ENGINE == "kitten" else tts_ready) else []),
+        "tts_engine": (
+            "KittenTTS 2 · CPU/C++" if TTS_DEFAULT_ENGINE == "kitten" and kitten_ready
+            else "Pocket TTS Hindi · CPU/ONNX" if TTS_DEFAULT_ENGINE == "pocket" and tts_ready
+            else "disabled"
+        ),
+        "tts_default_engine": TTS_DEFAULT_ENGINE,
+        "tts_engines": {
+            "pocket": {"ready": tts_ready, "name": "Pocket TTS Hindi · CPU/ONNX", "languages": language_options_for_engine("pocket") if tts_ready else []},
+            "kitten": {"ready": kitten_ready, "name": "KittenTTS 2 · CPU/C++", "languages": language_options_for_engine("kitten") if kitten_ready else []},
+        },
         "video_transform_ready": True,
         "authentication": True,
     }
+
+
+
+
+@app.get("/api/lipsync/status")
+def lipsync_status():
+    ready = cpu_lipsync_ready()
+    return {
+        "ready": ready,
+        "engine": "Wav2Lip ONNX · CPU",
+        "runtime": "ONNX Runtime CPUExecutionProvider · no GPU",
+        "models_installed": ready,
+        "languages": language_options_for_engine(TTS_DEFAULT_ENGINE) if ready else [],
+        "source_performance": "Preserves source eyes, face identity, expressions, head and body movement; mouth region is synchronised to new speech.",
+        "max_video_seconds": 180,
+        "fps": 25,
+    }
+
+
+@app.get("/api/video-style/status")
+def video_style_status():
+    models = cpu_video_style_catalog()
+    return {
+        "ready": any(item["ready"] for item in models),
+        "models": models,
+        "runtime": "ONNX Runtime CPUExecutionProvider",
+        "hardware": "2 vCPU · 16 GiB RAM · no GPU",
+        "measured_fps": {"anime_512": 0.41, "fast_styles_224": 5.4},
+    }
+
+
+@app.post("/api/video/voice-dub")
+async def create_video_voice_dub(
+    file: UploadFile | None = File(None),
+    source_job_id: str = Form(""),
+    voice_id: str = Form(..., min_length=1, max_length=48),
+    narration: str = Form(..., min_length=1, max_length=12000),
+    keep_source_ambience: bool = Form(False),
+    video_style: str = Form("anime_512"),
+    style_strength: float = Form(0.85),
+    engine: str = Form(TTS_DEFAULT_ENGINE),
+    language: str = Form("hi"),
+):
+    if not tts_engine_ready(engine):
+        raise HTTPException(503, f"The selected speech engine ({engine}) is not enabled or installed.")
+    if not cpu_lipsync_ready():
+        raise HTTPException(503, "CPU lip-sync is not installed. Install requirements.txt and run scripts/install_cpu_lipsync.py.")
+    try:
+        resolve_voice_reference(VOICES, voice_id, MAX_VOICE)
+        language = validate_profile_language(voice_id, engine, language)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    source_job_id = source_job_id.strip()
+    if bool(file) == bool(source_job_id):
+        raise HTTPException(400, "Choose either an uploaded video or one completed Transform export.")
+    if len(narration.strip()) < 2:
+        raise HTTPException(400, "Enter the narration to be spoken.")
+    from cpu_video_style import STYLE_MODELS
+    if video_style != "none" and video_style not in STYLE_MODELS:
+        raise HTTPException(400, "Unsupported video style.")
+    if not 0.25 <= style_strength <= 1.0:
+        raise HTTPException(400, "Style intensity must be between 0.25 and 1.0.")
+    if video_style != "none" and not cpu_video_style_ready(video_style):
+        raise HTTPException(503, "The selected AI style model is not installed. Run scripts/install_video_style_models.py.")
+
+    folder = UP / str(uuid.uuid4())
+    folder.mkdir(parents=True, exist_ok=False)
+    source_filename = ""
+    source_transform_job_id = ""
+    try:
+        if source_job_id:
+            source_job = getjob(source_job_id)
+            if (
+                not source_job or source_job.get("kind") != "video_transform"
+                or source_job.get("status") != "completed" or not source_job.get("output_path")
+            ):
+                raise HTTPException(404, "Choose a completed video from Transform history.")
+            source_path = Path(source_job["output_path"]).resolve()
+            if (
+                OUT.resolve() not in source_path.parents or not source_path.is_file()
+                or source_path.suffix.lower() not in {".mp4", ".mov", ".mkv", ".webm"}
+            ):
+                raise HTTPException(404, "The selected Transform export is no longer available.")
+            extension = source_path.suffix.lower()
+            size = source_path.stat().st_size
+            if size > MAX_UPLOAD:
+                raise HTTPException(413, "The selected Transform export exceeds the configured size limit.")
+            source_filename = Path(
+                source_job["payload"].get("source_filename") or source_path.name
+            ).name
+            source_transform_job_id = source_job_id
+            target = folder / ("source" + extension)
+            with source_path.open("rb") as source_file, target.open("xb") as output_file:
+                shutil.copyfileobj(source_file, output_file, length=1024 * 1024)
+        else:
+            extension = Path(file.filename or "").suffix.lower()
+            if extension not in {".mp4", ".mov", ".mkv", ".webm"}:
+                raise HTTPException(415, "Use MP4, MOV, MKV or WebM video.")
+            source_filename = Path(file.filename or ("source" + extension)).name
+            target = folder / ("source" + extension)
+            size = 0
+            with target.open("xb") as output_file:
+                while chunk := await file.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > MAX_UPLOAD:
+                        raise HTTPException(413, "Video upload exceeds the configured size limit.")
+                    output_file.write(chunk)
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(target)],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        media = json.loads(probe.stdout)
+        video_stream = next((item for item in media.get("streams", []) if item.get("codec_type") == "video"), None)
+        from cpu_lipsync import media_stream_duration
+        duration = media_stream_duration(media, video_stream)
+        if not video_stream or duration < 1.0 or duration > 180.0:
+            raise HTTPException(413, "Choose a readable video between 1 and 180 seconds.")
+        if int(video_stream.get("width") or 0) < 96 or int(video_stream.get("height") or 0) < 96:
+            raise HTTPException(415, "Source video resolution must be at least 96×96.")
+    except HTTPException:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise HTTPException(415, "The uploaded file is not a readable video.") from exc
+    finally:
+        if file is not None:
+            await file.close()
+    return enqueue(
+        "video_voice_dub",
+        {
+            "voice_id": voice_id,
+            "narration": narration.strip(),
+            "language": language,
+            "engine": engine,
+            "generation_settings": load_voice_generation_settings(voice_id),
+            "keep_source_ambience": bool(keep_source_ambience),
+            "video_style": video_style,
+            "style_strength": style_strength,
+            "source_duration": duration,
+            "source_filename": source_filename,
+            "source_transform_job_id": source_transform_job_id,
+        },
+        str(target),
+    )
+
+
+def make_voice_over_payload(
+    voice_id: str,
+    narration: str,
+    start_offset: float,
+    keep_original_audio: bool,
+    original_volume: float,
+    voice_volume: float,
+    source_filename: str,
+    source_transform_job_id: str = "",
+    engine: str = TTS_DEFAULT_ENGINE,
+    language: str = "hi",
+) -> dict:
+    if not tts_engine_ready(engine):
+        raise HTTPException(503, f"The selected speech engine ({engine}) is not enabled or installed.")
+    try:
+        resolve_voice_reference(VOICES, voice_id, MAX_VOICE)
+        language = validate_profile_language(voice_id, engine, language)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if len(narration.strip()) < 2:
+        raise HTTPException(400, "Enter the narration to be spoken.")
+    if not 0 <= start_offset <= 14400:
+        raise HTTPException(400, "Voice-over start offset must be between 0 and 14,400 seconds.")
+    if not 0 <= original_volume <= 1.5:
+        raise HTTPException(400, "Original audio volume must be between 0 and 150%.")
+    if not 0.1 <= voice_volume <= 2.0:
+        raise HTTPException(400, "Voice-over volume must be between 10% and 200%.")
+    return {
+        "source_ui": "transform_voice_over",
+        "source_filename": Path(source_filename).name[:180],
+        "source_transform_job_id": source_transform_job_id,
+        "retain_source": True,
+        "voice_id": voice_id,
+        "narration": narration.strip(),
+        "language": language,
+        "engine": engine,
+        "generation_settings": load_voice_generation_settings(voice_id),
+        "start_offset": float(start_offset),
+        "keep_original_audio": bool(keep_original_audio),
+        "original_volume": float(original_volume),
+        "voice_volume": float(voice_volume),
+    }
+
+
+@app.post("/api/video/voice-over")
+async def create_video_voice_over(
+    file: UploadFile | None = File(None),
+    source_job_id: str = Form(""),
+    voice_id: str = Form(..., min_length=1, max_length=48),
+    narration: str = Form(..., min_length=1, max_length=12000),
+    start_offset: float = Form(0),
+    keep_original_audio: bool = Form(True),
+    original_volume: float = Form(0.25),
+    voice_volume: float = Form(1.0),
+    engine: str = Form(TTS_DEFAULT_ENGINE),
+    language: str = Form("hi"),
+):
+    source_job_id = source_job_id.strip()
+    if bool(file) == bool(source_job_id):
+        raise HTTPException(400, "Upload a video or select a completed Transform export.")
+    folder = UP / str(uuid.uuid4())
+    folder.mkdir(parents=True, exist_ok=False)
+    source_filename = ""
+    source_transform_job_id = ""
+    queued = False
+    try:
+        if source_job_id:
+            source_job = getjob(source_job_id)
+            if (
+                not source_job or source_job.get("kind") != "video_transform"
+                or source_job.get("status") != "completed" or not source_job.get("output_path")
+                or source_job.get("payload", {}).get("scenes")
+            ):
+                raise HTTPException(404, "Choose a completed video from Transform history.")
+            source_path = Path(source_job["output_path"]).resolve()
+            if (
+                OUT.resolve() not in source_path.parents or not source_path.is_file()
+                or source_path.suffix.lower() not in {".mp4", ".mov", ".mkv", ".webm"}
+            ):
+                raise HTTPException(404, "The selected Transform export is no longer available.")
+            if source_path.stat().st_size > MAX_UPLOAD:
+                raise HTTPException(413, "The selected Transform export exceeds the configured size limit.")
+            extension = source_path.suffix.lower()
+            source_filename = Path(
+                source_job["payload"].get("source_filename") or source_path.name
+            ).name
+            source_transform_job_id = source_job_id
+            target = folder / ("source" + extension)
+            with source_path.open("rb") as source_file, target.open("xb") as output_file:
+                shutil.copyfileobj(source_file, output_file, length=1024 * 1024)
+        else:
+            extension = Path(file.filename or "").suffix.lower()
+            if extension not in {".mp4", ".mov", ".mkv", ".webm"}:
+                raise HTTPException(415, "Use MP4, MOV, MKV or WebM video.")
+            source_filename = Path(file.filename or ("source" + extension)).name
+            target = folder / ("source" + extension)
+            size = 0
+            with target.open("xb") as output_file:
+                while chunk := await file.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > MAX_UPLOAD:
+                        raise HTTPException(413, "Video upload exceeds the configured size limit.")
+                    output_file.write(chunk)
+
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(target)],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        media = json.loads(probe.stdout)
+        video_stream = next(
+            (item for item in media.get("streams", []) if item.get("codec_type") == "video"),
+            None,
+        )
+        duration = float(
+            (video_stream or {}).get("duration")
+            or media.get("format", {}).get("duration")
+            or 0
+        )
+        if not video_stream or duration < 1.0 or duration > 14400:
+            raise HTTPException(413, "Choose a readable video between 1 second and 4 hours.")
+        if int(video_stream.get("width") or 0) < 16 or int(video_stream.get("height") or 0) < 16:
+            raise HTTPException(415, "The source video has invalid dimensions.")
+        if start_offset >= duration:
+            raise HTTPException(400, "Voice-over start time must be before the end of the video.")
+
+        payload = make_voice_over_payload(
+            voice_id, narration, start_offset, keep_original_audio,
+            original_volume, voice_volume, source_filename, source_transform_job_id,
+            engine, language,
+        )
+        payload["source_duration"] = duration
+        result = enqueue("video_voice_over", payload, str(target))
+        queued = True
+        return result
+    except HTTPException:
+        raise
+    except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        raise HTTPException(415, "The selected file is not a readable video.") from exc
+    finally:
+        if file is not None:
+            await file.close()
+        if not queued:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+@app.post("/api/jobs/{job_id}/voice-over/rerun")
+def rerun_video_voice_over(
+    job_id: str,
+    voice_id: str = Form(..., min_length=1, max_length=48),
+    narration: str = Form(..., min_length=1, max_length=12000),
+    start_offset: float = Form(0),
+    keep_original_audio: bool = Form(True),
+    original_volume: float = Form(0.25),
+    voice_volume: float = Form(1.0),
+    engine: str = Form(TTS_DEFAULT_ENGINE),
+    language: str = Form("hi"),
+):
+    original = getjob(job_id)
+    if not original or original.get("kind") != "video_voice_over":
+        raise HTTPException(404, "Voice-over job not found.")
+    if original["status"] in {"queued", "running"}:
+        raise HTTPException(409, "Wait until this voice-over finishes before editing it.")
+    if not original.get("payload", {}).get("retain_source"):
+        raise HTTPException(409, "This voice-over has no retained source and cannot be edited.")
+    old_source = Path(original.get("input_path") or "").resolve()
+    if UP.resolve() not in old_source.parents or not old_source.is_file():
+        raise HTTPException(404, "The original source video is no longer available.")
+
+    payload = make_voice_over_payload(
+        voice_id, narration, start_offset, keep_original_audio,
+        original_volume, voice_volume,
+        original["payload"].get("source_filename") or old_source.name,
+        original["payload"].get("source_transform_job_id") or "",
+        engine, language,
+    )
+    folder = UP / str(uuid.uuid4())
+    folder.mkdir(parents=True, exist_ok=False)
+    try:
+        target = folder / ("source" + old_source.suffix.lower())
+        shutil.copy2(old_source, target)
+        payload["source_duration"] = float(original["payload"].get("source_duration") or 0)
+        return enqueue("video_voice_over", payload, str(target))
+    except Exception:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+
 
 
 @app.get("/api/llm/health")
@@ -513,16 +1130,52 @@ def delete_job(job_id: str):
     return {"deleted": True, "job_id": job_id}
 
 
+def serialize_job_media_status(row):
+    item = dict(row)
+    item["payload"] = json.loads(item["payload"])
+    item["source_available"] = False
+    item["output_available"] = False
+    try:
+        if item["kind"] in {"video_transform", "video_voice_over"} and item["payload"].get("retain_source"):
+            source = Path(item.get("input_path") or "").resolve()
+            item["source_available"] = UP.resolve() in source.parents and source.is_file()
+        if item["status"] == "completed" and item.get("output_path"):
+            output_file = Path(item["output_path"]).resolve()
+            item["output_available"] = OUT.resolve() in output_file.parents and output_file.is_file()
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return item
+
+
 @app.get("/api/jobs")
 def jobs():
     with db() as conn:
         rows = conn.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT 100").fetchall()
-    result = []
-    for row in rows:
-        item = dict(row)
-        item["payload"] = json.loads(item["payload"])
-        result.append(item)
-    return result
+    return [serialize_job_media_status(row) for row in rows]
+
+
+@app.get("/api/transform/history")
+def transform_history():
+    """Return every Transform export, not just the latest 100 mixed job records."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM jobs WHERE kind='video_transform' ORDER BY created_at DESC"
+        ).fetchall()
+    return [
+        serialize_job_media_status(row) for row in rows
+        if not json.loads(row["payload"]).get("scenes")
+    ]
+
+
+@app.get("/api/voice-over/history")
+def voice_over_history():
+    """Return the complete saved voice-over history for the Transform selector."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM jobs WHERE kind='video_voice_over' ORDER BY created_at DESC"
+        ).fetchall()
+    return [serialize_job_media_status(row) for row in rows]
+
 
 
 @app.get("/api/saved-projects")
@@ -899,14 +1552,31 @@ def create_storyboard(request: StoryboardRequest):
 
 @app.post("/api/tts")
 def tts(payload: TTS):
-    if not tts_runtime_ready():
-        raise HTTPException(
-            503,
-            "Narration is temporarily disabled while the Hindi/English CPU voice engine is being validated.",
-        )
-    if payload.language not in {"hi", "en", "fr", "es", "de"}:
-        raise HTTPException(400, "Unsupported language")
-    return enqueue("tts", payload.model_dump())
+    if not tts_engine_ready(payload.engine):
+        raise HTTPException(503, f"The selected speech engine ({payload.engine}) is not enabled or installed.")
+    try:
+        resolve_voice_reference(VOICES, payload.voice_id, MAX_VOICE)
+        validate_profile_language(payload.voice_id, payload.engine, payload.language)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    job_payload = payload.model_dump()
+    job_payload["generation_settings"] = load_voice_generation_settings(payload.voice_id)
+    return enqueue("tts", job_payload)
+
+
+@app.post("/api/tts/script")
+def create_script_audio(payload: ScriptAudioRequest):
+    if not tts_engine_ready(payload.engine):
+        raise HTTPException(503, f"The selected speech engine ({payload.engine}) is not enabled or installed.")
+    try:
+        resolve_voice_reference(VOICES, payload.voice_id, MAX_VOICE)
+        validate_profile_language(payload.voice_id, payload.engine, payload.language)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    job_payload = payload.model_dump()
+    job_payload["generation_settings"] = load_voice_generation_settings(payload.voice_id)
+    job_payload["output_format"] = "mp3"
+    return enqueue("tts_script", job_payload)
 
 
 @app.post("/api/video")
@@ -1011,9 +1681,211 @@ async def video(
             "trim_start": trim_start,
             "trim_end": trim_end,
             "music_volume": music_volume,
+            "source_ui": "transform",
+            "source_filename": Path(file.filename or target.name).name[:180],
+            "retain_source": True,
         },
         str(target),
     )
+
+
+@app.post("/api/jobs/{job_id}/rerun")
+async def rerun_video_transform(
+    job_id: str,
+    file: UploadFile | None = File(None),
+    preset: str = Form("reel"),
+    framing: str = Form("fill"),
+    audio: str = Form("keep"),
+    overlay_text: str = Form("", max_length=160),
+    overlay_position: str = Form("bottom"),
+    subtitle_file: UploadFile | None = File(None),
+    music_file: UploadFile | None = File(None),
+    trim_start: float = Form(0),
+    trim_end: float = Form(0),
+    music_volume: float = Form(0.35),
+):
+    original = getjob(job_id)
+    if not original or original["kind"] != "video_transform":
+        raise HTTPException(404, "Transform job not found")
+    if original["status"] in {"queued", "running"}:
+        raise HTTPException(409, "Wait until this transform finishes before editing it.")
+    old_payload = original["payload"]
+    if old_payload.get("source_ui") != "transform" or not old_payload.get("retain_source"):
+        raise HTTPException(409, "This older job has no retained source. It can still be downloaded or deleted.")
+    old_source = Path(original.get("input_path") or "").resolve()
+    if UP.resolve() not in old_source.parents or not old_source.is_file():
+        raise HTTPException(404, "The original source video is no longer available.")
+    if preset not in {"reel", "landscape", "square"} or framing not in {"fill", "fit"}:
+        raise HTTPException(400, "Invalid export settings")
+    if audio not in {"keep", "mute", "music"}:
+        raise HTTPException(400, "Invalid audio mode")
+    if overlay_position not in {"top", "center", "bottom"}:
+        raise HTTPException(400, "Invalid text position")
+    if not 0 <= trim_start <= 14400 or not 0 <= trim_end <= 14400:
+        raise HTTPException(400, "Trim values must be between 0 and 4 hours")
+    if trim_end and trim_end <= trim_start:
+        raise HTTPException(400, "Trim end must be greater than trim start")
+    if not 0 <= music_volume <= 1.5:
+        raise HTTPException(400, "Music volume must be between 0 and 1.5")
+
+    folder = UP / str(uuid.uuid4())
+    folder.mkdir(parents=True, exist_ok=False)
+    queued = False
+    try:
+        extension = Path(file.filename or "").suffix.lower() if file else old_source.suffix.lower()
+        if extension not in {".mp4", ".mov", ".mkv", ".webm"}:
+            raise HTTPException(415, "Unsupported video")
+        target = folder / ("source" + extension)
+        if file:
+            size = 0
+            with target.open("xb") as output_file:
+                while chunk := await file.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > MAX_UPLOAD:
+                        raise HTTPException(413, "Upload too large")
+                    output_file.write(chunk)
+        else:
+            shutil.copy2(old_source, target)
+
+        def copy_existing_asset(key: str, filename: str, maximum: int) -> str:
+            raw_path = old_payload.get(key, "")
+            if not raw_path:
+                return ""
+            candidate = Path(raw_path).resolve()
+            if old_source.parent.resolve() not in candidate.parents or not candidate.is_file():
+                return ""
+            if candidate.stat().st_size > maximum:
+                return ""
+            destination = folder / filename
+            shutil.copy2(candidate, destination)
+            return str(destination)
+
+        if subtitle_file:
+            if Path(subtitle_file.filename or "").suffix.lower() != ".srt":
+                raise HTTPException(415, "Subtitles must be an .srt file")
+            subtitle_path = folder / "captions.srt"
+            size = 0
+            with subtitle_path.open("xb") as subtitle_out:
+                while chunk := await subtitle_file.read(64 * 1024):
+                    size += len(chunk)
+                    if size > 2 * 1024 * 1024:
+                        raise HTTPException(413, "Subtitle file exceeds 2 MB")
+                    subtitle_out.write(chunk)
+            subtitle_path = str(subtitle_path)
+        else:
+            subtitle_path = copy_existing_asset("subtitle_path", "captions.srt", 2 * 1024 * 1024)
+
+        music_path = ""
+        if audio == "music":
+            if music_file:
+                music_extension = Path(music_file.filename or "").suffix.lower()
+                if music_extension not in {".mp3", ".wav", ".m4a", ".aac", ".ogg"}:
+                    raise HTTPException(415, "Unsupported background music format")
+                music_path = folder / ("background" + music_extension)
+                size = 0
+                with music_path.open("xb") as music_out:
+                    while chunk := await music_file.read(64 * 1024):
+                        size += len(chunk)
+                        if size > 30 * 1024 * 1024:
+                            raise HTTPException(413, "Background music exceeds 30 MB")
+                        music_out.write(chunk)
+                music_path = str(music_path)
+            else:
+                existing_music = old_payload.get("music_path", "")
+                music_name = "background" + (Path(existing_music).suffix.lower() if existing_music else ".mp3")
+                music_path = copy_existing_asset("music_path", music_name, 30 * 1024 * 1024)
+                if not music_path:
+                    raise HTTPException(400, "Choose a background music file for this edited version.")
+
+        payload = {
+            "preset": preset,
+            "framing": framing,
+            "audio": audio,
+            "overlay_text": overlay_text.strip(),
+            "overlay_position": overlay_position,
+            "subtitle_path": subtitle_path,
+            "music_path": music_path,
+            "trim_start": trim_start,
+            "trim_end": trim_end,
+            "music_volume": music_volume,
+            "source_ui": "transform",
+            "source_filename": Path(file.filename or old_payload.get("source_filename") or old_source.name).name[:180] if file else old_payload.get("source_filename", old_source.name),
+            "retain_source": True,
+        }
+        result = enqueue("video_transform", payload, str(target))
+        queued = True
+        return result
+    finally:
+        for upload in (file, subtitle_file, music_file):
+            if upload:
+                await upload.close()
+        if not queued:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+@app.post("/api/facefusion")
+async def facefusion_video(
+    file: UploadFile = File(...),
+    source_image: UploadFile = File(...),
+    confirm_non_explicit_override: bool = Form(False),
+):
+    video_extension = Path(file.filename or "").suffix.lower()
+    image_extension = Path(source_image.filename or "").suffix.lower()
+    if video_extension not in {".mp4", ".mov", ".mkv", ".webm"}:
+        raise HTTPException(415, "Unsupported target video format")
+    if image_extension not in {".jpg", ".jpeg", ".png", ".webp"}:
+        raise HTTPException(415, "Reference must be JPG, PNG or WebP")
+    if not FACEFUSION_PYTHON.is_file() or not FACEFUSION_SCRIPT.is_file():
+        raise HTTPException(503, "FaceFusion CPU engine is not installed.")
+    folder = UP / str(uuid.uuid4())
+    folder.mkdir()
+    target = folder / ("target" + video_extension)
+    reference = folder / ("reference" + image_extension)
+    try:
+        video_size = 0
+        with target.open("xb") as output_file:
+            while chunk := await file.read(1024 * 1024):
+                video_size += len(chunk)
+                if video_size > 100 * 1024 * 1024:
+                    raise HTTPException(413, "Face replacement target is limited to 100 MB.")
+                output_file.write(chunk)
+        image_size = 0
+        with reference.open("xb") as output_file:
+            while chunk := await source_image.read(256 * 1024):
+                image_size += len(chunk)
+                if image_size > 15 * 1024 * 1024:
+                    raise HTTPException(413, "Reference image is limited to 15 MB.")
+                output_file.write(chunk)
+        header = reference.read_bytes()[:16]
+        valid_image = (
+            header.startswith(b"\xff\xd8\xff")
+            or header.startswith(b"\x89PNG\r\n\x1a\n")
+            or (header.startswith(b"RIFF") and header[8:12] == b"WEBP")
+        )
+        if not valid_image:
+            raise HTTPException(415, "Reference file is not a valid JPG, PNG or WebP image.")
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(target)],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+        duration = float(probe.stdout.strip())
+        if not 0 < duration <= MAX_FACE_VIDEO_SECONDS:
+            raise HTTPException(400, "CPU face replacement is currently limited to videos up to 15 seconds.")
+    except HTTPException:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise HTTPException(415, "Could not validate the uploaded video.") from exc
+    finally:
+        await file.close()
+        await source_image.close()
+    return enqueue("facefusion", {
+        "reference_path": str(reference),
+        "duration": duration,
+        "confirm_non_explicit_override": confirm_non_explicit_override,
+    }, str(target))
 
 
 @app.post("/api/project")
@@ -1141,7 +2013,22 @@ async def render_storyboard(
     music_volume: float = Form(0.35),
     overlay_text: str = Form("", max_length=160),
     overlay_position: str = Form("bottom"),
+    narration_text: str = Form("", max_length=12000),
+    narration_voice_id: str = Form(""),
+    narration_language: str = Form("hi"),
+    narration_engine: str = Form(TTS_DEFAULT_ENGINE),
 ):
+    narration_text = narration_text.strip()
+    narration_voice_id = narration_voice_id.strip()
+    if narration_text or narration_voice_id:
+        if not narration_text or not narration_voice_id:
+            raise HTTPException(400, "Choose a saved voice profile and provide storyboard narration together.")
+        if not tts_engine_ready(narration_engine):
+            raise HTTPException(503, f"The selected speech engine ({narration_engine}) is not enabled or installed.")
+        try:
+            validate_profile_language(narration_voice_id, narration_engine, narration_language)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
     if not 2 <= len(images) <= 10:
         raise HTTPException(400, "A visual storyboard needs 2 to 10 scene images")
     if preset not in {"reel", "landscape", "square"} or framing not in {"fill", "fit"}:
@@ -1222,205 +2109,335 @@ async def render_storyboard(
         "music_volume": music_volume, "music_path": str(music_path) if music_path else "",
         "subtitle_path": "", "overlay_text": overlay_text.strip(),
         "overlay_position": overlay_position,
+        "narration_text": narration_text,
+        "narration_voice_id": narration_voice_id,
+        "narration_language": narration_language if narration_text else "",
+        "narration_engine": narration_engine if narration_text else "pocket",
     }
     return enqueue("video_transform", payload, saved[0]["image_path"])
 
 
-@app.post("/api/voices")
-async def voice(
-    name: str = Form(...),
+@app.post("/api/voices/prepare")
+async def prepare_voice(
     file: UploadFile = File(...),
-    trim_silence: bool = Form(False),
-    normalize_loudness: bool = Form(False),
-    noise_reduction: bool = Form(False),
-    highpass_hz: int = Form(0),
-    lowpass_hz: int = Form(0),
+    language: str = Form("hi"),
+    engine: str = Form(TTS_DEFAULT_ENGINE),
 ):
+    if not tts_engine_ready(engine):
+        raise HTTPException(503, f"The selected speech engine ({engine}) is not enabled or installed.")
+    try:
+        language = validate_tts_language(engine, language)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    cleanup_stale_voice_staging()
+    if Path(file.filename or "").suffix.lower() != ".wav":
+        raise HTTPException(415, "Please upload a WAV recording.")
+    stage_id = uuid.uuid4().hex
+    folder = _voice_stage_path(stage_id)
+    folder.mkdir(parents=True, exist_ok=False)
+    source = folder / "original.wav"
+    prepared = folder / "reference.wav"
+    size = 0
+    try:
+        with source.open("xb") as output_file:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > MAX_VOICE:
+                    raise HTTPException(413, "The WAV exceeds the 30 MB upload limit.")
+                output_file.write(chunk)
+    except Exception:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    finally:
+        await file.close()
+
+    try:
+        inspection = await run_in_threadpool(prepare_voice_audio, source, prepared)
+        source_pcm, source_rate = await run_in_threadpool(decode_pcm16, source)
+        prepared_pcm, prepared_rate = await run_in_threadpool(decode_pcm16, prepared)
+        inspection["source_analysis"] = analyze_pcm16(source_pcm, source_rate)
+        inspection["prepared_analysis"] = analyze_pcm16(prepared_pcm, prepared_rate)
+        inspection["source_preserved"] = True
+        (folder / "inspection.json").write_text(
+            json.dumps(inspection, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except (ValueError, RuntimeError) as exc:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise HTTPException(422, str(exc)) from exc
+
+    transcript = ""
+    transcription_error = ""
+    transcription_info = {}
+    try:
+        if language == "hi":
+            transcription_info = await run_in_threadpool(transcribe_hindi, prepared, VOICE_ASR_CACHE)
+        else:
+            transcription_info = await run_in_threadpool(transcribe_language, prepared, VOICE_ASR_CACHE, language)
+        transcript = transcription_info.get("text", "")
+    except Exception as exc:
+        transcription_error = str(exc) or "Local transcription could not complete."
+    return {
+        "prepared_id": stage_id,
+        "language": language,
+        "language_name": language_name(language),
+        "engine": engine,
+        "audio_url": f"/api/voices/prepared/{stage_id}/audio",
+        "inspection": inspection,
+        "transcript": transcript,
+        "transcription_info": transcription_info,
+        "transcription_error": transcription_error,
+    }
+
+
+@app.get("/api/voices/prepared/{prepared_id}/audio")
+def prepared_voice_audio(prepared_id: str):
+    try:
+        folder = _voice_stage_path(prepared_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    path = folder / "reference.wav"
+    if not path.is_file():
+        raise HTTPException(404, "Prepared voice clip not found.")
+    return FileResponse(
+        path, media_type="audio/wav",
+        headers={"Content-Disposition": 'inline; filename="voice-reference-20s.wav"',
+                 "Cache-Control": "private, no-store"},
+    )
+
+
+@app.post("/api/voices/save-prepared")
+async def save_prepared_voice(
+    prepared_id: str = Form(...),
+    name: str = Form(...),
+    transcript: str = Form(""),
+    generation_settings: str = Form("{}"),
+    language: str = Form("hi"),
+    engine: str = Form(TTS_DEFAULT_ENGINE),
+):
+    try:
+        language = validate_tts_language(engine, language)
+        folder = _voice_stage_path(prepared_id)
+        settings = normalize_generation_settings(json.loads(generation_settings))
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    prepared = folder / "reference.wav"
+    original = folder / "original.wav"
+    inspection_path = folder / "inspection.json"
+    if not prepared.is_file() or not original.is_file():
+        raise HTTPException(404, "The prepared recording has expired. Upload the WAV again.")
+    voice_id = normalize_voice_id(name)
+    if not valid_voice_id(voice_id):
+        raise HTTPException(400, "Enter a valid voice profile name.")
+    try:
+        inspection = json.loads(inspection_path.read_text(encoding="utf-8")) if inspection_path.is_file() else {}
+        prepared_info = probe_audio(prepared)
+        metadata = {
+            "voice_id": voice_id,
+            "created_at": stamp(),
+            "transcript": transcript.strip()[:12000],
+            "language": language,
+            "language_name": language_name(language),
+            "profile_engine": engine,
+            "source": inspection.get("original", {}),
+            "prepared": prepared_info,
+            "reference": prepared_info,
+            "source_analysis": inspection.get("source_analysis", {}),
+            "prepared_analysis": inspection.get("prepared_analysis", {}),
+            "clip_start_seconds": inspection.get("clip_start_seconds", 0),
+            "clip_duration_seconds": inspection.get("clip_duration_seconds", prepared_info.get("duration_seconds", 0)),
+            "processing_note": inspection.get("processing_note", ""),
+            "generation_settings": settings,
+            "conditioning_initialized": False,
+            "conditioning_status": "engine_disabled" if not tts_runtime_ready() else "not_tested",
+            "conditioning_note": "A test sample is required to initialize and verify speaker conditioning.",
+        }
+        _store_voice_profile(voice_id, original, prepared, metadata)
+    except FileExistsError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(500, f"Could not safely save the voice profile: {exc}") from exc
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    clear_voice_cache(VOICES, voice_id)
+    return {"voice_id": voice_id, "language": language, "language_name": language_name(language), "engine": engine, "generation_settings": settings}
+
+
+@app.post("/api/voices/{voice_id}/preview")
+async def preview_voice(voice_id: str, payload: VoicePreviewRequest):
+    if not tts_engine_ready(payload.engine):
+        raise HTTPException(503, f"The selected speech engine ({payload.engine}) is not enabled or installed.")
+    try:
+        resolve_voice_reference(VOICES, voice_id, MAX_VOICE)
+        validate_profile_language(voice_id, payload.engine, payload.language)
+        settings = (
+            normalize_generation_settings(
+                payload.settings if payload.settings is not None
+                else load_voice_generation_settings(voice_id)
+            )
+            if payload.engine == "pocket" else load_voice_generation_settings(voice_id)
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    preview_id = uuid.uuid4().hex
+    destination = VOICE_PREVIEWS / f"{preview_id}.wav"
+    try:
+        duration = await run_in_threadpool(
+            synthesize_tts, payload.text, voice_id, destination,
+            payload.engine, False, settings, payload.language,
+        )
+    except Exception as exc:
+        destination.unlink(missing_ok=True)
+        raise HTTPException(500, str(exc)) from exc
+    metadata = _read_voice_metadata(voice_id)
+    metadata.update({
+        "last_preview_engine": payload.engine,
+        "last_preview_language": payload.language,
+        "last_preview_id": preview_id,
+        "last_preview_at": stamp(),
+    })
+    if payload.engine == "pocket":
+        metadata.update({
+            "generation_settings": settings,
+            "conditioning_initialized": (
+                (VOICES / ".cache" / f"{voice_id}.emb").is_file()
+                or (VOICES / ".cache" / f"{voice_id}.kv").is_file()
+            ),
+        })
+    else:
+        metadata["kitten_conditioning_initialized"] = (
+            KITTEN_TTS_PROFILE_ROOT / ".profiles" / f"{voice_id}.json"
+        ).is_file()
+    _write_voice_metadata(voice_id, metadata)
+    previews = sorted(VOICE_PREVIEWS.glob("*.wav"), key=lambda item: item.stat().st_mtime, reverse=True)
+    for stale in previews[20:]:
+        stale.unlink(missing_ok=True)
+    return {
+        "preview_id": preview_id,
+        "audio_url": f"/api/voices/previews/{preview_id}",
+        "duration_seconds": duration,
+        "generation_settings": settings,
+        "conditioning_initialized": (
+            metadata.get("conditioning_initialized", False)
+            if payload.engine == "pocket"
+            else metadata.get("kitten_conditioning_initialized", False)
+        ),
+        "engine": payload.engine,
+    }
+
+
+@app.get("/api/voices/previews/{preview_id}")
+def voice_preview_audio(preview_id: str):
+    if not re.fullmatch(r"[a-f0-9]{32}", preview_id):
+        raise HTTPException(400, "Invalid preview ID.")
+    path = (VOICE_PREVIEWS / f"{preview_id}.wav").resolve()
+    if VOICE_PREVIEWS.resolve() not in path.parents or not path.is_file():
+        raise HTTPException(404, "Voice preview not found.")
+    return FileResponse(
+        path, media_type="audio/wav",
+        headers={"Content-Disposition": 'inline; filename="voice-preview.wav"',
+                 "Cache-Control": "private, no-store"},
+    )
+
+
+@app.post("/api/voices")
+async def voice(name: str = Form(...), file: UploadFile = File(...)):
+    """Backward-compatible upload: preserve the original and save a prepared model WAV."""
     if Path(file.filename or "").suffix.lower() != ".wav":
         raise HTTPException(415, "WAV reference required")
-    safe_name = "".join(char for char in name if char.isalnum() or char in "-_")[:48]
-    if not safe_name:
+    voice_id = normalize_voice_id(name)
+    if not valid_voice_id(voice_id):
         raise HTTPException(400, "Invalid name")
-
-    VOICES.mkdir(parents=True, exist_ok=True)
-    staging_dir = VOICES / ".staging"
-    originals_dir = VOICES / ".originals"
-    profiles_dir = VOICES / ".profiles"
-    staging_dir.mkdir(exist_ok=True)
-    originals_dir.mkdir(exist_ok=True)
-    profiles_dir.mkdir(exist_ok=True)
-
-    destination = VOICES / (safe_name + ".wav")
-    original_destination = originals_dir / (safe_name + ".wav")
-    metadata_destination = profiles_dir / (safe_name + ".json")
-    lock_path = staging_dir / (safe_name + ".lock")
-    if destination.exists() or original_destination.exists() or metadata_destination.exists():
+    if (VOICES / f"{voice_id}.wav").exists() or (VOICE_ORIGINALS / f"{voice_id}.wav").exists():
         raise HTTPException(409, "Profile already exists")
-    try:
-        with lock_path.open("x", encoding="utf-8") as lock:
-            lock.write("upload in progress")
-    except FileExistsError as exc:
-        raise HTTPException(409, "A voice upload with this name is already in progress") from exc
 
-    token = uuid.uuid4().hex
-    source_temp = staging_dir / (safe_name + "." + token + ".source.wav")
-    profile_temp = staging_dir / (safe_name + "." + token + ".profile.wav")
-    metadata_temp = staging_dir / (safe_name + "." + token + ".json")
-    published = []
+    stage_id = uuid.uuid4().hex
+    folder = VOICE_STAGING / stage_id
+    folder.mkdir(parents=True, exist_ok=False)
+    source = folder / "original.wav"
+    prepared = folder / "reference.wav"
+    size = 0
     try:
-        size = 0
-        with source_temp.open("xb") as output_file:
-            header = await file.read(12)
-            size += len(header)
-            if len(header) < 12 or header[:4] != b"RIFF" or header[8:12] != b"WAVE":
-                raise HTTPException(415, "Invalid WAV file")
-            output_file.write(header)
+        with source.open("xb") as output_file:
             while chunk := await file.read(1024 * 1024):
                 size += len(chunk)
                 if size > MAX_VOICE:
                     raise HTTPException(413, "Voice reference exceeds 30 MB")
                 output_file.write(chunk)
-            output_file.flush()
-            os.fsync(output_file.fileno())
-
-        try:
-            inspection = prepare_wav(
-                source_temp,
-                profile_temp,
-                trim_silence=trim_silence,
-                normalize_loudness=normalize_loudness,
-                noise_reduction=noise_reduction,
-                highpass_hz=highpass_hz,
-                lowpass_hz=lowpass_hz,
-            )
-        except VoiceAudioError as exc:
-            raise HTTPException(422, str(exc)) from exc
-
-        inspection.update({
-            "voice_id": safe_name,
-            "source_filename": Path(file.filename or "voice.wav").name[:180],
-            "source_bytes": size,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "conditioning_status": "not_tested" if tts_runtime_ready() else "engine_disabled",
-            "conditioning_note": "Audio is inspected and prepared, but no voice-conditioning or similarity test has run.",
-        })
-        metadata_temp.write_text(json.dumps(inspection, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        if destination.exists() or original_destination.exists() or metadata_destination.exists():
-            raise HTTPException(409, "Profile already exists")
-        os.replace(source_temp, original_destination)
-        published.append(original_destination)
-        os.replace(profile_temp, destination)
-        published.append(destination)
-        os.replace(metadata_temp, metadata_destination)
-        published.append(metadata_destination)
-        return inspection
-    except HTTPException:
-        for path in published:
-            path.unlink(missing_ok=True)
+    except Exception:
+        shutil.rmtree(folder, ignore_errors=True)
         raise
-    except OSError as exc:
-        for path in published:
-            path.unlink(missing_ok=True)
-        raise HTTPException(500, "Could not safely save the original and prepared voice files") from exc
     finally:
         await file.close()
-        source_temp.unlink(missing_ok=True)
-        profile_temp.unlink(missing_ok=True)
-        metadata_temp.unlink(missing_ok=True)
-        lock_path.unlink(missing_ok=True)
+
+    try:
+        inspection = await run_in_threadpool(prepare_voice_audio, source, prepared)
+        source_pcm, source_rate = await run_in_threadpool(decode_pcm16, source)
+        prepared_pcm, prepared_rate = await run_in_threadpool(decode_pcm16, prepared)
+        inspection["source_analysis"] = analyze_pcm16(source_pcm, source_rate)
+        inspection["prepared_analysis"] = analyze_pcm16(prepared_pcm, prepared_rate)
+        prepared_info = probe_audio(prepared)
+        metadata = {
+            "voice_id": voice_id,
+            "created_at": stamp(),
+            "transcript": "",
+            "source": inspection.get("original", {}),
+            "prepared": prepared_info,
+            "reference": prepared_info,
+            "source_analysis": inspection.get("source_analysis", {}),
+            "prepared_analysis": inspection.get("prepared_analysis", {}),
+            "generation_settings": normalize_generation_settings(),
+            "conditioning_initialized": False,
+            "conditioning_status": "engine_disabled" if not tts_runtime_ready() else "not_tested",
+        }
+        _store_voice_profile(voice_id, source, prepared, metadata)
+    except FileExistsError as exc:
+        raise HTTPException(409, "Profile already exists") from exc
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    clear_voice_cache(VOICES, voice_id)
+    return {"voice_id": voice_id}
+
+
 
 
 @app.get("/api/voices")
 def voices():
     result = []
     for path in sorted(VOICES.glob("*.wav")):
-        metadata_path = VOICES / ".profiles" / (path.stem + ".json")
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.is_file() else {}
-        except (OSError, json.JSONDecodeError):
-            metadata = {}
-        if not metadata:
-            metadata = {
-                "voice_id": path.stem,
-                "conditioning_status": "legacy_uninspected",
-                "source_preserved": False,
-                "prepared": {"codec": "unknown", "sample_rate_hz": 0, "channels": 0},
-                "warnings": ["Legacy profile has no source/processing metadata. Re-upload to inspect it."],
-            }
-        else:
-            metadata["source_file_available"] = (VOICES / ".originals" / (path.stem + ".wav")).is_file()
+        metadata = _read_voice_metadata(path.stem)
+        conditioning_initialized = (
+            (VOICES / ".cache" / f"{path.stem}.emb").is_file()
+            or (VOICES / ".cache" / f"{path.stem}.kv").is_file()
+            or (KITTEN_TTS_PROFILE_ROOT / ".profiles" / f"{path.stem}.json").is_file()
+        )
+        saved_language = str(metadata.get("language") or "hi").strip().lower()
+        metadata.update({
+            "voice_id": path.stem,
+            "language": saved_language,
+            "language_name": metadata.get("language_name") or language_name(saved_language),
+            "transcript": metadata.get("transcript", ""),
+            "reference": metadata.get("reference", {}),
+            "generation_settings": load_voice_generation_settings(path.stem),
+            "conditioning_initialized": conditioning_initialized,
+            "source_file_available": (VOICE_ORIGINALS / f"{path.stem}.wav").is_file(),
+        })
         result.append(metadata)
     return result
 
 
 def resolve_voice_asset(voice_id: str, kind: str) -> Path:
-    if not voice_id or len(voice_id) > 48 or any(
-        not (char.isalnum() or char in "-_") for char in voice_id
-    ):
+    if not valid_voice_id(voice_id):
         raise HTTPException(400, "Invalid voice profile ID")
     if kind == "source":
-        path = VOICES / ".originals" / (voice_id + ".wav")
+        path = VOICE_ORIGINALS / f"{voice_id}.wav"
     else:
-        path = VOICES / (voice_id + ".wav")
+        path = VOICES / f"{voice_id}.wav"
     resolved = path.resolve()
     if VOICES.resolve() not in resolved.parents or not resolved.is_file():
         raise HTTPException(404, "Voice audio file not found")
     return resolved
-
-
-@app.post("/api/voices/{voice_id}/prepare")
-def prepare_existing_voice(
-    voice_id: str,
-    trim_silence: bool = Form(False),
-    normalize_loudness: bool = Form(False),
-    noise_reduction: bool = Form(False),
-    highpass_hz: int = Form(0),
-    lowpass_hz: int = Form(0),
-):
-    source_path = resolve_voice_asset(voice_id, "source")
-    profile_path = resolve_voice_asset(voice_id, "profile")
-    staging_dir = VOICES / ".staging"
-    staging_dir.mkdir(exist_ok=True)
-    token = uuid.uuid4().hex
-    temp_path = staging_dir / (voice_id + "." + token + ".reprocess.wav")
-    metadata_temp = staging_dir / (voice_id + "." + token + ".json")
-    metadata_path = VOICES / ".profiles" / (voice_id + ".json")
-    try:
-        try:
-            inspection = prepare_wav(
-                source_path,
-                temp_path,
-                trim_silence=trim_silence,
-                normalize_loudness=normalize_loudness,
-                noise_reduction=noise_reduction,
-                highpass_hz=highpass_hz,
-                lowpass_hz=lowpass_hz,
-            )
-        except VoiceAudioError as exc:
-            raise HTTPException(422, str(exc)) from exc
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            metadata = {"voice_id": voice_id, "source_filename": source_path.name, "source_preserved": True}
-        metadata.update(inspection)
-        metadata.update({
-            "voice_id": voice_id,
-            "source_filename": metadata.get("source_filename", source_path.name),
-            "source_bytes": source_path.stat().st_size,
-            "reprocessed_at": datetime.now(timezone.utc).isoformat(),
-            "conditioning_status": "not_tested" if tts_runtime_ready() else "engine_disabled",
-            "conditioning_note": "Prepared profile updated from the immutable original. No voice-conditioning or similarity test has run.",
-        })
-        metadata_temp.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temp_path, profile_path)
-        os.replace(metadata_temp, metadata_path)
-        for extension in ("emb", "kv"):
-            (VOICES / ".cache" / (voice_id + "." + extension)).unlink(missing_ok=True)
-        return metadata
-    finally:
-        temp_path.unlink(missing_ok=True)
-        metadata_temp.unlink(missing_ok=True)
 
 
 @app.get("/api/voices/{voice_id}/source")
@@ -1428,40 +2445,21 @@ def voice_source(voice_id: str):
     path = resolve_voice_asset(voice_id, "source")
     return FileResponse(
         path, media_type="audio/wav",
-        headers={"Content-Disposition": f'inline; filename="{voice_id}-original.wav"', "Cache-Control": "private, no-store"},
+        headers={
+            "Content-Disposition": f'inline; filename="{voice_id}-original.wav"',
+            "Cache-Control": "private, no-store",
+        },
     )
 
 
 @app.get("/api/voices/{voice_id}/profile")
-def voice_profile(voice_id: str):
+def voice_profile_audio(voice_id: str):
     path = resolve_voice_asset(voice_id, "profile")
     return FileResponse(
         path, media_type="audio/wav",
-        headers={"Content-Disposition": f'inline; filename="{voice_id}-prepared.wav"', "Cache-Control": "private, no-store"},
-    )
-
-
-@app.get("/api/tts/preview-sample")
-def tts_preview_sample(variant: str = "original"):
-    variants = {
-        "original": (VOICE_PREVIEW_SAMPLE, "hindi-custom-voice.wav"),
-        "current": (VOICE_PREVIEW_DIAGNOSTICS / "current-full-levelled.wav", "current-settings.wav"),
-        "recommended": (VOICE_PREVIEW_DIAGNOSTICS / "recommended-full-levelled.wav", "two-step-settings.wav"),
-        "clean-reference": (VOICE_PREVIEW_DIAGNOSTICS / "clean-8s-levelled.wav", "clean-reference.wav"),
-    }
-    selected = variants.get(variant)
-    if not selected:
-        raise HTTPException(404, "Unknown voice preview sample.")
-    path, filename = selected
-    if not path.is_file():
-        raise HTTPException(404, "The requested voice review sample is unavailable.")
-    return FileResponse(
-        path,
-        media_type="audio/wav",
         headers={
-            "Content-Disposition": f'inline; filename="{filename}"',
+            "Content-Disposition": f'inline; filename="{voice_id}-prepared.wav"',
             "Cache-Control": "private, no-store",
-            "X-Content-Type-Options": "nosniff",
         },
     )
 
@@ -1470,14 +2468,32 @@ def tts_preview_sample(variant: str = "original"):
 def delete_voice(voice_id: str):
     path = resolve_voice_asset(voice_id, "profile")
     path.unlink()
+    remove_kitten_voice_profile(
+        voice_id, KITTEN_TTS_PROFILE_ROOT, KITTEN_TTS_MODEL_ROOT, KITTEN_TTS_DECODER
+    )
     for asset in (
-        VOICES / ".originals" / (voice_id + ".wav"),
-        VOICES / ".profiles" / (voice_id + ".json"),
-        VOICES / ".cache" / (voice_id + ".emb"),
-        VOICES / ".cache" / (voice_id + ".kv"),
+        VOICE_ORIGINALS / f"{voice_id}.wav",
+        _voice_metadata_path(voice_id),
+        VOICES / f"{voice_id}.json",
+        VOICES / ".cache" / f"{voice_id}.emb",
+        VOICES / ".cache" / f"{voice_id}.kv",
     ):
         asset.unlink(missing_ok=True)
     return {"deleted": True, "voice_id": voice_id}
+
+
+@app.get("/api/jobs/{job_id}/preview")
+def job_audio_preview(job_id):
+    job = getjob(job_id)
+    if not job or job["kind"] != "tts_script" or job["status"] != "completed" or not job["output_path"]:
+        raise HTTPException(404, "Audio preview not ready")
+    path = Path(job["output_path"]).resolve()
+    if OUT.resolve() not in path.parents or not path.is_file() or path.suffix.lower() != ".mp3":
+        raise HTTPException(404, "Not found")
+    return FileResponse(
+        path, media_type="audio/mpeg",
+        headers={"Content-Disposition": f'inline; filename="{path.name}"'},
+    )
 
 
 @app.get("/api/jobs/{job_id}/output")
@@ -1491,6 +2507,52 @@ def output(job_id):
     return FileResponse(path, filename=path.name)
 
 
+@app.get("/api/jobs/{job_id}/preview-video")
+def job_video_preview(job_id: str):
+    job = getjob(job_id)
+    if (
+        not job or job["status"] != "completed"
+        or job["kind"] not in {"video_transform", "video_voice_dub", "video_voice_over", "facefusion"}
+        or not job.get("output_path")
+    ):
+        raise HTTPException(404, "Video preview not ready")
+    path = Path(job["output_path"]).resolve()
+    if (
+        OUT.resolve() not in path.parents or not path.is_file()
+        or path.suffix.lower() not in {".mp4", ".mov", ".mkv", ".webm"}
+    ):
+        raise HTTPException(404, "Video output not found")
+    return FileResponse(
+        path, media_type="video/mp4",
+        headers={"Content-Disposition": f'inline; filename="{path.name}"',
+                 "Cache-Control": "private, no-store"},
+    )
+
+
+@app.get("/api/jobs/{job_id}/source")
+def job_video_source(job_id: str):
+    job = getjob(job_id)
+    if (
+        not job or job["kind"] not in {"video_transform", "video_voice_over"}
+        or not job.get("payload", {}).get("retain_source")
+        or not job.get("input_path")
+    ):
+        raise HTTPException(404, "Editable source is not available")
+    path = Path(job["input_path"]).resolve()
+    if UP.resolve() not in path.parents or not path.is_file():
+        raise HTTPException(404, "Editable source is not available")
+    filename = Path(job["payload"].get("source_filename") or path.name).name
+    media_type = {
+        ".mp4": "video/mp4", ".mov": "video/quicktime",
+        ".mkv": "video/x-matroska", ".webm": "video/webm",
+    }.get(path.suffix.lower(), "application/octet-stream")
+    return FileResponse(
+        path, media_type=media_type,
+        headers={"Content-Disposition": f'inline; filename="{filename}"',
+                 "Cache-Control": "private, no-store"},
+    )
+
+
 def work(job):
     job_id = job["id"]
     payload = job["payload"]
@@ -1499,7 +2561,147 @@ def work(job):
     cleanup_failed_output(job_id)
     folder.mkdir(parents=True, exist_ok=True)
 
-    if job["kind"] == "video_transform":
+    if job["kind"] == "video_voice_over":
+        engine = payload.get("engine", TTS_DEFAULT_ENGINE)
+        if not tts_engine_ready(engine):
+            raise RuntimeError(f"The selected speech engine ({engine}) is not enabled or installed.")
+        voice_id = payload.get("voice_id", "")
+        update(job_id, stage=f"Generating {language_name(payload.get('language', 'hi'))} voice-over · {engine}", progress=8)
+        narration_path = folder / "voice_over.wav"
+        narration_duration = synthesize_tts(
+            payload["narration"], voice_id, narration_path, engine, True,
+            payload.get("generation_settings") or load_voice_generation_settings(voice_id),
+            payload.get("language", "hi"),
+        )
+        source_path = Path(job["input_path"]).resolve()
+        if UP.resolve() not in source_path.parents or not source_path.is_file():
+            raise RuntimeError("The retained source video is missing.")
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(source_path)],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        media = json.loads(probe.stdout)
+        video_stream = next(
+            (item for item in media.get("streams", []) if item.get("codec_type") == "video"),
+            None,
+        )
+        if not video_stream:
+            raise RuntimeError("The source file has no video stream.")
+        video_duration = float(
+            video_stream.get("duration") or media.get("format", {}).get("duration") or 0
+        )
+        if video_duration <= 0:
+            raise RuntimeError("The source video duration could not be determined.")
+        start_offset = max(0.0, float(payload.get("start_offset", 0)))
+        if start_offset + narration_duration > video_duration + 0.15:
+            available = max(0.0, video_duration - start_offset)
+            raise RuntimeError(
+                f"Voice-over is {narration_duration:.1f}s but only {available:.1f}s remain "
+                "in the video. Shorten the narration or choose a longer source video; "
+                "the Studio will not cut off speech or freeze the picture."
+            )
+
+        has_source_audio = any(
+            item.get("codec_type") == "audio" for item in media.get("streams", [])
+        )
+        voice_volume = float(payload.get("voice_volume", 1.0))
+        original_volume = float(payload.get("original_volume", 0.25))
+        delay_ms = int(round(start_offset * 1000))
+        filter_parts = [
+            f"[1:a:0]adelay=delays={delay_ms}:all=1,volume={voice_volume:.3f},"
+            f"apad,atrim=duration={video_duration:.3f}[voice]"
+        ]
+        if payload.get("keep_original_audio", True) and has_source_audio:
+            filter_parts.extend([
+                f"[0:a:0]volume={original_volume:.3f},apad,"
+                f"atrim=duration={video_duration:.3f}[original]",
+                "[original][voice]amix=inputs=2:duration=longest:dropout_transition=0:"
+                "normalize=0,alimiter=limit=0.95:level=0[aout]",
+            ])
+        else:
+            filter_parts.append("[voice]alimiter=limit=0.95:level=0[aout]")
+
+        destination = folder / "video_voice_over.mp4"
+        update(job_id, stage="Mixing narration with the original video audio", progress=68)
+        subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                "-i", str(source_path), "-i", str(narration_path),
+                "-filter_complex", ";".join(filter_parts),
+                "-map", "0:v:0", "-map", "[aout]",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-threads", "2", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k",
+                "-t", f"{video_duration:.3f}", "-movflags", "+faststart",
+                str(destination),
+            ],
+            check=True, capture_output=True, text=True, timeout=7200,
+        )
+        check = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(destination)],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        streams = set(check.stdout.splitlines())
+        if "video" not in streams or "audio" not in streams:
+            raise RuntimeError("Voice-over export must contain both video and mixed narration audio.")
+        narration_path.unlink(missing_ok=True)
+    elif job["kind"] == "video_voice_dub":
+        engine = payload.get("engine", TTS_DEFAULT_ENGINE)
+        if not tts_engine_ready(engine):
+            raise RuntimeError(f"The selected speech engine ({engine}) is not enabled or installed.")
+        if not cpu_lipsync_ready():
+            raise RuntimeError("CPU ONNX lip-sync models or dependencies are not installed.")
+        voice_id = payload.get("voice_id", "")
+        update(job_id, stage=f"Generating {language_name(payload.get('language', 'hi'))} speech · {engine}", progress=8)
+        narration_path = folder / "narration.wav"
+        synthesize_tts(
+            payload["narration"], voice_id, narration_path, engine, True,
+            payload.get("generation_settings") or load_voice_generation_settings(voice_id),
+            payload.get("language", "hi"),
+        )
+        lipsync_destination = folder / "video_lipsync.mp4"
+        from cpu_lipsync import run_cpu_lipsync
+        lipsync_result = run_cpu_lipsync(
+            Path(job["input_path"]),
+            narration_path,
+            lipsync_destination,
+            LIPSYNC_MODELS_ROOT,
+            keep_source_ambience=payload.get("keep_source_ambience", False),
+            progress=lambda percent, stage: update(job_id, stage=stage, progress=percent),
+        )
+        selected_style = payload.get("video_style", "anime_512")
+        destination = folder / "video_with_lipsync.mp4"
+        style_result = {"style": "none", "style_label": "Original video"}
+        if selected_style == "none":
+            lipsync_destination.replace(destination)
+        else:
+            update(job_id, stage="Applying full-frame AI video style", progress=74)
+            from cpu_video_style import run_video_style
+            style_result = run_video_style(
+                lipsync_destination,
+                destination,
+                VIDEO_STYLE_MODELS_ROOT,
+                style=selected_style,
+                strength=float(payload.get("style_strength", 0.85)),
+                progress=lambda percent, stage: update(
+                    job_id, stage=stage, progress=74 + int(percent * 0.25)
+                ),
+            )
+            lipsync_destination.unlink(missing_ok=True)
+        (folder / "video_info.json").write_text(
+            json.dumps({"lip_sync": lipsync_result, "video_style": style_result},
+                       ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(destination)],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        streams = set(probe.stdout.splitlines())
+        if "video" not in streams or "audio" not in streams:
+            raise RuntimeError("Final output must contain the full video and generated speech audio.")
+        lipsync_destination.unlink(missing_ok=True)
+        narration_path.unlink(missing_ok=True)
+    elif job["kind"] == "video_transform":
         source_for_render = job["input_path"]
         scene_items = payload.get("scenes", [])
         if scene_items:
@@ -1653,26 +2855,84 @@ def work(job):
         music_path = payload.get("music_path", "")
         trim_start = 0 if scene_items else float(payload.get("trim_start", 0))
         trim_end = 0 if scene_items else float(payload.get("trim_end", 0))
+        narration_path = None
+        narration_duration = 0.0
+        narration_text = payload.get("narration_text", "").strip()
+        if narration_text:
+            engine = payload.get("narration_engine", TTS_DEFAULT_ENGINE)
+            if not tts_engine_ready(engine):
+                raise RuntimeError(f"The selected speech engine ({engine}) is not enabled or installed.")
+            update(job_id, stage=f"Generating {language_name(payload.get('narration_language', 'hi'))} voice narration · {engine}", progress=12)
+            narration_path = folder / "narration.wav"
+            narration_duration = synthesize_tts(
+                narration_text, payload.get("narration_voice_id", ""),
+                narration_path, engine, False,
+                load_voice_generation_settings(payload.get("narration_voice_id", "")),
+                payload.get("narration_language", "hi"),
+            )
+            update(job_id, stage="Narration ready · mixing video and audio", progress=58)
+
         input_args = []
         if trim_start > 0:
             input_args += ["-ss", str(trim_start)]
-        if music_path:
-            music_file = Path(music_path).resolve()
-            if UP.resolve() not in music_file.parents or not music_file.is_file():
-                raise RuntimeError("Background music is missing or outside the upload directory.")
-            input_args += ["-i", source_for_render, "-stream_loop", "-1", "-i", str(music_file)]
-            map_args = ["-map", "0:v:0", "-map", "1:a:0", "-shortest", "-c:a", "aac",
-                        "-af", f"volume={float(payload.get('music_volume', 0.35))}"]
+        if narration_path:
+            source_probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", source_for_render],
+                check=True, capture_output=True, text=True, timeout=30,
+            )
+            source_duration = float(source_probe.stdout.strip())
+            video_duration = (
+                trim_end - trim_start if trim_end > 0
+                else max(0.0, source_duration - trim_start)
+            )
+            output_duration = max(video_duration, narration_duration)
+            if output_duration <= 0:
+                raise RuntimeError("The storyboard video has an invalid duration.")
+            if narration_duration > video_duration:
+                video_filter += f",tpad=stop_mode=clone:stop_duration={narration_duration - video_duration:.3f}"
+            input_args += ["-i", source_for_render, "-i", str(narration_path)]
+            filter_parts = [
+                f"[1:a:0]apad,atrim=duration={output_duration:.3f}[voice]"
+            ]
+            if music_path:
+                music_file = Path(music_path).resolve()
+                if UP.resolve() not in music_file.parents or not music_file.is_file():
+                    raise RuntimeError("Background music is missing or outside the upload directory.")
+                input_args += ["-stream_loop", "-1", "-i", str(music_file)]
+                music_volume = max(0.0, min(1.5, float(payload.get("music_volume", 0.35))))
+                filter_parts.extend([
+                    f"[2:a:0]volume={music_volume:.3f},apad,atrim=duration={output_duration:.3f}[background]",
+                    "[voice][background]amix=inputs=2:duration=longest:dropout_transition=2,"
+                    "alimiter=limit=0.95:level=0[aout]",
+                ])
+            else:
+                filter_parts.append("[voice]alimiter=limit=0.95:level=0[aout]")
+            map_args = [
+                "-map", "0:v:0", "-map", "[aout]",
+                "-c:a", "aac", "-b:a", "192k",
+            ]
+            filter_args = ["-filter_complex", ";".join(filter_parts)]
+            duration_args = ["-t", f"{output_duration:.3f}"]
         else:
-            input_args += ["-i", source_for_render]
-            map_args = ["-map", "0:v:0", "-map", "0:a?"]
-            map_args += ["-an"] if payload.get("audio", "keep") == "mute" else ["-c:a", "aac"]
-        duration_args = ["-t", str(trim_end - trim_start)] if trim_end > 0 else []
-        update(job_id, stage="FFmpeg rendering", progress=20)
+            filter_args = []
+            if music_path:
+                music_file = Path(music_path).resolve()
+                if UP.resolve() not in music_file.parents or not music_file.is_file():
+                    raise RuntimeError("Background music is missing or outside the upload directory.")
+                input_args += ["-i", source_for_render, "-stream_loop", "-1", "-i", str(music_file)]
+                map_args = ["-map", "0:v:0", "-map", "1:a:0", "-shortest", "-c:a", "aac",
+                            "-af", f"volume={float(payload.get('music_volume', 0.35))}"]
+            else:
+                input_args += ["-i", source_for_render]
+                map_args = ["-map", "0:v:0", "-map", "0:a?"]
+                map_args += ["-an"] if payload.get("audio", "keep") == "mute" else ["-c:a", "aac"]
+            duration_args = ["-t", str(trim_end - trim_start)] if trim_end > 0 else []
+        update(job_id, stage="FFmpeg rendering", progress=70 if narration_path else 20)
         subprocess.run(
             [
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
-                "-y", *input_args, *map_args, *duration_args,
+                "-y", *input_args, *filter_args, *map_args, *duration_args,
                 "-vf", video_filter, "-filter_threads", "1",
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
                 "-threads", "2", "-movflags", "+faststart",
@@ -1681,27 +2941,158 @@ def work(job):
             check=True,
             timeout=7200,
         )
+        if narration_path:
+            narration_path.unlink(missing_ok=True)
+    elif job["kind"] == "facefusion":
+        reference = Path(payload.get("reference_path", "")).resolve()
+        target = Path(job["input_path"]).resolve()
+        if UP.resolve() not in reference.parents or not reference.is_file():
+            raise RuntimeError("Face reference image is missing or outside the upload directory.")
+        if UP.resolve() not in target.parents or not target.is_file():
+            raise RuntimeError("Target video is missing or outside the upload directory.")
+        if not FACEFUSION_PYTHON.is_file() or not FACEFUSION_SCRIPT.is_file():
+            raise RuntimeError("FaceFusion CPU engine is not installed.")
+        raw_output = folder / "facefusion-video.mp4"
+        destination = folder / "video.mp4"
+        facefusion_temp = ROOT / "tmp" / "facefusion"
+        facefusion_jobs = ROOT / "facefusion-jobs"
+        facefusion_temp.mkdir(parents=True, exist_ok=True)
+        facefusion_jobs.mkdir(parents=True, exist_ok=True)
+        update(job_id, stage="FaceFusion CPU · preparing models", progress=5)
+        facefusion_args = [
+            "headless-run",
+            "--temp-path", str(facefusion_temp),
+            "--jobs-path", str(facefusion_jobs),
+            "-s", str(reference),
+            "-t", str(target),
+            "-o", str(raw_output),
+            "--processors", "face_swapper",
+            "--face-detector-model", "scrfd",
+            "--face-landmarker-model", "2dfan4",
+            "--face-swapper-model", "inswapper_128",
+            "--face-selector-mode", "reference",
+            "--reference-frame-number", "0",
+            "--reference-face-position", "0",
+            "--execution-providers", "cpu",
+            "--execution-thread-count", "2",
+            "--output-video-encoder", "libx264",
+            "--output-video-preset", "veryfast",
+            "--output-video-quality", "80",
+            "--log-level", "info",
+        ]
+        if payload.get("confirm_non_explicit_override") is True:
+            # This override is scoped to this subprocess/job only. It does not
+            # alter FaceFusion's installed files or affect any other job.
+            runner = (
+                "import runpy,sys; from facefusion import content_analyser; "
+                "content_analyser.analyse_video=lambda *args,**kwargs: False; "
+                "script=sys.argv.pop(1); sys.argv[0]=script; "
+                "runpy.run_path(script,run_name='__main__')"
+            )
+            command = [
+                str(FACEFUSION_PYTHON), "-c", runner, str(FACEFUSION_SCRIPT),
+                *facefusion_args,
+            ]
+        else:
+            command = [
+                str(FACEFUSION_PYTHON), str(FACEFUSION_SCRIPT), *facefusion_args,
+            ]
+        update(job_id, stage="Replacing faces on CPU", progress=15)
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=7200, check=False,
+            cwd=str(FACEFUSION_ROOT),
+        )
+        if result.returncode or not raw_output.is_file():
+            detail = (result.stderr or result.stdout or "FaceFusion did not produce an output video.")[-1800:]
+            raise RuntimeError(detail)
+        update(job_id, stage="Restoring original audio", progress=90)
+        subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                "-i", str(raw_output), "-i", str(target),
+                "-map", "0:v:0", "-map", "1:a?",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                "-map_metadata", "1", "-movflags", "+faststart",
+                str(destination),
+            ],
+            capture_output=True, text=True, timeout=600, check=True,
+        )
+        raw_output.unlink(missing_ok=True)
     elif job["kind"] == "tts":
-        if not tts_runtime_ready():
-            raise RuntimeError("Narration engine is not enabled or installed.")
-        update(job_id, stage="Loading Chatterbox Multilingual V3", progress=10)
-        import torch
-        import torchaudio
-        from chatterbox.mtl_tts import ChatterboxMultilingualTTS
-
-        model = ChatterboxMultilingualTTS.from_pretrained(device="cpu", t3_model="v3")
-        reference = VOICES / (payload["voice_id"] + ".wav") if payload.get("voice_id") else None
-        kwargs = {"language_id": payload["language"]}
-        if reference:
-            if not reference.is_file():
-                raise RuntimeError("Voice profile missing")
-            kwargs["audio_prompt_path"] = str(reference)
-        update(job_id, stage="Generating speech", progress=35)
-        with torch.inference_mode():
-            audio = model.generate(payload["text"], **kwargs)
+        engine = payload.get("engine", TTS_DEFAULT_ENGINE)
+        if not tts_engine_ready(engine):
+            raise RuntimeError(f"The selected speech engine ({engine}) is not enabled or installed.")
+        update(job_id, stage=f"Generating {language_name(payload.get('language', 'hi'))} narration · {engine}", progress=15)
         destination = folder / "narration.wav"
-        torchaudio.save(str(destination), audio.detach().cpu(), model.sr)
-        del model
+        synthesize_tts(
+            payload["text"], payload["voice_id"], destination, engine, False,
+            payload.get("generation_settings") or load_voice_generation_settings(payload["voice_id"]),
+            payload.get("language", "hi"),
+        )
+    elif job["kind"] == "tts_script":
+        engine = payload.get("engine", TTS_DEFAULT_ENGINE)
+        if not tts_engine_ready(engine):
+            raise RuntimeError(f"The selected speech engine ({engine}) is not enabled or installed.")
+        text = payload["text"].strip()
+        parts = []
+        settings = payload.get("generation_settings") or load_voice_generation_settings(payload["voice_id"])
+        if engine == "kitten":
+            # Kitten's native runner performs sentence-aware chunking while the
+            # 1.7B model remains loaded for the complete script.
+            update(job_id, stage="Generating full script with KittenTTS 2", progress=12)
+            part = folder / "script_part_001.wav"
+            synthesize_tts(text, payload["voice_id"], part, engine, False, settings, payload.get("language", "hi"))
+            parts.append(part)
+        else:
+            chunks = []
+            while text:
+                if len(text) <= 1800:
+                    chunks.append(text)
+                    break
+                window = text[:1800]
+                boundaries = list(re.finditer(r"\n+|(?<=[।.!?])\s+|\s+", window))
+                cut = boundaries[-1].end() if boundaries else 1800
+                chunks.append(text[:cut].strip())
+                text = text[cut:].strip()
+            for index, chunk in enumerate(chunks, start=1):
+                update(
+                    job_id,
+                    stage=f"Generating speech · part {index}/{len(chunks)}",
+                    progress=10 + int(65 * (index - 1) / len(chunks)),
+                )
+                part = folder / f"script_part_{index:03d}.wav"
+                synthesize_tts(chunk, payload["voice_id"], part, engine, False, settings, payload.get("language", "hi"))
+                parts.append(part)
+        update(job_id, stage="Combining speech parts", progress=78)
+        concat_list = folder / "audio_parts.txt"
+        concat_list.write_text(
+            "".join(f"file '{part.name}'\n" for part in parts), encoding="utf-8"
+        )
+        combined = folder / "combined.wav"
+        subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                "-f", "concat", "-safe", "0", "-i", str(concat_list),
+                "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le", str(combined),
+            ],
+            check=True, capture_output=True, text=True, timeout=600,
+        )
+        update(job_id, stage="Encoding MP3 · 192 kbps", progress=88)
+        destination = folder / "script_narration.mp3"
+        subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                "-i", str(combined), "-ar", "24000", "-ac", "1",
+                "-c:a", "libmp3lame", "-b:a", "192k", str(destination),
+            ],
+            check=True, capture_output=True, text=True, timeout=600,
+        )
+        if not destination.is_file() or destination.stat().st_size < 1024:
+            raise RuntimeError("MP3 encoding failed or produced an empty audio file.")
+        for part in parts:
+            part.unlink(missing_ok=True)
+        combined.unlink(missing_ok=True)
+        concat_list.unlink(missing_ok=True)
     else:
         raise RuntimeError("Unsupported job type")
 
@@ -1737,8 +3128,9 @@ def worker():
             cleanup_failed_output(job["id"])
             update(job["id"], status="failed", stage="Failed", error=str(error)[:2000])
         finally:
-            # Keep the source only while queued/running so a crashed worker can recover it.
-            cleanup_upload(job.get("input_path"))
+            # Transform sources remain editable until the user deletes their job.
+            if not job.get("payload", {}).get("retain_source"):
+                cleanup_upload(job.get("input_path"))
 
 
 if __name__ == "__main__":
