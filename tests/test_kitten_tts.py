@@ -62,16 +62,16 @@ class KittenTtsTests(unittest.TestCase):
         self.assertIn("वीसा", normalized)
 
     def test_tts_text_normalization_removes_accidental_invisible_controls(self):
-        value = validate_text("नम\\u200bस्ते\\u2060 दुनिया\\ufeff")
+        value = validate_text("नम\u200bस्ते\u2060 दुनिया\ufeff")
         self.assertEqual(value, "नमस्ते दुनिया")
 
     def test_tts_text_normalization_preserves_indic_joiners_and_markup(self):
-        value = "[joyful] क्\\u200dष और क्\\u200cष <laugh>"
+        value = "[joyful] क्\u200dष और क्\u200cष <laugh>"
         self.assertEqual(validate_text(value), value)
 
     def test_tts_text_normalization_handles_nonbreaking_spaces_and_newlines(self):
-        value = validate_text("पहला\\u00a0वाक्य\\r\\nदूसरा\\u202fवाक्य")
-        self.assertEqual(value, "पहला वाक्य\\nदूसरा वाक्य")
+        value = validate_text("पहला\u00a0वाक्य\r\nदूसरा\u202fवाक्य")
+        self.assertEqual(value, "पहला वाक्य\nदूसरा वाक्य")
 
     def test_rejects_empty_and_oversized_cli_argument(self):
         with self.assertRaises(ValueError):
