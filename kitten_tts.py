@@ -126,17 +126,17 @@ def normalize_tts_text(text: str) -> str:
         raise ValueError("Enter text for KittenTTS 2 to speak.")
 
     value = unicodedata.normalize("NFC", text)
-    value = value.replace("\\r\\n", "\\n").replace("\\r", "\\n")
-    value = value.replace("\\u00a0", " ").replace("\\u202f", " ")
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    value = value.replace("\u00a0", " ").replace("\u202f", " ")
     value = _INVISIBLE_INPUT_CONTROLS.sub("", value)
 
     # Replace accidental control characters, but preserve tabs/newlines and Indic joiners.
     value = "".join(
         char for char in value
-        if unicodedata.category(char) != "Cc" or char in "\\n\\t"
+        if unicodedata.category(char) != "Cc" or char in "\n\t"
     )
-    value = re.sub(r"[ \\t]+", " ", value)
-    value = re.sub(r" *\\n *", "\\n", value)
+    value = re.sub(r"[ \t]+", " ", value)
+    value = re.sub(r" *\n *", "\n", value)
     value = unicodedata.normalize("NFC", value).strip()
 
     if not value:
