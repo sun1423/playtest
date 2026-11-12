@@ -6,7 +6,30 @@ import {
 } from 'lucide-react';
 import './style.css';
 
-function estimateHindiSpeechSeconds(value) {
+const VOICE_TEST_SAMPLES = {
+  en: "Hello, this is a short voice quality test.",
+  ar: "مرحباً، هذا اختبار قصير لجودة الصوت.",
+  zh: "你好，这是一个简短的语音质量测试。",
+  fr: "Bonjour, ceci est un court test de qualité vocale.",
+  de: "Hallo, dies ist ein kurzer Sprachqualitätstest.",
+  hi: "नमस्ते, यह मेरी आवाज़ का एक छोटा परीक्षण है।",
+  it: "Ciao, questo è un breve test della qualità della voce.",
+  pt: "Olá, este é um pequeno teste de qualidade de voz.",
+  ru: "Здравствуйте, это короткая проверка качества голоса.",
+  es: "Hola, esta es una breve prueba de calidad de voz.",
+  ja: "こんにちは、これは短い音声品質テストです。",
+  ko: "안녕하세요, 이것은 짧은 음성 품질 테스트입니다.",
+  tr: "Merhaba, bu kısa bir ses kalitesi testidir.",
+  nl: "Hallo, dit is een korte test van de stemkwaliteit.",
+  sv: "Hej, det här är ett kort test av röstkvaliteten.",
+  da: "Hej, dette er en kort test af stemmekvaliteten.",
+  fi: "Hei, tämä on lyhyt äänenlaadun testi.",
+  sw: "Hujambo, huu ni mtihani mfupi wa ubora wa sauti.",
+  el: "Γεια σας, αυτή είναι μια σύντομη δοκιμή ποιότητας φωνής.",
+  he: "שלום, זוהי בדיקה קצרה של איכות הקול."
+};
+
+function estimateSpeechSeconds(value) {
   const narration = String(value || '').trim();
   if (!narration) return 0;
   const words = narration.split(/\s+/u).filter(Boolean).length;
@@ -1208,7 +1231,7 @@ function App() {
     setVoice(voiceId);
     setVoicePreviewUrl('');
     const profile = voices.find(item => item.voice_id === voiceId);
-    if (profile?.language) setVoiceLanguage(profile.language);
+    if (profile?.language) { setVoiceLanguage(profile.language); setVoicePreviewText(VOICE_TEST_SAMPLES[profile.language] || ''); }
     if (profile?.generation_settings) setVoiceGenerationSettings(profile.generation_settings);
   }
 
@@ -1240,7 +1263,7 @@ function App() {
   const editingVoiceOverJob = voiceOverHistory.find(job => job.id === editingVoiceOverId);
   const dubJobs = jobs.filter(job => job.kind === 'video_voice_dub');
   const dubWordCount = dubNarration.trim() ? dubNarration.trim().split(/\s+/u).filter(Boolean).length : 0;
-  const dubEstimatedSpeechSeconds = estimateHindiSpeechSeconds(dubNarration);
+  const dubEstimatedSpeechSeconds = estimateSpeechSeconds(dubNarration);
   const dubMaximumSpeechSeconds = dubSourceDuration > 0 ? dubSourceDuration * 1.2 : 0;
   const dubSpeechOverLimit = dubMaximumSpeechSeconds > 0 && dubEstimatedSpeechSeconds > dubMaximumSpeechSeconds + 0.5;
   const editingTransformJob = jobs.find(job => job.id === editingTransformId);
@@ -1310,6 +1333,12 @@ function App() {
           <span>AI VIDEO WORKFLOW</span>
           <h1>Make your next story<br/><i>worth watching.</i></h1>
           <p>Generate narration with the selected local CPU speech engine and a saved language-matched WAV voice profile.</p>
+          <label>SPEECH ENGINE · SHARED WITH OTHER SPEECH TOOLS
+            <select value={ttsEngine} onChange={event => changeSpeechEngine(event.target.value)}>
+              <option value="kitten">KittenTTS 2 · Multilingual (20 languages)</option>
+              <option value="pocket">Pocket TTS · Hindi only</option>
+            </select>
+          </label>
           {!activeTtsReady && <p className="storyboard-note">The selected speech engine is not installed or enabled on Azure.</p>}
           <form onSubmit={run}>
             <label>{speechLanguageName(lang).toUpperCase()} NARRATION TEXT</label>
@@ -1442,12 +1471,18 @@ function App() {
           <p>Upload a real video, select a language-matched saved voice profile, enter the dialogue and choose an AI visual style. Studio synthesises your speech locally, lip-syncs the source performance, then stylises every frame while preserving the original scene and motion.</p>
           <div className="dub-status">
             <b>{lipsyncInfo.ready && activeTtsReady ? 'CPU voice + lip-sync ready' : 'Setup required before rendering'}</b>
-            <small>Speech: {ttsInfo.tts_engines?.[ttsEngine]?.name || 'Pocket TTS Hindi'} · your saved WAV profile</small>
+            <small>Speech: {ttsInfo.tts_engines?.[ttsEngine]?.name || 'Selected engine'} · language-matched WAV profile</small>
             <small>Lip-sync: Wav2Lip ONNX · CPUExecutionProvider · no GPU</small>
             <small>Azure hardware: 2 vCPU · 16 GB RAM · videos streamed in batches of 8 frames</small>
             {!activeTtsReady && <small className="voice-warning">Pocket TTS Hindi is not enabled or its model is unavailable.</small>}
             {!lipsyncInfo.ready && <small className="voice-warning">CPU lip-sync weights/dependencies are not installed yet. Run the installation steps in docs/CPU_VIDEO_DUB.md.</small>}
           </div>
+          <label>SPEECH ENGINE · SHARED WITH OTHER SPEECH TOOLS
+            <select value={ttsEngine} onChange={event => changeSpeechEngine(event.target.value)}>
+              <option value="kitten">KittenTTS 2 · Multilingual (20 languages)</option>
+              <option value="pocket">Pocket TTS · Hindi only</option>
+            </select>
+          </label>
           <form onSubmit={queueVideoDub}>
             <label className="drop"><Upload/><b>{dubFile?.name || 'Upload a new performance video'}</b><small>MP4 / MOV / MKV / WebM · up to 500 MB · 1–180 seconds · one clearly visible main face</small>
               <input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={event => { setDubFile(event.target.files?.[0] || null); setDubSourceTransformId(''); setDubSourceDuration(0); }}/>
@@ -1512,7 +1547,7 @@ function App() {
             <div className={'dub-length-meter' + (dubSpeechOverLimit ? ' over-limit' : '')}>
               <div className="dub-length-heading">
                 <b>LIVE SPEECH LENGTH ESTIMATE</b>
-                <small>{dubWordCount.toLocaleString()} words · {dubNarration.length.toLocaleString()} / 12,000 characters</small>
+                <small>{dubWordCount.toLocaleString()} words · {dubNarration.length.toLocaleString()} / 12,000 characters · {speechLanguageName(dubLanguage)}</small>
               </div>
               {dubSourceDuration > 0 ? <>
                 <div className="dub-length-values">
@@ -1625,6 +1660,12 @@ function App() {
           <p>Every export is saved in this workspace. Watch it here, download it, or edit the settings and create another version without losing the previous one.</p>
 
           <section className="voice-over-panel">
+            <label>SPEECH ENGINE · SHARED WITH OTHER SPEECH TOOLS
+              <select value={ttsEngine} onChange={event => changeSpeechEngine(event.target.value)}>
+                <option value="kitten">KittenTTS 2 · Multilingual (20 languages)</option>
+                <option value="pocket">Pocket TTS · Hindi only</option>
+              </select>
+            </label>
             <div className="voice-over-heading"><div><span>VOICE-OVER · NO LIP-SYNC</span><h2>Add narration to a video.</h2><p>Add a saved voice in the selected language to any uploaded video or completed Transform export. The video frames, face and mouth movement are not changed.</p></div></div>
             <form className="voice-over-form" onSubmit={queueVoiceOver}>
               {editingVoiceOverJob?.status === 'failed' && <div className="voice-over-retry-warning"><b>Previous attempt failed — your inputs are preserved.</b><small>{editingVoiceOverJob.error || 'The worker could not complete this voice-over.'} Correct the script or audio settings below, then retry without uploading the video again.</small></div>}
@@ -1865,7 +1906,7 @@ function App() {
             </label>
             <SearchableLanguagePicker label="VOICE PROFILE LANGUAGE" value={voiceLanguage}
               onChange={value => {
-                setVoiceLanguage(value); setVoicePreviewUrl(''); setVoiceTranscript('');
+                setVoiceLanguage(value); setVoicePreviewUrl(''); setVoiceTranscript(''); setVoicePreviewText(VOICE_TEST_SAMPLES[value] || '');
                 const first = voicesForLanguage(value)[0]?.voice_id || '';
                 setVoiceProfileToTest(first); voiceProfileToTestRef.current = first; setVoice(first);
               }}
@@ -1899,7 +1940,7 @@ function App() {
                 placeholder="The transcript appears here. Correct it, or type the exact words spoken in the reference clip."/>
             </label>
             <label>VOICE PROFILE NAME
-              <input value={name} maxLength="48" onChange={event => setName(event.target.value)} placeholder="e.g. My Hindi Voice" required/>
+              <input value={name} maxLength="48" onChange={event => setName(event.target.value)} placeholder="e.g. My voice profile" required/>
             </label>
             <button type="button" className="primary" disabled={!name.trim() || voiceBusy}
               onClick={savePreparedVoice}>{voiceBusy ? 'Saving profile…' : 'Save prepared clip and voice profile'}</button>
@@ -1917,7 +1958,7 @@ function App() {
                 ? 'KittenTTS 2 CPU runtime is not installed/enabled. Install it with scripts/install_kitten_tts.py, then explicitly enable it in both services.'
                 : 'Pocket TTS Hindi is not enabled or its CPU model is not installed on Azure.'}
             </small>}
-            {voices.length === 0 ? <p>Save a prepared voice profile first.</p> : <>
+            {voicesForLanguage(voiceLanguage).length === 0 ? <p>No saved {speechLanguageName(voiceLanguage)} voice profile yet. Prepare and save one above.</p> : <>
               <label>VOICE PROFILE
                 <select value={voiceProfileToTest} onChange={event => selectVoiceProfile(event.target.value)}>
                   {voicesForLanguage(voiceLanguage).map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}
@@ -1926,7 +1967,7 @@ function App() {
               <label>TEST TEXT · ENTER {speechLanguageName(voiceLanguage).toUpperCase()} TEXT
                 <textarea rows="4" maxLength="2000" value={voicePreviewText}
                   onChange={event => setVoicePreviewText(event.target.value)}
-                  placeholder="Enter the text you want this voice profile to speak…"/>
+                  placeholder={'Enter ' + speechLanguageName(voiceLanguage) + ' text for this voice profile…'}/>
               </label>
               {ttsEngine === 'pocket' && <>
                 <div className="voice-settings">
@@ -1968,7 +2009,7 @@ function App() {
               <label>FULL SCRIPT
                 <textarea rows="9" maxLength="100000" value={scriptAudioText}
                   onChange={event => setScriptAudioText(event.target.value)}
-                  placeholder="Paste your complete Hindi script here…"/>
+                  placeholder={'Paste your complete ' + speechLanguageName(voiceLanguage) + ' script here…'}/>
               </label>
               <small>{scriptAudioText.length.toLocaleString()} / 100,000 characters · {speechLanguageName(voiceLanguage)} · {ttsInfo.tts_engines?.[ttsEngine]?.name || ttsEngine}</small>
               <label>VOICE PROFILE
@@ -1977,7 +2018,7 @@ function App() {
                 </select>
               </label>
               <button type="submit" className="primary"
-                disabled={!activeTtsReady || !voices.length || !voiceProfileToTest || !scriptAudioText.trim() || scriptAudioBusy}>
+                disabled={!activeTtsReady || !voicesForLanguage(voiceLanguage).length || !voiceProfileToTest || !scriptAudioText.trim() || scriptAudioBusy}>
                 {scriptAudioBusy ? 'Queuing…' : 'Generate complete MP3'}
               </button>
             </form>
