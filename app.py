@@ -30,8 +30,9 @@ from pocket_tts import synthesize_dialogue as synthesize_pocket_tts_dialogue
 from kitten_tts import engine_ready as kitten_tts_engine_ready
 from kitten_tts import synthesize as synthesize_kitten_tts
 from kitten_tts import remove_voice_profile as remove_kitten_voice_profile
-from voice_profile import prepare_voice_audio, probe_audio, transcribe_hindi
+from voice_profile import prepare_voice_audio, probe_audio, transcribe_hindi, transcribe_language
 from voice_reference import analyze_pcm16, decode_pcm16
+from tts_languages import language_options_for_engine, language_name, validate_tts_language
 
 ROOT = Path(os.getenv("STUDIO_ROOT", "/srv/ai-video-studio"))
 DB = ROOT / "studio.sqlite3"
@@ -294,12 +295,30 @@ def tts_engine_ready(engine: str = TTS_DEFAULT_ENGINE) -> bool:
     return False
 
 
+def voice_profile_language(voice_id: str) -> str:
+    """Legacy profiles were created by the Hindi-only workflow."""
+    return str(_read_voice_metadata(voice_id).get("language") or "hi").strip().lower()
+
+
+def validate_profile_language(voice_id: str, engine: str, language: str) -> str:
+    """Reject unsupported language and mismatched saved profile combinations."""
+    language = validate_tts_language(engine, language)
+    saved_language = voice_profile_language(voice_id)
+    if saved_language != language:
+        raise ValueError(
+            f"Voice profile '{voice_id}' is saved for {language_name(saved_language)}, "
+            f"not {language_name(language)}. Choose a matching voice profile."
+        )
+    return language
+
+
 def synthesize_tts(
     text: str, voice_id: str, destination: Path, engine: str = TTS_DEFAULT_ENGINE,
-    dialogue: bool = False, settings: dict | None = None,
+    dialogue: bool = False, settings: dict | None = None, language: str = "hi",
 ) -> float:
     if not tts_engine_ready(engine):
         raise RuntimeError(f"The selected speech engine ({engine}) is not enabled or installed.")
+    validate_profile_language(voice_id, engine, language)
     if engine == "kitten":
         return synthesize_kitten_tts(
             text, voice_id, VOICES, KITTEN_TTS_MODEL_ROOT, destination,
@@ -509,13 +528,14 @@ class LoginRequest(BaseModel):
 
 class TTS(BaseModel):
     text: str = Field(min_length=1, max_length=12000)
-    language: str = Field(default="hi", pattern="^hi$")
+    language: str = Field(default="hi", pattern="^(en|ar|zh|fr|de|hi|it|pt|ru|es|ja|ko|tr|nl|sv|da|fi|sw|el|he)$")
     voice_id: str = Field(min_length=1, max_length=48)
     engine: str = Field(default=TTS_DEFAULT_ENGINE, pattern="^(pocket|kitten)$")
 
 
 class ScriptAudioRequest(BaseModel):
     text: str = Field(min_length=1, max_length=100000)
+    language: str = Field(default="hi", pattern="^(en|ar|zh|fr|de|hi|it|pt|ru|es|ja|ko|tr|nl|sv|da|fi|sw|el|he)$")
     voice_id: str = Field(min_length=1, max_length=48)
     engine: str = Field(default=TTS_DEFAULT_ENGINE, pattern="^(pocket|kitten)$")
 
@@ -530,6 +550,7 @@ class ModelTestRequest(BaseModel):
 
 class VoicePreviewRequest(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
+    language: str = Field(default="hi", pattern="^(en|ar|zh|fr|de|hi|it|pt|ru|es|ja|ko|tr|nl|sv|da|fi|sw|el|he)$")
     settings: dict | None = None
     engine: str = Field(default=TTS_DEFAULT_ENGINE, pattern="^(pocket|kitten)$")
 
@@ -566,7 +587,7 @@ def health():
         "queue": "SQLite",
         "worker": "separate process",
         "tts_ready": tts_ready,
-        "tts_languages": ["hi"] if (tts_ready or kitten_ready) else [],
+        "tts_languages": (language_options_for_engine(TTS_DEFAULT_ENGINE) if (kitten_ready if TTS_DEFAULT_ENGINE == "kitten" else tts_ready) else []),
         "tts_engine": (
             "KittenTTS 2 · CPU/C++" if TTS_DEFAULT_ENGINE == "kitten" and kitten_ready
             else "Pocket TTS Hindi · CPU/ONNX" if TTS_DEFAULT_ENGINE == "pocket" and tts_ready
@@ -574,8 +595,8 @@ def health():
         ),
         "tts_default_engine": TTS_DEFAULT_ENGINE,
         "tts_engines": {
-            "pocket": {"ready": tts_ready, "name": "Pocket TTS Hindi · CPU/ONNX"},
-            "kitten": {"ready": kitten_ready, "name": "KittenTTS 2 · CPU/C++"},
+            "pocket": {"ready": tts_ready, "name": "Pocket TTS Hindi · CPU/ONNX", "languages": language_options_for_engine("pocket") if tts_ready else []},
+            "kitten": {"ready": kitten_ready, "name": "KittenTTS 2 · CPU/C++", "languages": language_options_for_engine("kitten") if kitten_ready else []},
         },
         "video_transform_ready": True,
         "authentication": True,
@@ -592,7 +613,7 @@ def lipsync_status():
         "engine": "Wav2Lip ONNX · CPU",
         "runtime": "ONNX Runtime CPUExecutionProvider · no GPU",
         "models_installed": ready,
-        "language": "Hindi",
+        "languages": language_options_for_engine(TTS_DEFAULT_ENGINE) if ready else [],
         "source_performance": "Preserves source eyes, face identity, expressions, head and body movement; mouth region is synchronised to new speech.",
         "max_video_seconds": 180,
         "fps": 25,
@@ -621,6 +642,7 @@ async def create_video_voice_dub(
     video_style: str = Form("anime_512"),
     style_strength: float = Form(0.85),
     engine: str = Form(TTS_DEFAULT_ENGINE),
+    language: str = Form("hi"),
 ):
     if not tts_engine_ready(engine):
         raise HTTPException(503, f"The selected speech engine ({engine}) is not enabled or installed.")
@@ -628,13 +650,14 @@ async def create_video_voice_dub(
         raise HTTPException(503, "CPU lip-sync is not installed. Install requirements.txt and run scripts/install_cpu_lipsync.py.")
     try:
         resolve_voice_reference(VOICES, voice_id, MAX_VOICE)
+        language = validate_profile_language(voice_id, engine, language)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     source_job_id = source_job_id.strip()
     if bool(file) == bool(source_job_id):
         raise HTTPException(400, "Choose either an uploaded video or one completed Transform export.")
     if len(narration.strip()) < 2:
-        raise HTTPException(400, "Enter the Hindi narration to be spoken.")
+        raise HTTPException(400, "Enter the narration to be spoken.")
     from cpu_video_style import STYLE_MODELS
     if video_style != "none" and video_style not in STYLE_MODELS:
         raise HTTPException(400, "Unsupported video style.")
@@ -711,6 +734,7 @@ async def create_video_voice_dub(
         {
             "voice_id": voice_id,
             "narration": narration.strip(),
+            "language": language,
             "engine": engine,
             "generation_settings": load_voice_generation_settings(voice_id),
             "keep_source_ambience": bool(keep_source_ambience),
@@ -734,15 +758,17 @@ def make_voice_over_payload(
     source_filename: str,
     source_transform_job_id: str = "",
     engine: str = TTS_DEFAULT_ENGINE,
+    language: str = "hi",
 ) -> dict:
     if not tts_engine_ready(engine):
         raise HTTPException(503, f"The selected speech engine ({engine}) is not enabled or installed.")
     try:
         resolve_voice_reference(VOICES, voice_id, MAX_VOICE)
+        language = validate_profile_language(voice_id, engine, language)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if len(narration.strip()) < 2:
-        raise HTTPException(400, "Enter the Hindi narration to be spoken.")
+        raise HTTPException(400, "Enter the narration to be spoken.")
     if not 0 <= start_offset <= 14400:
         raise HTTPException(400, "Voice-over start offset must be between 0 and 14,400 seconds.")
     if not 0 <= original_volume <= 1.5:
@@ -756,6 +782,7 @@ def make_voice_over_payload(
         "retain_source": True,
         "voice_id": voice_id,
         "narration": narration.strip(),
+        "language": language,
         "engine": engine,
         "generation_settings": load_voice_generation_settings(voice_id),
         "start_offset": float(start_offset),
@@ -776,6 +803,7 @@ async def create_video_voice_over(
     original_volume: float = Form(0.25),
     voice_volume: float = Form(1.0),
     engine: str = Form(TTS_DEFAULT_ENGINE),
+    language: str = Form("hi"),
 ):
     source_job_id = source_job_id.strip()
     if bool(file) == bool(source_job_id):
@@ -848,7 +876,7 @@ async def create_video_voice_over(
         payload = make_voice_over_payload(
             voice_id, narration, start_offset, keep_original_audio,
             original_volume, voice_volume, source_filename, source_transform_job_id,
-            engine,
+            engine, language,
         )
         payload["source_duration"] = duration
         result = enqueue("video_voice_over", payload, str(target))
@@ -875,6 +903,7 @@ def rerun_video_voice_over(
     original_volume: float = Form(0.25),
     voice_volume: float = Form(1.0),
     engine: str = Form(TTS_DEFAULT_ENGINE),
+    language: str = Form("hi"),
 ):
     original = getjob(job_id)
     if not original or original.get("kind") != "video_voice_over":
@@ -892,7 +921,7 @@ def rerun_video_voice_over(
         original_volume, voice_volume,
         original["payload"].get("source_filename") or old_source.name,
         original["payload"].get("source_transform_job_id") or "",
-        engine,
+        engine, language,
     )
     folder = UP / str(uuid.uuid4())
     folder.mkdir(parents=True, exist_ok=False)
@@ -1527,6 +1556,7 @@ def tts(payload: TTS):
         raise HTTPException(503, f"The selected speech engine ({payload.engine}) is not enabled or installed.")
     try:
         resolve_voice_reference(VOICES, payload.voice_id, MAX_VOICE)
+        validate_profile_language(payload.voice_id, payload.engine, payload.language)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     job_payload = payload.model_dump()
@@ -1540,6 +1570,7 @@ def create_script_audio(payload: ScriptAudioRequest):
         raise HTTPException(503, f"The selected speech engine ({payload.engine}) is not enabled or installed.")
     try:
         resolve_voice_reference(VOICES, payload.voice_id, MAX_VOICE)
+        validate_profile_language(payload.voice_id, payload.engine, payload.language)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     job_payload = payload.model_dump()
@@ -1992,12 +2023,10 @@ async def render_storyboard(
     if narration_text or narration_voice_id:
         if not narration_text or not narration_voice_id:
             raise HTTPException(400, "Choose a saved voice profile and provide storyboard narration together.")
-        if narration_language != "hi":
-            raise HTTPException(400, "The selected CPU speech engine currently supports Hindi narration only.")
         if not tts_engine_ready(narration_engine):
             raise HTTPException(503, f"The selected speech engine ({narration_engine}) is not enabled or installed.")
         try:
-            resolve_voice_reference(VOICES, narration_voice_id, MAX_VOICE)
+            validate_profile_language(narration_voice_id, narration_engine, narration_language)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
     if not 2 <= len(images) <= 10:
@@ -2089,7 +2118,17 @@ async def render_storyboard(
 
 
 @app.post("/api/voices/prepare")
-async def prepare_voice(file: UploadFile = File(...)):
+async def prepare_voice(
+    file: UploadFile = File(...),
+    language: str = Form("hi"),
+    engine: str = Form(TTS_DEFAULT_ENGINE),
+):
+    if not tts_engine_ready(engine):
+        raise HTTPException(503, f"The selected speech engine ({engine}) is not enabled or installed.")
+    try:
+        language = validate_tts_language(engine, language)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     cleanup_stale_voice_staging()
     if Path(file.filename or "").suffix.lower() != ".wav":
         raise HTTPException(415, "Please upload a WAV recording.")
@@ -2130,12 +2169,18 @@ async def prepare_voice(file: UploadFile = File(...)):
     transcription_error = ""
     transcription_info = {}
     try:
-        transcription_info = await run_in_threadpool(transcribe_hindi, prepared, VOICE_ASR_CACHE)
+        if language == "hi":
+            transcription_info = await run_in_threadpool(transcribe_hindi, prepared, VOICE_ASR_CACHE)
+        else:
+            transcription_info = await run_in_threadpool(transcribe_language, prepared, VOICE_ASR_CACHE, language)
         transcript = transcription_info.get("text", "")
     except Exception as exc:
         transcription_error = str(exc) or "Local transcription could not complete."
     return {
         "prepared_id": stage_id,
+        "language": language,
+        "language_name": language_name(language),
+        "engine": engine,
         "audio_url": f"/api/voices/prepared/{stage_id}/audio",
         "inspection": inspection,
         "transcript": transcript,
@@ -2166,8 +2211,11 @@ async def save_prepared_voice(
     name: str = Form(...),
     transcript: str = Form(""),
     generation_settings: str = Form("{}"),
+    language: str = Form("hi"),
+    engine: str = Form(TTS_DEFAULT_ENGINE),
 ):
     try:
+        language = validate_tts_language(engine, language)
         folder = _voice_stage_path(prepared_id)
         settings = normalize_generation_settings(json.loads(generation_settings))
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
@@ -2187,6 +2235,9 @@ async def save_prepared_voice(
             "voice_id": voice_id,
             "created_at": stamp(),
             "transcript": transcript.strip()[:12000],
+            "language": language,
+            "language_name": language_name(language),
+            "profile_engine": engine,
             "source": inspection.get("original", {}),
             "prepared": prepared_info,
             "reference": prepared_info,
@@ -2208,7 +2259,7 @@ async def save_prepared_voice(
     finally:
         shutil.rmtree(folder, ignore_errors=True)
     clear_voice_cache(VOICES, voice_id)
-    return {"voice_id": voice_id, "generation_settings": settings}
+    return {"voice_id": voice_id, "language": language, "language_name": language_name(language), "engine": engine, "generation_settings": settings}
 
 
 @app.post("/api/voices/{voice_id}/preview")
@@ -2217,6 +2268,7 @@ async def preview_voice(voice_id: str, payload: VoicePreviewRequest):
         raise HTTPException(503, f"The selected speech engine ({payload.engine}) is not enabled or installed.")
     try:
         resolve_voice_reference(VOICES, voice_id, MAX_VOICE)
+        validate_profile_language(voice_id, payload.engine, payload.language)
         settings = (
             normalize_generation_settings(
                 payload.settings if payload.settings is not None
@@ -2231,7 +2283,7 @@ async def preview_voice(voice_id: str, payload: VoicePreviewRequest):
     try:
         duration = await run_in_threadpool(
             synthesize_tts, payload.text, voice_id, destination,
-            payload.engine, False, settings,
+            payload.engine, False, settings, payload.language,
         )
     except Exception as exc:
         destination.unlink(missing_ok=True)
@@ -2239,6 +2291,7 @@ async def preview_voice(voice_id: str, payload: VoicePreviewRequest):
     metadata = _read_voice_metadata(voice_id)
     metadata.update({
         "last_preview_engine": payload.engine,
+        "last_preview_language": payload.language,
         "last_preview_id": preview_id,
         "last_preview_at": stamp(),
     })
@@ -2515,6 +2568,7 @@ def work(job):
         narration_duration = synthesize_tts(
             payload["narration"], voice_id, narration_path, engine, True,
             payload.get("generation_settings") or load_voice_generation_settings(voice_id),
+            payload.get("language", "hi"),
         )
         source_path = Path(job["input_path"]).resolve()
         if UP.resolve() not in source_path.parents or not source_path.is_file():
@@ -2600,6 +2654,7 @@ def work(job):
         synthesize_tts(
             payload["narration"], voice_id, narration_path, engine, True,
             payload.get("generation_settings") or load_voice_generation_settings(voice_id),
+            payload.get("language", "hi"),
         )
         lipsync_destination = folder / "video_lipsync.mp4"
         from cpu_lipsync import run_cpu_lipsync
@@ -2810,6 +2865,7 @@ def work(job):
                 narration_text, payload.get("narration_voice_id", ""),
                 narration_path, engine, False,
                 load_voice_generation_settings(payload.get("narration_voice_id", "")),
+                payload.get("narration_language", "hi"),
             )
             update(job_id, stage="Narration ready · mixing video and audio", progress=58)
 
@@ -2968,6 +3024,7 @@ def work(job):
         synthesize_tts(
             payload["text"], payload["voice_id"], destination, engine, False,
             payload.get("generation_settings") or load_voice_generation_settings(payload["voice_id"]),
+            payload.get("language", "hi"),
         )
     elif job["kind"] == "tts_script":
         engine = payload.get("engine", TTS_DEFAULT_ENGINE)
@@ -2981,7 +3038,7 @@ def work(job):
             # 1.7B model remains loaded for the complete script.
             update(job_id, stage="Generating full script with KittenTTS 2", progress=12)
             part = folder / "script_part_001.wav"
-            synthesize_tts(text, payload["voice_id"], part, engine, False, settings)
+            synthesize_tts(text, payload["voice_id"], part, engine, False, settings, payload.get("language", "hi"))
             parts.append(part)
         else:
             chunks = []
@@ -3001,7 +3058,7 @@ def work(job):
                     progress=10 + int(65 * (index - 1) / len(chunks)),
                 )
                 part = folder / f"script_part_{index:03d}.wav"
-                synthesize_tts(chunk, payload["voice_id"], part, engine, False, settings)
+                synthesize_tts(chunk, payload["voice_id"], part, engine, False, settings, payload.get("language", "hi"))
                 parts.append(part)
         update(job_id, stage="Combining speech parts", progress=78)
         concat_list = folder / "audio_parts.txt"
