@@ -1,6 +1,6 @@
-# KittenTTS 2 · expressive Hindi CPU voice engine
+# KittenTTS 2 · primary Hindi CPU voice engine
 
-KittenTTS 2 is an optional second speech engine. Pocket TTS Hindi remains installed, unchanged and available as the default/fallback. The application uses the selected engine on each job; queued jobs retain their engine choice.
+KittenTTS 2 is the default Hindi speech engine in this Studio branch. Pocket TTS Hindi remains installed, unchanged and available as a manual fallback. The application uses the selected engine on each job; queued jobs retain their engine choice.
 
 ## What it adds
 
@@ -76,7 +76,7 @@ to **both**:
 - \`ai-video-studio-api.service\`
 - \`ai-video-studio-worker.service\`
 
-Keep the existing \`ENABLE_TTS=1\` and Pocket model paths untouched. Reload systemd and restart the API and worker in a maintenance window. Check \`GET /api/health\`: \`tts_engines.kitten.ready\` must be true. If it is false, do not select Kitten for production jobs.
+Keep the existing \`ENABLE_TTS=1\` and Pocket model paths untouched. Reload systemd and restart the API and worker in a maintenance window. Check \`GET /api/health\`: \`tts_engines.kitten.ready\` must be true. If it is false, do not submit Kitten production jobs; keep Pocket selected until readiness is restored.
 
 The Voice Studio engine selector applies to previews, script MP3, storyboard narration, Transform voice-over and video lip-sync dubbing. The selected engine is saved with each job and is restored when editing a voice-over.
 
