@@ -36,6 +36,51 @@ function estimateSpeechSeconds(value) {
   return words / (100 / 60);
 }
 
+function countTextCharacters(value) {
+  const text = String(value || '');
+  if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+    return Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)).length;
+  }
+  return Array.from(text).length;
+}
+
+function truncateTextCharacters(value, limit) {
+  const text = String(value || '');
+  const maximum = Math.max(0, Number(limit) || 0);
+  if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+    return Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text))
+      .slice(0, maximum).map(item => item.segment).join('');
+  }
+  return Array.from(text).slice(0, maximum).join('');
+}
+
+function estimateVoiceOverCharacterLimit(seconds, language) {
+  const rate = language === 'hi' ? 7.5
+    : ['zh', 'ja', 'ko'].includes(language) ? 4.5 : 8.5;
+  return Math.max(0, Math.floor(Math.max(0, Number(seconds) || 0) * rate));
+}
+
+function readVideoDuration(source) {
+  return new Promise(resolve => {
+    const video = document.createElement('video');
+    let settled = false;
+    const finish = duration => {
+      if (settled) return;
+      settled = true;
+      video.onloadedmetadata = null;
+      video.onerror = null;
+      video.removeAttribute('src');
+      video.load();
+      resolve(Number.isFinite(duration) && duration > 0 ? duration : 0);
+    };
+    video.preload = 'metadata';
+    video.onloadedmetadata = () => finish(video.duration);
+    video.onerror = () => finish(0);
+    video.src = source;
+    video.load();
+  });
+}
+
 function formatTrimTime(value) {
   const seconds = Math.max(0, Number(value) || 0);
   const minutes = Math.floor(seconds / 60);
@@ -105,6 +150,7 @@ function App() {
   const [voiceOverHistory, setVoiceOverHistory] = useState([]);
   const [voiceOverSelectedId, setVoiceOverSelectedId] = useState('');
   const [voiceOverFile, setVoiceOverFile] = useState(null);
+  const [voiceOverSourceDuration, setVoiceOverSourceDuration] = useState(0);
   const [voiceOverSourceTransformId, setVoiceOverSourceTransformId] = useState('');
   const [voiceOverNarration, setVoiceOverNarration] = useState('');
   const [voiceOverVoiceId, setVoiceOverVoiceId] = useState('');
@@ -176,6 +222,7 @@ function App() {
   const [voicePreviewUrl, setVoicePreviewUrl] = useState('');
   const [voiceProfileToTest, setVoiceProfileToTest] = useState('');
   const voiceProfileToTestRef = useRef('');
+  const voiceOverDurationProbeRef = useRef(0);
   const jobsRefreshSequenceRef = useRef(0);
   const jobsMutationVersionRef = useRef(0);
   const [voiceGenerationSettings, setVoiceGenerationSettings] = useState({
@@ -331,6 +378,19 @@ function App() {
     } catch {
       // Keep the last known voice-over history if the endpoint is temporarily unavailable.
     }
+  }
+
+  async function inspectVoiceOverSource(source, revokeObjectUrl = false) {
+    const probeId = ++voiceOverDurationProbeRef.current;
+    setVoiceOverSourceDuration(0);
+    if (!source) return;
+    let duration = 0;
+    try {
+      duration = await readVideoDuration(source);
+    } finally {
+      if (revokeObjectUrl) URL.revokeObjectURL(source);
+    }
+    if (probeId === voiceOverDurationProbeRef.current) setVoiceOverSourceDuration(duration);
   }
 
   async function refresh() {
@@ -527,6 +587,10 @@ function App() {
     event.preventDefault();
     if ((!voiceOverFile && !voiceOverSourceTransformId && !editingVoiceOverId) ||
         !voiceOverVoiceId || !voiceOverNarration.trim()) return;
+    if (voiceOverScriptOverLimit) {
+      setMsg('Shorten the narration to fit the remaining video duration.');
+      return;
+    }
     const form = new FormData();
     if (!editingVoiceOverId) {
       if (voiceOverSourceTransformId) form.append('source_job_id', voiceOverSourceTransformId);
@@ -572,6 +636,7 @@ function App() {
     setVoiceOverPendingJobId('');
     setVoiceOverFile(null);
     setVoiceOverSourceTransformId('');
+    inspectVoiceOverSource('/api/jobs/' + encodeURIComponent(job.id) + '/source');
     setVoiceOverNarration(options.narration || '');
     setTtsEngine(options.engine || 'kitten');
     setVoiceOverLanguage(options.language || 'hi');
@@ -592,6 +657,7 @@ function App() {
     setVoiceOverPendingJobId('');
     setVoiceOverFile(null);
     setVoiceOverSourceTransformId('');
+    inspectVoiceOverSource('');
     setVoiceOverNarration('');
     setVoiceOverStartOffset('0');
     setVoiceOverKeepOriginal(true);
@@ -1273,6 +1339,13 @@ function App() {
   const availableTransformVideos = transformJobs.filter(job => job.status === 'completed' && job.output_available);
   const selectedVoiceOverJob = voiceOverHistory.find(job => job.id === voiceOverSelectedId);
   const editingVoiceOverJob = voiceOverHistory.find(job => job.id === editingVoiceOverId);
+  const voiceOverAvailableSeconds = voiceOverSourceDuration > 0
+    ? Math.max(0, voiceOverSourceDuration - Math.max(0, Number(voiceOverStartOffset) || 0)) : 0;
+  const voiceOverMaxCharacters = voiceOverSourceDuration > 0
+    ? estimateVoiceOverCharacterLimit(voiceOverAvailableSeconds, voiceOverLanguage) : 12000;
+  const voiceOverCharacterCount = countTextCharacters(voiceOverNarration);
+  const voiceOverScriptOverLimit = voiceOverSourceDuration > 0 &&
+    voiceOverCharacterCount > voiceOverMaxCharacters;
   const dubJobs = jobs.filter(job => job.kind === 'video_voice_dub');
   const dubWordCount = dubNarration.trim() ? dubNarration.trim().split(/\s+/u).filter(Boolean).length : 0;
   const dubEstimatedSpeechSeconds = estimateSpeechSeconds(dubNarration);
@@ -1687,9 +1760,20 @@ function App() {
                 <div className="video-preview"><video src={'/api/jobs/' + editingVoiceOverId + '/source'} controls playsInline preload="metadata"/></div>
                 <button type="button" onClick={cancelVoiceOverEdit}>Cancel editing</button>
               </div> : <div className="voice-over-source-grid">
-                <label className="drop"><Upload/><b>{voiceOverFile?.name || 'Upload a video for voice-over'}</b><small>MP4 / MOV / MKV / WebM · maximum 500 MB</small><input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={event => {setVoiceOverFile(event.target.files?.[0] || null);setVoiceOverSourceTransformId('');}}/></label>
+                <label className="drop"><Upload/><b>{voiceOverFile?.name || 'Upload a video for voice-over'}</b><small>MP4 / MOV / MKV / WebM · maximum 500 MB</small><input type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={event => {
+                  const selectedFile = event.target.files?.[0] || null;
+                  setVoiceOverFile(selectedFile);
+                  setVoiceOverSourceTransformId('');
+                  inspectVoiceOverSource(selectedFile ? URL.createObjectURL(selectedFile) : '', Boolean(selectedFile));
+                }}/></label>
                 <label>OR SELECT AN EXISTING TRANSFORM VIDEO
-                  <select value={voiceOverSourceTransformId} onChange={event => {setVoiceOverSourceTransformId(event.target.value);if(event.target.value)setVoiceOverFile(null);}}>
+                  <select value={voiceOverSourceTransformId} onChange={event => {
+                    const sourceId = event.target.value;
+                    setVoiceOverSourceTransformId(sourceId);
+                    if (sourceId) setVoiceOverFile(null);
+                    inspectVoiceOverSource(sourceId
+                      ? '/api/jobs/' + encodeURIComponent(sourceId) + '/preview-video' : '');
+                  }}>
                     <option value="">Choose a completed Transform export</option>
                     {availableTransformVideos.map(job => <option key={job.id} value={job.id}>{job.payload?.source_filename || 'Transform video'} · {new Date(job.created_at).toLocaleString()}</option>)}
                   </select>
@@ -1710,8 +1794,17 @@ function App() {
                 </label>
               </div>
               <label>{speechLanguageName(voiceOverLanguage).toUpperCase()} VOICE-OVER SCRIPT
-                <textarea rows="6" maxLength="12000" value={voiceOverNarration} onChange={event => setVoiceOverNarration(event.target.value)} placeholder="Enter your voice-over narration…" required/>
-                <small className="voice-over-help">{ttsEngine === 'kitten' ? 'KittenTTS supports [emotion] tags, inline vocal events such as <laugh> or <sigh>, and (((emphasis))). Speech is never silently trimmed and must fit within the remaining video duration.' : 'Pocket TTS removes punctuation, emoji and decorative symbols; they do not control emotion or intonation in this model. Speech is never silently trimmed and must fit within the remaining video duration.'}</small>
+                <textarea rows="6" value={voiceOverNarration}
+                  onChange={event => setVoiceOverNarration(truncateTextCharacters(event.target.value, voiceOverMaxCharacters))}
+                  placeholder="Enter your voice-over narration…" required/>
+                <small className="voice-over-help">
+                  {voiceOverSourceDuration > 0
+                    ? 'Remaining video time: ' + voiceOverAvailableSeconds.toFixed(1) + 's · Script: ' +
+                      voiceOverCharacterCount + ' / ' + voiceOverMaxCharacters + ' characters'
+                    : 'Select a video to calculate the narration character limit.'}
+                </small>
+                {voiceOverScriptOverLimit && <small className="voice-warning">Your current script is over the estimated limit. Shorten it or choose a longer video.</small>}
+                <small className="voice-over-help">{ttsEngine === 'kitten' ? 'KittenTTS supports [emotion] tags, inline vocal events such as <laugh> or <sigh>, and (((emphasis))). Speech is never silently trimmed; final timing is checked before export.' : 'Pocket TTS removes punctuation, emoji and decorative symbols; they do not control emotion or intonation in this model. Speech is never silently trimmed; final timing is checked before export.'}</small>
               </label>
               <label className="voice-over-checkbox">
                 <input type="checkbox" checked={voiceOverKeepOriginal} onChange={event => setVoiceOverKeepOriginal(event.target.checked)}/>
@@ -1723,7 +1816,7 @@ function App() {
               <label>VOICE-OVER VOLUME · {Math.round(voiceOverVoiceVolume * 100)}%
                 <input type="range" min="0.1" max="2" step="0.05" value={voiceOverVoiceVolume} onChange={event => setVoiceOverVoiceVolume(Number(event.target.value))}/>
               </label>
-              <button className="primary" disabled={voiceOverBusy || ['queued','running'].includes(editingVoiceOverJob?.status) || (!voiceOverFile && !voiceOverSourceTransformId && !editingVoiceOverId) || !voiceOverVoiceId || !voiceOverNarration.trim()}>
+              <button className="primary" disabled={voiceOverBusy || voiceOverScriptOverLimit || ['queued','running'].includes(editingVoiceOverJob?.status) || (!voiceOverFile && !voiceOverSourceTransformId && !editingVoiceOverId) || !voiceOverVoiceId || !voiceOverNarration.trim()}>
                 {voiceOverBusy ? 'Queueing voice-over…' : ['queued','running'].includes(editingVoiceOverJob?.status) ? 'Voice-over processing…' : editingVoiceOverJob?.status === 'failed' ? 'Retry voice-over' : editingVoiceOverId ? 'Create edited voice-over version' : 'Generate voice-over video'}
               </button>
             </form>
