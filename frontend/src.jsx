@@ -355,6 +355,7 @@ function App() {
         const selectedProfile = voiceList.find(item => item.voice_id === selectedVoiceId);
         if (selectedProfile) {
           setVoiceLanguage(profileLanguage(selectedProfile));
+          setLang(profileLanguage(selectedProfile));
           setVoicePreviewText(VOICE_TEST_SAMPLES[profileLanguage(selectedProfile)] || '');
         }
         setVoiceGenerationSettings(selectedProfile?.generation_settings || {
@@ -1199,6 +1200,7 @@ function App() {
       voiceProfileToTestRef.current = result.voice_id;
       setVoiceProfileToTest(result.voice_id);
       setVoice(result.voice_id);
+      setLang(result.language || voiceLanguage);
       setVoicePrepared(null);
       setWav(null);
       setName('');
@@ -1241,7 +1243,7 @@ function App() {
     setVoice(voiceId);
     setVoicePreviewUrl('');
     const profile = voices.find(item => item.voice_id === voiceId);
-    if (profile?.language) { setVoiceLanguage(profile.language); setVoicePreviewText(VOICE_TEST_SAMPLES[profile.language] || ''); }
+    if (profile?.language) { setVoiceLanguage(profile.language); setLang(profile.language); setVoicePreviewText(VOICE_TEST_SAMPLES[profile.language] || ''); }
     if (profile?.generation_settings) setVoiceGenerationSettings(profile.generation_settings);
   }
 
@@ -1916,7 +1918,7 @@ function App() {
             </label>
             <SearchableLanguagePicker label="VOICE PROFILE LANGUAGE" value={voiceLanguage}
               onChange={value => {
-                setVoiceLanguage(value); setVoicePreviewUrl(''); setVoiceTranscript(''); setVoicePreviewText(VOICE_TEST_SAMPLES[value] || '');
+                setVoiceLanguage(value); setLang(value); setVoicePreviewUrl(''); setVoiceTranscript(''); setVoicePreviewText(VOICE_TEST_SAMPLES[value] || '');
                 const first = voicesForLanguage(value)[0]?.voice_id || '';
                 setVoiceProfileToTest(first); voiceProfileToTestRef.current = first; setVoice(first);
               }}
