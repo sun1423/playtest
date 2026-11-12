@@ -116,9 +116,9 @@ try:
     KITTEN_TTS_THREADS = max(1, min(int(os.getenv("KITTEN_TTS_THREADS", "2")), 2))
 except ValueError:
     KITTEN_TTS_THREADS = 2
-TTS_DEFAULT_ENGINE = os.getenv("TTS_DEFAULT_ENGINE", "pocket")
+TTS_DEFAULT_ENGINE = os.getenv("TTS_DEFAULT_ENGINE", "kitten")
 if TTS_DEFAULT_ENGINE not in {"pocket", "kitten"}:
-    TTS_DEFAULT_ENGINE = "pocket"
+    TTS_DEFAULT_ENGINE = "kitten"
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "0") == "1"
@@ -282,7 +282,7 @@ def tts_runtime_ready():
     )
 
 
-def tts_engine_ready(engine: str = "pocket") -> bool:
+def tts_engine_ready(engine: str = TTS_DEFAULT_ENGINE) -> bool:
     if engine == "pocket":
         return tts_runtime_ready()
     if engine == "kitten":
@@ -295,7 +295,7 @@ def tts_engine_ready(engine: str = "pocket") -> bool:
 
 
 def synthesize_tts(
-    text: str, voice_id: str, destination: Path, engine: str = "pocket",
+    text: str, voice_id: str, destination: Path, engine: str = TTS_DEFAULT_ENGINE,
     dialogue: bool = False, settings: dict | None = None,
 ) -> float:
     if not tts_engine_ready(engine):
@@ -511,13 +511,13 @@ class TTS(BaseModel):
     text: str = Field(min_length=1, max_length=12000)
     language: str = Field(default="hi", pattern="^hi$")
     voice_id: str = Field(min_length=1, max_length=48)
-    engine: str = Field(default="pocket", pattern="^(pocket|kitten)$")
+    engine: str = Field(default=TTS_DEFAULT_ENGINE, pattern="^(pocket|kitten)$")
 
 
 class ScriptAudioRequest(BaseModel):
     text: str = Field(min_length=1, max_length=100000)
     voice_id: str = Field(min_length=1, max_length=48)
-    engine: str = Field(default="pocket", pattern="^(pocket|kitten)$")
+    engine: str = Field(default=TTS_DEFAULT_ENGINE, pattern="^(pocket|kitten)$")
 
 
 class ModelNameRequest(BaseModel):
@@ -531,7 +531,7 @@ class ModelTestRequest(BaseModel):
 class VoicePreviewRequest(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
     settings: dict | None = None
-    engine: str = Field(default="pocket", pattern="^(pocket|kitten)$")
+    engine: str = Field(default=TTS_DEFAULT_ENGINE, pattern="^(pocket|kitten)$")
 
 
 class StoryboardRequest(BaseModel):
@@ -568,8 +568,9 @@ def health():
         "tts_ready": tts_ready,
         "tts_languages": ["hi"] if (tts_ready or kitten_ready) else [],
         "tts_engine": (
-            "Pocket TTS Hindi · CPU/ONNX" if tts_ready
-            else "KittenTTS 2 · CPU/C++" if kitten_ready else "disabled"
+            "KittenTTS 2 · CPU/C++" if TTS_DEFAULT_ENGINE == "kitten" and kitten_ready
+            else "Pocket TTS Hindi · CPU/ONNX" if TTS_DEFAULT_ENGINE == "pocket" and tts_ready
+            else "disabled"
         ),
         "tts_default_engine": TTS_DEFAULT_ENGINE,
         "tts_engines": {
@@ -619,7 +620,7 @@ async def create_video_voice_dub(
     keep_source_ambience: bool = Form(False),
     video_style: str = Form("anime_512"),
     style_strength: float = Form(0.85),
-    engine: str = Form("pocket"),
+    engine: str = Form(TTS_DEFAULT_ENGINE),
 ):
     if not tts_engine_ready(engine):
         raise HTTPException(503, f"The selected speech engine ({engine}) is not enabled or installed.")
@@ -732,7 +733,7 @@ def make_voice_over_payload(
     voice_volume: float,
     source_filename: str,
     source_transform_job_id: str = "",
-    engine: str = "pocket",
+    engine: str = TTS_DEFAULT_ENGINE,
 ) -> dict:
     if not tts_engine_ready(engine):
         raise HTTPException(503, f"The selected speech engine ({engine}) is not enabled or installed.")
@@ -774,7 +775,7 @@ async def create_video_voice_over(
     keep_original_audio: bool = Form(True),
     original_volume: float = Form(0.25),
     voice_volume: float = Form(1.0),
-    engine: str = Form("pocket"),
+    engine: str = Form(TTS_DEFAULT_ENGINE),
 ):
     source_job_id = source_job_id.strip()
     if bool(file) == bool(source_job_id):
@@ -873,7 +874,7 @@ def rerun_video_voice_over(
     keep_original_audio: bool = Form(True),
     original_volume: float = Form(0.25),
     voice_volume: float = Form(1.0),
-    engine: str = Form("pocket"),
+    engine: str = Form(TTS_DEFAULT_ENGINE),
 ):
     original = getjob(job_id)
     if not original or original.get("kind") != "video_voice_over":
@@ -1984,7 +1985,7 @@ async def render_storyboard(
     narration_text: str = Form("", max_length=12000),
     narration_voice_id: str = Form(""),
     narration_language: str = Form("hi"),
-    narration_engine: str = Form("pocket"),
+    narration_engine: str = Form(TTS_DEFAULT_ENGINE),
 ):
     narration_text = narration_text.strip()
     narration_voice_id = narration_voice_id.strip()
@@ -2505,7 +2506,7 @@ def work(job):
     folder.mkdir(parents=True, exist_ok=True)
 
     if job["kind"] == "video_voice_over":
-        engine = payload.get("engine", "pocket")
+        engine = payload.get("engine", TTS_DEFAULT_ENGINE)
         if not tts_engine_ready(engine):
             raise RuntimeError(f"The selected speech engine ({engine}) is not enabled or installed.")
         voice_id = payload.get("voice_id", "")
@@ -2588,7 +2589,7 @@ def work(job):
             raise RuntimeError("Voice-over export must contain both video and mixed narration audio.")
         narration_path.unlink(missing_ok=True)
     elif job["kind"] == "video_voice_dub":
-        engine = payload.get("engine", "pocket")
+        engine = payload.get("engine", TTS_DEFAULT_ENGINE)
         if not tts_engine_ready(engine):
             raise RuntimeError(f"The selected speech engine ({engine}) is not enabled or installed.")
         if not cpu_lipsync_ready():
@@ -2800,7 +2801,7 @@ def work(job):
         narration_duration = 0.0
         narration_text = payload.get("narration_text", "").strip()
         if narration_text:
-            engine = payload.get("narration_engine", "pocket")
+            engine = payload.get("narration_engine", TTS_DEFAULT_ENGINE)
             if not tts_engine_ready(engine):
                 raise RuntimeError(f"The selected speech engine ({engine}) is not enabled or installed.")
             update(job_id, stage=f"Generating Hindi voice narration · {engine}", progress=12)
@@ -2959,7 +2960,7 @@ def work(job):
         )
         raw_output.unlink(missing_ok=True)
     elif job["kind"] == "tts":
-        engine = payload.get("engine", "pocket")
+        engine = payload.get("engine", TTS_DEFAULT_ENGINE)
         if not tts_engine_ready(engine):
             raise RuntimeError(f"The selected speech engine ({engine}) is not enabled or installed.")
         update(job_id, stage=f"Generating Hindi narration · {engine}", progress=15)
@@ -2969,7 +2970,7 @@ def work(job):
             payload.get("generation_settings") or load_voice_generation_settings(payload["voice_id"]),
         )
     elif job["kind"] == "tts_script":
-        engine = payload.get("engine", "pocket")
+        engine = payload.get("engine", TTS_DEFAULT_ENGINE)
         if not tts_engine_ready(engine):
             raise RuntimeError(f"The selected speech engine ({engine}) is not enabled or installed.")
         text = payload["text"].strip()
