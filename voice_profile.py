@@ -30,12 +30,12 @@ def _contains_urdu_script(text: str) -> bool:
     )
 
 
-def _transcribe_hindi_once(model, audio_path: str, prompt: str):
+def _transcribe_hindi_once(model, audio_path: str, prompt: str, language: str = "hi"):
     segments, info = model.transcribe(
         audio_path,
-        language="hi",
+        language=language,
         task="transcribe",
-        initial_prompt=prompt,
+        initial_prompt=prompt or None,
         beam_size=5,
         vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 300},
@@ -273,8 +273,8 @@ def prepare_voice_audio(source: Path, destination: Path) -> dict:
         raw_clip.unlink(missing_ok=True)
 
 
-def _transcribe_hindi_whisper(path: Path, model_cache: Path) -> dict:
-    """Run local CPU/int8 Whisper Hindi transcription as a reliable fallback."""
+def _transcribe_hindi_whisper(path: Path, model_cache: Path, language: str = "hi") -> dict:
+    """Run local CPU/int8 Whisper for the selected language (Hindi fallback included)."""
     global _ASR_MODEL, _ASR_MODEL_NAME
     model_name = os.getenv("VOICE_ASR_MODEL", "base").strip() or "base"
     with _ASR_LOCK:
@@ -295,13 +295,14 @@ def _transcribe_hindi_whisper(path: Path, model_cache: Path) -> dict:
             )
             _ASR_MODEL_NAME = model_name
         audio_path = str(Path(path).resolve())
+        prompt = HINDI_ASR_PROMPT if language == "hi" else ""
         transcript, info = _transcribe_hindi_once(
-            _ASR_MODEL, audio_path, HINDI_ASR_PROMPT
+            _ASR_MODEL, audio_path, prompt, language
         )
         attempts = 1
-        if _contains_urdu_script(transcript):
+        if language == "hi" and _contains_urdu_script(transcript):
             retry_text, retry_info = _transcribe_hindi_once(
-                _ASR_MODEL, audio_path, HINDI_ASR_RETRY_PROMPT
+                _ASR_MODEL, audio_path, HINDI_ASR_RETRY_PROMPT, language
             )
             attempts = 2
             if retry_text:
@@ -309,17 +310,39 @@ def _transcribe_hindi_whisper(path: Path, model_cache: Path) -> dict:
     script_warning = (
         "The recognizer still returned Urdu/Arabic characters. Review and correct "
         "the transcript in Devanagari before saving this Hindi voice profile."
-        if _contains_urdu_script(transcript) else ""
+        if language == "hi" and _contains_urdu_script(transcript) else ""
     )
     return {
         "text": transcript,
-        "language": getattr(info, "language", "hi"),
+        "language": getattr(info, "language", language),
+        "requested_language": language,
         "language_probability": round(float(getattr(info, "language_probability", 0.0)), 3),
         "model": model_name,
         "engine": "Whisper CPU/int8",
         "transcription_attempts": attempts,
         "script_warning": script_warning,
     }
+
+
+def transcribe_language(path: Path, model_cache: Path, language: str) -> dict:
+    """Transcribe a voice reference using Hindi ASR or multilingual local Whisper."""
+    from tts_languages import validate_tts_language
+
+    language = validate_tts_language("kitten", language)
+    if language == "hi":
+        result = transcribe_hindi(path, model_cache)
+        result.setdefault("requested_language", "hi")
+        return result
+    result = _transcribe_hindi_whisper(path, model_cache, language=language)
+    result["requested_language"] = language
+    detected = str(result.get("language") or language).lower()
+    probability = float(result.get("language_probability") or 0.0)
+    result["script_warning"] = (
+        f"Whisper detected {detected.upper()} rather than the selected language "
+        f"({language.upper()}). Review the transcript before saving."
+        if detected != language and probability >= 0.6 else ""
+    )
+    return result
 
 
 def _transcribe_indicconformer(path: Path, model_cache: Path) -> dict:
