@@ -29,7 +29,7 @@ function App() {
   const [transformHistory, setTransformHistory] = useState([]);
   const [voices, setVoices] = useState([]);
   const [ttsInfo, setTtsInfo] = useState({ tts_ready: false, tts_languages: [], tts_engines: {} });
-  const [ttsEngine, setTtsEngine] = useState('pocket');
+  const [ttsEngine, setTtsEngine] = useState('kitten');
   const activeTtsReady = Boolean(ttsInfo.tts_engines?.[ttsEngine]?.ready ?? (ttsEngine === 'pocket' && ttsInfo.tts_ready));
   const [lipsyncInfo, setLipsyncInfo] = useState({ ready: false });
   const [styleInfo, setStyleInfo] = useState({ ready: false, models: [] });
@@ -494,7 +494,7 @@ function App() {
     setVoiceOverFile(null);
     setVoiceOverSourceTransformId('');
     setVoiceOverNarration(options.narration || '');
-    setTtsEngine(options.engine || 'pocket');
+    setTtsEngine(options.engine || 'kitten');
     setVoiceOverVoiceId(options.voice_id || voice);
     setVoiceOverStartOffset(String(options.start_offset ?? 0));
     setVoiceOverKeepOriginal(options.keep_original_audio !== false);
@@ -1831,8 +1831,8 @@ function App() {
             <b>3 · Choose the speech engine and generate a sample</b>
             <label>SPEECH ENGINE
               <select value={ttsEngine} onChange={event => {setTtsEngine(event.target.value);setVoicePreviewUrl('');}}>
-                <option value="pocket">Pocket TTS Hindi · CPU/ONNX (existing engine)</option>
-                <option value="kitten">KittenTTS 2 · expressive CPU/C++</option>
+                <option value="kitten">KittenTTS 2 · Hindi CPU/C++ (default)</option>
+                <option value="pocket">Pocket TTS Hindi · CPU/ONNX (fallback)</option>
               </select>
             </label>
             <small className="voice-settings-note">
