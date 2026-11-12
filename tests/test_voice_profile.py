@@ -11,6 +11,7 @@ from voice_profile import (
     choose_active_audio_window,
     gain_for_levels,
     transcribe_hindi,
+    transcribe_language,
 )
 
 
@@ -43,6 +44,37 @@ class VoiceProfileTests(unittest.TestCase):
         self.assertIn("देवनागरी", fake.calls[0]["initial_prompt"])
         self.assertIn("देवनागरी", HINDI_ASR_PROMPT)
         self.assertEqual(fake.calls[0]["beam_size"], 5)
+
+    def test_multilingual_whisper_uses_the_selected_language_code(self):
+        class FakeASR:
+            def __init__(self):
+                self.calls = []
+
+            def transcribe(self, audio_path, **kwargs):
+                self.calls.append(kwargs)
+                return [SimpleNamespace(text="Bonjour, comment allez-vous ?")], SimpleNamespace(
+                    language="fr", language_probability=0.98
+                )
+
+        fake = FakeASR()
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"VOICE_ASR_MODEL": "base"}):
+                with patch("voice_profile._ASR_MODEL", fake), patch("voice_profile._ASR_MODEL_NAME", "base"):
+                    result = transcribe_language(
+                        Path(directory) / "reference.wav",
+                        Path(directory) / "models",
+                        "fr",
+                    )
+
+        self.assertEqual(result["text"], "Bonjour, comment allez-vous ?")
+        self.assertEqual(result["language"], "fr")
+        self.assertEqual(result["requested_language"], "fr")
+        self.assertEqual(fake.calls[0]["language"], "fr")
+        self.assertIsNone(fake.calls[0]["initial_prompt"])
+
+    def test_multilingual_dispatch_rejects_unsupported_language(self):
+        with self.assertRaisesRegex(ValueError, "supports these languages"):
+            transcribe_language(Path("reference.wav"), Path("models"), "xx")
 
     def test_persistent_urdu_script_is_reported_instead_of_silently_accepted(self):
         class FakeASR:
