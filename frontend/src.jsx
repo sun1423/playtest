@@ -20,6 +20,28 @@ function formatTrimTime(value) {
   return String(minutes).padStart(2, '0') + ':' + remainder;
 }
 
+function SearchableLanguagePicker({ label, value, onChange, languages, search, onSearch }) {
+  const options = Array.isArray(languages) ? languages : [];
+  const query = String(search || '').trim().toLocaleLowerCase();
+  const filtered = options.filter(item =>
+    !query || item.name.toLocaleLowerCase().includes(query) || item.code.toLowerCase().includes(query)
+  );
+  const selected = options.find(item => item.code === value);
+  const visible = selected && !filtered.some(item => item.code === value)
+    ? [selected, ...filtered] : filtered;
+  return <div className="language-picker">
+    <label>{label}
+      <input type="search" value={search || ''} onChange={event => onSearch(event.target.value)}
+        placeholder="Search languages…" aria-label={'Search ' + label.toLowerCase()}/>
+      <select value={value} onChange={event => onChange(event.target.value)} disabled={!options.length}>
+        {visible.map(item => <option key={item.code} value={item.code}>{item.name}</option>)}
+        {!visible.length && <option value="">No matching languages</option>}
+      </select>
+      {!options.length && <small className="voice-warning">No languages are currently available for the selected speech engine.</small>}
+    </label>
+  </div>;
+}
+
 function App() {
   const [authenticated, setAuthenticated] = useState(false);
   const [checking, setChecking] = useState(true);
@@ -30,7 +52,20 @@ function App() {
   const [voices, setVoices] = useState([]);
   const [ttsInfo, setTtsInfo] = useState({ tts_ready: false, tts_languages: [], tts_engines: {} });
   const [ttsEngine, setTtsEngine] = useState('kitten');
+  const [voiceLanguage, setVoiceLanguage] = useState('hi');
+  const [voiceLanguageSearch, setVoiceLanguageSearch] = useState('');
+  const [languageSearch, setLanguageSearch] = useState('');
+  const [voiceOverLanguage, setVoiceOverLanguage] = useState('hi');
+  const [voiceOverLanguageSearch, setVoiceOverLanguageSearch] = useState('');
+  const [dubLanguage, setDubLanguage] = useState('hi');
+  const [dubLanguageSearch, setDubLanguageSearch] = useState('');
+  const [storyNarrationLanguage, setStoryNarrationLanguage] = useState('hi');
+  const [storyNarrationLanguageSearch, setStoryNarrationLanguageSearch] = useState('');
+  const [storyNarrationVoiceId, setStoryNarrationVoiceId] = useState('');
   const activeTtsReady = Boolean(ttsInfo.tts_engines?.[ttsEngine]?.ready ?? (ttsEngine === 'pocket' && ttsInfo.tts_ready));
+  const speechLanguages = ttsInfo.tts_engines?.[ttsEngine]?.languages || [];
+  const voicesForLanguage = language => voices.filter(item => (item.language || 'hi') === language);
+  const speechLanguageName = language => speechLanguages.find(item => item.code === language)?.name || language.toUpperCase();
   const [lipsyncInfo, setLipsyncInfo] = useState({ ready: false });
   const [styleInfo, setStyleInfo] = useState({ ready: false, models: [] });
   const [videoStyle, setVideoStyle] = useState('anime_512');
@@ -136,6 +171,18 @@ function App() {
     const data = await response.json();
     if (!response.ok) throw Error(data.detail || 'Request failed');
     return data;
+  }
+
+  function changeSpeechEngine(engine) {
+    const available = ttsInfo.tts_engines?.[engine]?.languages || [];
+    const nextLanguage = available.some(item => item.code === 'hi') ? 'hi' : (available[0]?.code || 'hi');
+    setTtsEngine(engine);
+    setVoiceLanguage(nextLanguage); setLang(nextLanguage);
+    setVoiceOverLanguage(nextLanguage); setDubLanguage(nextLanguage); setStoryNarrationLanguage(nextLanguage);
+    setVoice(''); setVoiceProfileToTest(''); voiceProfileToTestRef.current = '';
+    setVoiceOverVoiceId(''); setDubVoiceId(''); setStoryNarrationVoiceId('');
+    setVoicePreviewUrl('');
+    setMsg('Speech engine changed. Select a supported language and matching voice profile.');
   }
 
   async function checkSession() {
@@ -388,15 +435,11 @@ function App() {
   async function run(event) {
     event.preventDefault();
     if (!activeTtsReady) {
-      setMsg('Hindi narration is not installed or enabled on Azure yet.');
+      setMsg('The selected speech engine is not installed or enabled on Azure yet.');
       return;
     }
-    if (lang !== 'hi') {
-      setMsg('The installed CPU voice engine currently supports Hindi only.');
-      return;
-    }
-    if (!voice) {
-      setMsg('Choose a saved Hindi WAV voice profile first.');
+    if (!voice || !voicesForLanguage(lang).some(item => item.voice_id === voice)) {
+      setMsg('Choose a saved voice profile matching the selected language.');
       return;
     }
     setBusy(true);
@@ -407,7 +450,7 @@ function App() {
         body: JSON.stringify({ text, language: lang, voice_id: voice, engine: ttsEngine })
       });
       setText('');
-      setMsg('Narration queued on Azure');
+      setMsg(speechLanguageName(lang) + ' narration queued on Azure');
     } catch (error) { setMsg(error.message); }
     setBusy(false);
     refresh();
@@ -421,6 +464,7 @@ function App() {
     else form.append('file', dubFile);
     form.append('voice_id', dubVoiceId);
     form.append('narration', dubNarration.trim());
+    form.append('language', dubLanguage);
     form.append('keep_source_ambience', String(dubKeepAmbience));
     form.append('video_style', videoStyle);
     form.append('style_strength', String(styleStrength));
@@ -456,6 +500,7 @@ function App() {
     }
     form.append('voice_id', voiceOverVoiceId);
     form.append('narration', voiceOverNarration.trim());
+    form.append('language', voiceOverLanguage);
     form.append('start_offset', String(Number(voiceOverStartOffset) || 0));
     form.append('keep_original_audio', String(voiceOverKeepOriginal));
     form.append('original_volume', String(voiceOverOriginalVolume));
@@ -495,6 +540,7 @@ function App() {
     setVoiceOverSourceTransformId('');
     setVoiceOverNarration(options.narration || '');
     setTtsEngine(options.engine || 'kitten');
+    setVoiceOverLanguage(options.language || 'hi');
     setVoiceOverVoiceId(options.voice_id || voice);
     setVoiceOverStartOffset(String(options.start_offset ?? 0));
     setVoiceOverKeepOriginal(options.keep_original_audio !== false);
@@ -842,8 +888,9 @@ function App() {
       setMsg('Add one image to every storyboard scene before rendering.');
       return;
     }
-    if (storyNarrationEnabled && (storyLanguage !== 'hi' || !activeTtsReady || !voice)) {
-      setMsg('Hindi voiceover requires a Hindi storyboard, an enabled CPU voice engine and a saved WAV profile.');
+    if (storyNarrationEnabled && (!activeTtsReady || !storyNarrationVoiceId ||
+        !voicesForLanguage(storyNarrationLanguage).some(item => item.voice_id === storyNarrationVoiceId))) {
+      setMsg('Choose an enabled speech engine and a saved voice profile matching the narration language.');
       return;
     }
     const form = new FormData();
@@ -860,8 +907,8 @@ function App() {
     if (musicFile) form.append('music_file', musicFile);
     if (storyNarrationEnabled) {
       form.append('narration_text', storyScenes.map(scene => scene.narration.trim()).filter(Boolean).join(' '));
-      form.append('narration_voice_id', voice);
-      form.append('narration_language', 'hi');
+      form.append('narration_voice_id', storyNarrationVoiceId);
+      form.append('narration_language', storyNarrationLanguage);
       form.append('narration_engine', ttsEngine);
     }
     setStoryRenderBusy(true);
@@ -1087,6 +1134,8 @@ function App() {
     setMsg('Inspecting WAV, selecting the cleanest 20-second segment and extracting its script…');
     const form = new FormData();
     form.append('file', wav);
+    form.append('language', voiceLanguage);
+    form.append('engine', ttsEngine);
     try {
       const result = await api('/api/voices/prepare', { method: 'POST', body: form });
       setVoicePrepared(result);
@@ -1109,6 +1158,8 @@ function App() {
     form.append('prepared_id', voicePrepared.prepared_id);
     form.append('name', name);
     form.append('transcript', voiceTranscript);
+    form.append('language', voicePrepared.language || voiceLanguage);
+    form.append('engine', voicePrepared.engine || ttsEngine);
     form.append('generation_settings', JSON.stringify(voiceGenerationSettings));
     try {
       const result = await api('/api/voices/save-prepared', { method: 'POST', body: form });
@@ -1136,7 +1187,7 @@ function App() {
       const result = await api('/api/voices/' + encodeURIComponent(voiceProfileToTest) + '/preview', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: voicePreviewText, settings: voiceGenerationSettings, engine: ttsEngine })
+        body: JSON.stringify({ text: voicePreviewText, language: voiceLanguage, settings: voiceGenerationSettings, engine: ttsEngine })
       });
       setVoicePreviewUrl(result.audio_url + '?v=' + result.preview_id);
       setVoiceGenerationSettings(result.generation_settings);
@@ -1157,6 +1208,7 @@ function App() {
     setVoice(voiceId);
     setVoicePreviewUrl('');
     const profile = voices.find(item => item.voice_id === voiceId);
+    if (profile?.language) setVoiceLanguage(profile.language);
     if (profile?.generation_settings) setVoiceGenerationSettings(profile.generation_settings);
   }
 
@@ -1169,7 +1221,7 @@ function App() {
       const result = await api('/api/tts/script', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: scriptAudioText, voice_id: voiceProfileToTest, engine: ttsEngine })
+        body: JSON.stringify({ text: scriptAudioText, language: voiceLanguage, voice_id: voiceProfileToTest, engine: ttsEngine })
       });
       setScriptAudioJobId(result.id);
       setMsg('Full script narration queued. It will be generated in parts and exported as MP3.');
@@ -1257,18 +1309,20 @@ function App() {
         {tab === 'create' && <section>
           <span>AI VIDEO WORKFLOW</span>
           <h1>Make your next story<br/><i>worth watching.</i></h1>
-          <p>Generate Hindi narration on the Azure CPU server using your saved WAV voice profile. English synthesis is not included in this engine.</p>
-          {!activeTtsReady && <p className="storyboard-note">Hindi voice engine is disabled until the ONNX model is installed and explicitly enabled by the administrator.</p>}
+          <p>Generate narration with the selected local CPU speech engine and a saved language-matched WAV voice profile.</p>
+          {!activeTtsReady && <p className="storyboard-note">The selected speech engine is not installed or enabled on Azure.</p>}
           <form onSubmit={run}>
-            <label>HINDI NARRATION TEXT</label>
-            <textarea value={text} onChange={event => setText(event.target.value)} rows="7" placeholder="अपनी हिंदी स्क्रिप्ट यहाँ लिखें…" required/>
+            <label>{speechLanguageName(lang).toUpperCase()} NARRATION TEXT</label>
+            <textarea value={text} onChange={event => setText(event.target.value)} rows="7" placeholder="Enter your narration…" required/>
             <div className="row">
-              <label>LANGUAGE<select value={lang} onChange={event => setLang(event.target.value)}><option value="hi">Hindi</option></select></label>
-              <label>VOICE PROFILE<select required value={voice} onChange={event => setVoice(event.target.value)}><option value="" disabled>Select saved WAV profile</option>{voices.map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}</select></label>
+              <SearchableLanguagePicker label="LANGUAGE" value={lang}
+                onChange={value => {setLang(value);setVoice(voicesForLanguage(value)[0]?.voice_id || '');}}
+                languages={speechLanguages} search={languageSearch} onSearch={setLanguageSearch}/>
+              <label>VOICE PROFILE<select required value={voice} onChange={event => setVoice(event.target.value)}><option value="" disabled>Select matching WAV profile</option>{voicesForLanguage(lang).map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}</select></label>
             </div>
-            <button className="primary" disabled={busy || !text.trim() || !voice || !activeTtsReady}><Play size={16}/> Generate Hindi narration</button>
+            <button className="primary" disabled={busy || !text.trim() || !voice || !activeTtsReady}><Play size={16}/> Generate {speechLanguageName(lang)} narration</button>
           </form>
-          <div className="note">● Native ONNX runtime　● CPU-only · two threads　● Custom WAV voice conditioning</div>
+          <div className="note">● Local CPU speech engine　● Saved language-matched voice profile</div>
         </section>}
         {tab === 'writer' && <section className="script-writer-workspace">
           <span>PRIVATE LOCAL SCRIPT WRITER</span><h1>Start with an idea.</h1>
@@ -1354,26 +1408,30 @@ function App() {
               <div className="tts-option">
                 <label className="tts-option-check">
                   <input type="checkbox" checked={storyNarrationEnabled}
-                    disabled={storyLanguage !== 'hi' || !activeTtsReady || voices.length === 0}
+                    disabled={!activeTtsReady || voices.length === 0}
                     onChange={event => setStoryNarrationEnabled(event.target.checked)}/>
-                  Add Hindi voiceover from the scene narration
+                  Add voiceover from the scene narration
                 </label>
-                {storyNarrationEnabled && <label>VOICE PROFILE
-                  <select required value={voice} onChange={event => setVoice(event.target.value)}>
-                    <option value="" disabled>Select saved WAV profile</option>
-                    {voices.map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}
-                  </select>
-                </label>}
-                <small>{storyLanguage !== 'hi' ? 'Switch storyboard language to Hindi to enable voiceover.' :
-                  !activeTtsReady ? 'Hindi CPU voice engine is not installed or enabled.' :
-                  voices.length === 0 ? 'Save an authorised Hindi WAV profile in Voice Studio first.' :
-                  'Uses each scene’s editable narration. The engine is local, Hindi-only and CPU-based.'}</small>
+                {storyNarrationEnabled && <>
+                  <SearchableLanguagePicker label="VOICEOVER LANGUAGE" value={storyNarrationLanguage}
+                    onChange={value => {setStoryNarrationLanguage(value);setStoryNarrationVoiceId(voicesForLanguage(value)[0]?.voice_id || '');}}
+                    languages={speechLanguages} search={storyNarrationLanguageSearch} onSearch={setStoryNarrationLanguageSearch}/>
+                  <label>VOICE PROFILE
+                    <select required value={storyNarrationVoiceId} onChange={event => setStoryNarrationVoiceId(event.target.value)}>
+                      <option value="" disabled>Select matching WAV profile</option>
+                      {voicesForLanguage(storyNarrationLanguage).map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}
+                    </select>
+                  </label>
+                </>}
+                <small>{!activeTtsReady ? 'Selected speech engine is not installed or enabled.' :
+                  voices.length === 0 ? 'Save an authorised WAV voice profile in Voice Studio first.' :
+                  'Choose a language supported by the selected engine. Uses each scene’s editable narration.'}</small>
               </div>
               <label>BACKGROUND MUSIC (OPTIONAL)<small> {musicFile?.name || 'No music selected; export will be silent'}</small><input type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,audio/*" onChange={event => setMusicFile(event.target.files?.[0] || null)}/></label>
               {musicFile && <label>MUSIC VOLUME · {Math.round(musicVolume*100)}%<input type="range" min="0" max="1.5" step="0.05" value={musicVolume} onChange={event => setMusicVolume(Number(event.target.value))}/></label>}
               <label>PROJECT TITLE (OPTIONAL)<input value={overlayText} maxLength={160} onChange={event => setOverlayText(event.target.value)}/></label>
               <label>TITLE POSITION<select value={overlayPosition} onChange={event => setOverlayPosition(event.target.value)}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select></label>
-              <button className="primary" disabled={storyRenderBusy || storyScenes.some(scene => !scene.imageFile) || (storyNarrationEnabled && (!activeTtsReady || storyLanguage !== 'hi' || !voice))}>{storyRenderBusy ? 'Queueing storyboard video…' : 'Render storyboard video'}</button>
+              <button className="primary" disabled={storyRenderBusy || storyScenes.some(scene => !scene.imageFile) || (storyNarrationEnabled && (!activeTtsReady || !storyNarrationVoiceId || !voicesForLanguage(storyNarrationLanguage).some(item => item.voice_id === storyNarrationVoiceId)))}>{storyRenderBusy ? 'Queueing storyboard video…' : 'Render storyboard video'}</button>
             </form>
             <p className="storyboard-note">Images are supplied by you. FRAME / AI adds gentle camera motion, scene transitions and assembles the video. AI image generation is not enabled yet.</p>
           </>}
@@ -1381,7 +1439,7 @@ function App() {
         {tab === 'ai-video' && <section className="dub-workspace">
           <span>CPU VIDEO-TO-VIDEO · VOICE REPLACEMENT</span>
           <h1>Keep the performance.<br/><i>Make it speak your voice.</i></h1>
-          <p>Upload a real video, select your saved Hindi voice profile, enter the dialogue and choose an AI visual style. Studio synthesises your speech locally, lip-syncs the source performance, then stylises every frame while preserving the original scene and motion.</p>
+          <p>Upload a real video, select a language-matched saved voice profile, enter the dialogue and choose an AI visual style. Studio synthesises your speech locally, lip-syncs the source performance, then stylises every frame while preserving the original scene and motion.</p>
           <div className="dub-status">
             <b>{lipsyncInfo.ready && activeTtsReady ? 'CPU voice + lip-sync ready' : 'Setup required before rendering'}</b>
             <small>Speech: {ttsInfo.tts_engines?.[ttsEngine]?.name || 'Pocket TTS Hindi'} · your saved WAV profile</small>
@@ -1436,16 +1494,19 @@ function App() {
               </small>
             </>}
             {!styleInfo.ready && <small className="voice-warning">AI style models are not installed yet. Run scripts/install_video_style_models.py on Azure.</small>}
-            <label>SAVED HINDI VOICE PROFILE
+            <SearchableLanguagePicker label="DIALOGUE LANGUAGE" value={dubLanguage}
+              onChange={value => {setDubLanguage(value);setDubVoiceId(voicesForLanguage(value)[0]?.voice_id || '');}}
+              languages={speechLanguages} search={dubLanguageSearch} onSearch={setDubLanguageSearch}/>
+            <label>SAVED VOICE PROFILE
               <select required value={dubVoiceId} onChange={event => setDubVoiceId(event.target.value)}>
                 <option value="">Choose your saved WAV voice</option>
-                {voices.map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}
+                {voicesForLanguage(dubLanguage).map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}
               </select>
             </label>
             {!voices.length && <button type="button" className="secondary" onClick={() => setTab('voice')}>Open Voice Studio to save a WAV profile</button>}
-            <label>NEW HINDI DIALOGUE
+            <label>NEW {speechLanguageName(dubLanguage).toUpperCase()} DIALOGUE
               <textarea rows="6" maxLength="12000" value={dubNarration} onChange={event => setDubNarration(event.target.value)}
-                placeholder="Enter the exact Hindi words your on-screen speaker should say. Use plain Hindi words for the cleanest speech…" required/>
+                placeholder="Enter the exact dialogue your on-screen speaker should say…" required/>
             </label>
             <small className="dub-prosody-note">{ttsEngine === 'kitten' ? 'Kitten recognises emotion tags ([angry], [joyful], [sad], etc.), vocal events such as <laugh> and <sigh>, and (((emphasis))). Put emotion tags at the beginning of each utterance; expression is beta, not guaranteed.' : 'Pocket TTS was trained without meaningful punctuation coverage. Punctuation and markup are removed before synthesis and do not reliably control pauses, intonation or emotion.'}</small>
             <div className={'dub-length-meter' + (dubSpeechOverLimit ? ' over-limit' : '')}>
@@ -1564,7 +1625,7 @@ function App() {
           <p>Every export is saved in this workspace. Watch it here, download it, or edit the settings and create another version without losing the previous one.</p>
 
           <section className="voice-over-panel">
-            <div className="voice-over-heading"><div><span>VOICE-OVER · NO LIP-SYNC</span><h2>Add narration to a video.</h2><p>Add your saved Hindi voice to any uploaded video or completed Transform export. The video frames, face and mouth movement are not changed.</p></div></div>
+            <div className="voice-over-heading"><div><span>VOICE-OVER · NO LIP-SYNC</span><h2>Add narration to a video.</h2><p>Add a saved voice in the selected language to any uploaded video or completed Transform export. The video frames, face and mouth movement are not changed.</p></div></div>
             <form className="voice-over-form" onSubmit={queueVoiceOver}>
               {editingVoiceOverJob?.status === 'failed' && <div className="voice-over-retry-warning"><b>Previous attempt failed — your inputs are preserved.</b><small>{editingVoiceOverJob.error || 'The worker could not complete this voice-over.'} Correct the script or audio settings below, then retry without uploading the video again.</small></div>}
               {editingVoiceOverId ? <div className="transform-edit-banner voice-over-edit-banner">
@@ -1582,18 +1643,21 @@ function App() {
                 </label>
               </div>}
               <div className="voice-over-fields">
-                <label>HINDI VOICE PROFILE
+                <SearchableLanguagePicker label="VOICE-OVER LANGUAGE" value={voiceOverLanguage}
+                  onChange={value => {setVoiceOverLanguage(value);setVoiceOverVoiceId(voicesForLanguage(value)[0]?.voice_id || '');}}
+                  languages={speechLanguages} search={voiceOverLanguageSearch} onSearch={setVoiceOverLanguageSearch}/>
+                <label>VOICE PROFILE
                   <select required value={voiceOverVoiceId} onChange={event => setVoiceOverVoiceId(event.target.value)}>
                     <option value="" disabled>Select saved WAV profile</option>
-                    {voices.map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}
+                    {voicesForLanguage(voiceOverLanguage).map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}
                   </select>
                 </label>
                 <label>START VOICE AT (SECONDS)
                   <input type="number" min="0" max="14400" step="0.1" value={voiceOverStartOffset} onChange={event => setVoiceOverStartOffset(event.target.value)}/>
                 </label>
               </div>
-              <label>HINDI VOICE-OVER SCRIPT
-                <textarea rows="6" maxLength="12000" value={voiceOverNarration} onChange={event => setVoiceOverNarration(event.target.value)} placeholder="यहाँ अपनी हिंदी narration लिखें…" required/>
+              <label>{speechLanguageName(voiceOverLanguage).toUpperCase()} VOICE-OVER SCRIPT
+                <textarea rows="6" maxLength="12000" value={voiceOverNarration} onChange={event => setVoiceOverNarration(event.target.value)} placeholder="Enter your voice-over narration…" required/>
                 <small className="voice-over-help">{ttsEngine === 'kitten' ? 'KittenTTS supports [emotion] tags, inline vocal events such as <laugh> or <sigh>, and (((emphasis))). Speech is never silently trimmed and must fit within the remaining video duration.' : 'Pocket TTS removes punctuation, emoji and decorative symbols; they do not control emotion or intonation in this model. Speech is never silently trimmed and must fit within the remaining video duration.'}</small>
               </label>
               <label className="voice-over-checkbox">
@@ -1789,10 +1853,24 @@ function App() {
         </section>}
         {tab === 'voice' && <section className="voice-workspace">
           <span>VOICE PROFILE WORKFLOW</span><h1>Prepare, review and reuse a voice.</h1>
-          <p>Upload a WAV from a speaker who has authorised voice synthesis. Studio inspects it, selects up to 20 seconds with the most active audio, converts only the working copy to Pocket TTS format, and transcribes it locally in Hindi. Listen to the clip and review the script before saving.</p>
+          <p>Upload a WAV from a speaker who has authorised voice synthesis. Studio selects the cleanest 20-second segment and transcribes it using the selected language’s local recognizer.</p>
 
           <article className="voice-step">
-            <b>1 · Upload and prepare the recording</b>
+            <b>1 · Select language and prepare the recording</b>
+            <label>SPEECH ENGINE
+              <select value={ttsEngine} onChange={event => changeSpeechEngine(event.target.value)}>
+                <option value="kitten">KittenTTS 2 · Multilingual CPU/C++ (default)</option>
+                <option value="pocket">Pocket TTS · Hindi only · CPU/ONNX</option>
+              </select>
+            </label>
+            <SearchableLanguagePicker label="VOICE PROFILE LANGUAGE" value={voiceLanguage}
+              onChange={value => {
+                setVoiceLanguage(value); setVoicePreviewUrl(''); setVoiceTranscript('');
+                const first = voicesForLanguage(value)[0]?.voice_id || '';
+                setVoiceProfileToTest(first); voiceProfileToTestRef.current = first; setVoice(first);
+              }}
+              languages={speechLanguages} search={voiceLanguageSearch} onSearch={setVoiceLanguageSearch}/>
+            <small className="voice-settings-note">Only languages supported by the selected speech engine are shown. Automatic transcription uses the matching local language recognizer.</small>
             <form onSubmit={prepareVoice}>
               <label className="drop"><Mic2/><b>{wav?.name || 'Choose original WAV recording'}</b><small>WAV only · up to 30 MB · original file is never modified</small>
                 <input type="file" accept=".wav,audio/wav" onChange={event => { setWav(event.target.files?.[0] || null); setVoicePrepared(null); setVoiceTranscript(''); }}/>
@@ -1815,7 +1893,7 @@ function App() {
             </div>
             <audio className="voice-audio" controls preload="metadata" src={voicePrepared.audio_url}/>
             {voicePrepared.transcription_info?.script_warning && <small className="voice-warning">{voicePrepared.transcription_info.script_warning}</small>}
-            <label>EXTRACTED HINDI SCRIPT · EDIT BEFORE SAVING
+            <label>EXTRACTED {(voicePrepared.language_name || speechLanguageName(voicePrepared.language || voiceLanguage)).toUpperCase()} SCRIPT · EDIT BEFORE SAVING
               <textarea rows="5" maxLength="12000" value={voiceTranscript}
                 onChange={event => setVoiceTranscript(event.target.value)}
                 placeholder="The transcript appears here. Correct it, or type the exact words spoken in the reference clip."/>
@@ -1828,13 +1906,7 @@ function App() {
           </article>}
 
           <article className="voice-step">
-            <b>3 · Choose the speech engine and generate a sample</b>
-            <label>SPEECH ENGINE
-              <select value={ttsEngine} onChange={event => {setTtsEngine(event.target.value);setVoicePreviewUrl('');}}>
-                <option value="kitten">KittenTTS 2 · Hindi CPU/C++ (default)</option>
-                <option value="pocket">Pocket TTS Hindi · CPU/ONNX (fallback)</option>
-              </select>
-            </label>
+            <b>3 · Test the saved voice profile</b>
             <small className="voice-settings-note">
               {ttsEngine === 'kitten'
                 ? 'Kitten recognises [angry], [joyful], [sad], [excited], inline vocal events such as <laugh> or <sigh>, and (((emphasis))). Put one emotion tag at the beginning of each utterance. Emotion control is beta.'
@@ -1848,10 +1920,10 @@ function App() {
             {voices.length === 0 ? <p>Save a prepared voice profile first.</p> : <>
               <label>VOICE PROFILE
                 <select value={voiceProfileToTest} onChange={event => selectVoiceProfile(event.target.value)}>
-                  {voices.map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}
+                  {voicesForLanguage(voiceLanguage).map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}
                 </select>
               </label>
-              <label>TEST TEXT · ENTER ANY HINDI TEXT
+              <label>TEST TEXT · ENTER {speechLanguageName(voiceLanguage).toUpperCase()} TEXT
                 <textarea rows="4" maxLength="2000" value={voicePreviewText}
                   onChange={event => setVoicePreviewText(event.target.value)}
                   placeholder="Enter the text you want this voice profile to speak…"/>
@@ -1891,17 +1963,17 @@ function App() {
 
           <article className="voice-step script-audio-step">
             <b>4 · Script to Audio · full-length MP3</b>
-            <p>Paste a complete Hindi script, choose your saved voice profile, and generate one continuous MP3 without creating a video. Long scripts are synthesised in smaller CPU-safe parts and joined automatically.</p>
+            <p>Paste a complete script in the selected language, choose its saved voice profile, and generate one continuous MP3 without creating a video. Long scripts are synthesised in CPU-safe parts and joined automatically.</p>
             <form onSubmit={generateScriptAudio}>
               <label>FULL SCRIPT
                 <textarea rows="9" maxLength="100000" value={scriptAudioText}
                   onChange={event => setScriptAudioText(event.target.value)}
                   placeholder="Paste your complete Hindi script here…"/>
               </label>
-              <small>{scriptAudioText.length.toLocaleString()} / 100,000 characters · Hindi voice engine</small>
+              <small>{scriptAudioText.length.toLocaleString()} / 100,000 characters · {speechLanguageName(voiceLanguage)} · {ttsInfo.tts_engines?.[ttsEngine]?.name || ttsEngine}</small>
               <label>VOICE PROFILE
                 <select value={voiceProfileToTest} onChange={event => selectVoiceProfile(event.target.value)}>
-                  {voices.map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}
+                  {voicesForLanguage(voiceLanguage).map(item => <option key={item.voice_id} value={item.voice_id}>{item.voice_id}</option>)}
                 </select>
               </label>
               <button type="submit" className="primary"
@@ -1929,7 +2001,7 @@ function App() {
           {voices.length === 0 ? <p>No saved profiles yet.</p> : voices.map(item =>
             <article key={item.voice_id} className="media-row voice-profile-row">
               <div><b>🎙 {item.voice_id}</b>
-                <small>{item.reference?.duration_seconds ? item.reference.duration_seconds + 's reference · ' : ''}{item.source_file_available ? 'Original preserved · ' : ''}{item.conditioning_initialized ? 'Conditioning initialised' : 'Ready for first sample'}</small>
+                <small>{item.language_name || speechLanguageName(item.language || 'hi')} · {item.profile_engine || 'Existing profile'} · {item.reference?.duration_seconds ? item.reference.duration_seconds + 's reference · ' : ''}{item.source_file_available ? 'Original preserved · ' : ''}{item.conditioning_initialized ? 'Conditioning initialised' : 'Ready for first sample'}</small>
                 {item.transcript && <small>{item.transcript}</small>}
               </div>
               <button className="danger" onClick={() => deleteMedia('/api/voices/' + encodeURIComponent(item.voice_id), 'Voice profile ' + item.voice_id)}>
