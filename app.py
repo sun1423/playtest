@@ -2412,8 +2412,11 @@ def voices():
             or (VOICES / ".cache" / f"{path.stem}.kv").is_file()
             or (KITTEN_TTS_PROFILE_ROOT / ".profiles" / f"{path.stem}.json").is_file()
         )
+        saved_language = str(metadata.get("language") or "hi").strip().lower()
         metadata.update({
             "voice_id": path.stem,
+            "language": saved_language,
+            "language_name": metadata.get("language_name") or language_name(saved_language),
             "transcript": metadata.get("transcript", ""),
             "reference": metadata.get("reference", {}),
             "generation_settings": load_voice_generation_settings(path.stem),
@@ -2563,7 +2566,7 @@ def work(job):
         if not tts_engine_ready(engine):
             raise RuntimeError(f"The selected speech engine ({engine}) is not enabled or installed.")
         voice_id = payload.get("voice_id", "")
-        update(job_id, stage=f"Generating Hindi voice-over · {engine}", progress=8)
+        update(job_id, stage=f"Generating {language_name(payload.get('language', 'hi'))} voice-over · {engine}", progress=8)
         narration_path = folder / "voice_over.wav"
         narration_duration = synthesize_tts(
             payload["narration"], voice_id, narration_path, engine, True,
@@ -2649,7 +2652,7 @@ def work(job):
         if not cpu_lipsync_ready():
             raise RuntimeError("CPU ONNX lip-sync models or dependencies are not installed.")
         voice_id = payload.get("voice_id", "")
-        update(job_id, stage=f"Generating Hindi speech · {engine}", progress=8)
+        update(job_id, stage=f"Generating {language_name(payload.get('language', 'hi'))} speech · {engine}", progress=8)
         narration_path = folder / "narration.wav"
         synthesize_tts(
             payload["narration"], voice_id, narration_path, engine, True,
@@ -2859,7 +2862,7 @@ def work(job):
             engine = payload.get("narration_engine", TTS_DEFAULT_ENGINE)
             if not tts_engine_ready(engine):
                 raise RuntimeError(f"The selected speech engine ({engine}) is not enabled or installed.")
-            update(job_id, stage=f"Generating Hindi voice narration · {engine}", progress=12)
+            update(job_id, stage=f"Generating {language_name(payload.get('narration_language', 'hi'))} voice narration · {engine}", progress=12)
             narration_path = folder / "narration.wav"
             narration_duration = synthesize_tts(
                 narration_text, payload.get("narration_voice_id", ""),
@@ -3019,7 +3022,7 @@ def work(job):
         engine = payload.get("engine", TTS_DEFAULT_ENGINE)
         if not tts_engine_ready(engine):
             raise RuntimeError(f"The selected speech engine ({engine}) is not enabled or installed.")
-        update(job_id, stage=f"Generating Hindi narration · {engine}", progress=15)
+        update(job_id, stage=f"Generating {language_name(payload.get('language', 'hi'))} narration · {engine}", progress=15)
         destination = folder / "narration.wav"
         synthesize_tts(
             payload["text"], payload["voice_id"], destination, engine, False,
