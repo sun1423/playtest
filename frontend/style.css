@@ -77,3 +77,5 @@
 .voice-over-checkbox{display:flex;align-items:flex-start;gap:10px;color:#d5d7dc!important}.voice-over-checkbox input{width:17px;height:17px;margin:2px 0 0;accent-color:#d9ed7b}.voice-over-checkbox span{display:grid;gap:4px}.voice-over-checkbox small{color:#a7a9af;line-height:1.5}
 .voice-over-history{display:grid;gap:12px;padding-top:18px;border-top:1px solid #34363b}.voice-over-history h3{margin:0 0 5px;font-size:18px}.voice-over-history>label{display:grid;gap:7px}.voice-over-result{margin:0}.voice-over-empty{color:#a7a9af;font-size:12px}.voice-over-edit-banner{margin:0}
 @media(max-width:640px){.voice-over-panel{padding:14px}.voice-over-source-grid,.voice-over-fields{grid-template-columns:1fr}.voice-over-panel .transform-results-heading{align-items:flex-start;flex-direction:column}}
+
+.language-picker{display:grid;gap:6px;min-width:0}.language-picker label{display:grid;gap:7px;min-width:0}.language-picker input[type=search],.language-picker select{width:100%;min-width:0}.voice-over-fields .language-picker{align-self:start}
