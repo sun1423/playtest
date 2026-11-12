@@ -345,6 +345,7 @@ function App() {
         api('/api/lipsync/status'), api('/api/video-style/status')
       ]);
       setVoices(voiceList);
+      const profileLanguage = item => item.language || 'hi';
       const currentVoiceId = voiceProfileToTestRef.current;
       const selectedVoiceId = voiceList.some(item => item.voice_id === currentVoiceId)
         ? currentVoiceId : (voiceList[0]?.voice_id || '');
@@ -352,11 +353,16 @@ function App() {
         voiceProfileToTestRef.current = selectedVoiceId;
         setVoiceProfileToTest(selectedVoiceId);
         const selectedProfile = voiceList.find(item => item.voice_id === selectedVoiceId);
+        if (selectedProfile) {
+          setVoiceLanguage(profileLanguage(selectedProfile));
+          setVoicePreviewText(VOICE_TEST_SAMPLES[profileLanguage(selectedProfile)] || '');
+        }
         setVoiceGenerationSettings(selectedProfile?.generation_settings || {
           temperature: 0.3, flow_steps: 1, eos_threshold: -2.0, seed: 1
         });
       }
-      setVoice(current => voiceList.some(item => item.voice_id === current) ? current : selectedVoiceId);
+      setVoice(current => voiceList.some(item => item.voice_id === current && profileLanguage(item) === lang)
+        ? current : (voiceList.find(item => profileLanguage(item) === lang)?.voice_id || ''));
       setSavedProjects(savedList);
       setTtsInfo(health);
       setLipsyncInfo(lipStatus);
@@ -366,8 +372,12 @@ function App() {
           ? current
           : (styleStatus.models.find(item => item.id === 'anime_512' && item.ready)?.id
             || styleStatus.models.find(item => item.ready)?.id || 'none'));
-      setDubVoiceId(current => voiceList.some(item => item.voice_id === current) ? current : selectedVoiceId);
-      setVoiceOverVoiceId(current => voiceList.some(item => item.voice_id === current) ? current : selectedVoiceId);
+      setDubVoiceId(current => voiceList.some(item => item.voice_id === current && profileLanguage(item) === dubLanguage)
+        ? current : (voiceList.find(item => profileLanguage(item) === dubLanguage)?.voice_id || ''));
+      setVoiceOverVoiceId(current => voiceList.some(item => item.voice_id === current && profileLanguage(item) === voiceOverLanguage)
+        ? current : (voiceList.find(item => profileLanguage(item) === voiceOverLanguage)?.voice_id || ''));
+      setStoryNarrationVoiceId(current => voiceList.some(item => item.voice_id === current && profileLanguage(item) === storyNarrationLanguage)
+        ? current : (voiceList.find(item => profileLanguage(item) === storyNarrationLanguage)?.voice_id || ''));
       setStatus('Azure connected');
     } catch (error) {
       setStatus(error.message === 'Authentication required' ? 'Session expired' : 'Server offline');
